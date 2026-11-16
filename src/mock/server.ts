@@ -142,6 +142,12 @@ export type MockState = {
   refreshes: number;
   /** The next this-many `wallet/get_wallet_page` calls fail (a 503 with no body). */
   walletFailures: number;
+  /** The next `account/login` is refused with this business code and message (then cleared). */
+  loginRefusal: { code: number; message: string } | null;
+  /** The next this-many `account/get_account` calls answer a business error (50300). */
+  accountFailures: number;
+  /** Milliseconds `account/login` takes to answer. */
+  loginDelayMs: number;
 };
 
 export type MockServer = {
@@ -479,6 +485,9 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
   const state: MockState = {
     sessions: [],
     logins: [],
+    loginRefusal: null,
+    accountFailures: 0,
+    loginDelayMs: 0,
     uploads: new Map(),
     characters: new Map(),
     drafts: new Map(),
@@ -780,8 +789,15 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
   });
 
   const routes: Record<string, (body: Json, user: Session | null) => unknown> = {
-    'account/login': (body) => {
+    'account/login': async (body) => {
       state.logins.push(body);
+      if (state.loginDelayMs)
+        await new Promise((resolve) => setTimeout(resolve, state.loginDelayMs));
+      const refusal = state.loginRefusal;
+      if (refusal) {
+        state.loginRefusal = null;
+        return fail(refusal.code, refusal.message);
+      }
       const token = String(body.firebase_token ?? '');
       if (body.login_type !== 3 || token.split('.').length !== 3) return fail(400, 'bad login');
       const created: Session = {
@@ -804,8 +820,13 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
         },
       });
     },
-    'account/get_account': (_body, user) =>
-      ok({ data: { user_id: BigInt(USER_ID), is_anonymous: false, ...(user ? {} : {}) } }),
+    'account/get_account': (_body, user) => {
+      if (state.accountFailures > 0) {
+        state.accountFailures -= 1;
+        return fail(50300, 'system busy');
+      }
+      return ok({ data: { user_id: BigInt(USER_ID), is_anonymous: false, ...(user ? {} : {}) } });
+    },
     'account/refresh_auth_token': (body) => {
       const found = state.sessions.find(
         (item) => item.refreshToken === body.refresh_token && !item.revoked,
@@ -1230,7 +1251,7 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
         )
           return respond(response, 401, fail(40103, 'identity mismatch'));
       }
-      return respond(response, 200, handler(body, user));
+      return respond(response, 200, await handler(body, user));
     } catch (error) {
       return respond(
         response,

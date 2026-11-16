@@ -64,10 +64,7 @@ beforeAll(async () => {
     env: { name: 'test', apiOrigin: mock.origin, webOrigin: mock.origin, lane: '', custom: true },
     idfv: IDFV,
   });
-  const credential = await exchangeFirebaseToken(gateway, mock.idToken(), IDFV, {
-    email: 'mock@example.com',
-    displayName: '',
-  });
+  const credential = await exchangeFirebaseToken(gateway, mock.idToken(), IDFV);
   connection = new ImConnection({
     businessTypes: [BusinessType.conversationStream, BusinessType.conversationAside],
     purpose: ConversationPurpose.normal,

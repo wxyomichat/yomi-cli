@@ -46,7 +46,7 @@ pnpm verify                # 格式检查 + 类型检查 + 单元测试 + 构建
   ```bash
   pnpm mock                  # 打印 mock 地址和要设的环境变量
   # 另开终端，按提示 export YOMI_API_ORIGIN / YOMI_WEB_ORIGIN / YOMI_CONFIG_DIR / YOMI_CREDENTIAL_STORE
-  node dist/cli.js login     # 浏览器里会打开 mock 授权页，点「授权」
+  node dist/cli.js login     # 浏览器里会打开 mock 授权页，点「授权」，再回到终端输入 y 确认账号
   node dist/cli.js preview -f examples/character.yaml
   node dist/cli.js image --options   # mock 也回答生图、视频、人设头像接口，花的是 mock 账号里的钻石
   ```
@@ -57,7 +57,7 @@ pnpm verify                # 格式检查 + 类型检查 + 单元测试 + 构建
 
 | 命令                                  | 说明                                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `login [--no-browser] [--timeout 秒]` | 网页授权登录。终端和网页显示同一个确认码，一致再点「授权」。CLI 建立自己的会话，不影响 App 和网页的登录                                                                                                                                                                                                                     |
+| `login [--no-browser] [--timeout 秒]` | 网页授权登录。终端和网页显示同一个确认码，一致再点「授权」，然后在终端输入 y 确认显示的账号（非交互运行直接采用第一次回调）。CLI 建立自己的会话，不影响 App 和网页的登录                                                                                                                                                    |
 | `logout`                              | 撤销服务端会话并删除本机凭证                                                                                                                                                                                                                                                                                                |
 | `whoami`                              | 当前账号、邮箱、钻石、凭证存放位置                                                                                                                                                                                                                                                                                          |
 | `init [文件] [--force]`               | 写角色文件模板                                                                                                                                                                                                                                                                                                              |
@@ -125,7 +125,7 @@ YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)。规则�
 
 ## 登录与安全
 
-见 [docs/auth-protocol.md](docs/auth-protocol.md)（与网页授权页的约定）和 [docs/security.md](docs/security.md)（回环回调、一次性 state、凭证不进 URL 和日志、超时、存储）。以后若服务端提供一次性授权码，协议可以升级为不经手 Firebase token 的 v2（未实施）。
+见 [docs/auth-protocol.md](docs/auth-protocol.md)（与网页授权页的约定）和 [docs/security.md](docs/security.md)（回环回调、每次登录独立的 state、确认账号、凭证不进 URL 和日志、超时、存储）。以后若服务端提供一次性授权码，协议可以升级为不经手 Firebase token 的 v2（未实施）。
 
 授权页 `/cli/auth` 由网页端提供。所连环境的网页还没有这个页面时，可以用 `YOMI_WEB_ORIGIN` 指向一个带有它的本地网页构建：`YOMI_WEB_ORIGIN=http://127.0.0.1:<端口> yomi login`。
 

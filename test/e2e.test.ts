@@ -1,10 +1,12 @@
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { main } from '../src/cli.js';
+import { FileStore } from '../src/core/credentials.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { memoryIo } from './helpers/io.js';
 import { solidPng } from './helpers/png.js';
@@ -106,7 +108,12 @@ describe('yomi against the mock gateway', () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('已授权 Yomi CLI');
     expect(await pending).toBe(0);
-    expect(terminal.out).toContain('✓ 已登录账号 7300000000000000101');
+    // The account as the server names it, never as the page posted it.
+    expect(terminal.out).toContain(
+      '✓ 已登录账号「Mock Creator」（user_id 7300000000000000101，mock@example.com）',
+    );
+    // Nobody could confirm it: said so, with what to do if it was not theirs.
+    expect(terminal.err).toContain('没有人确认这个账号（非交互运行）');
     // The CLI's own session never signs the person out elsewhere.
     expect(mock.state.logins[0]).toMatchObject({
       login_type: 3,
@@ -283,5 +290,272 @@ describe('yomi against the mock gateway', () => {
     expect(mock.state.sessions.every((session) => session.revoked)).toBe(true);
     const after = await run(['whoami']);
     expect(after.code).toBe(1);
+  });
+
+  it('asks whose account it is; a forged callback turned down is revoked and the real one still lands', async () => {
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(/http:\/\/127\.0\.0\.1:\d+\/cli\/auth#\S+/);
+    const params = new URLSearchParams(new URL(url).hash.slice(1));
+    // Someone who learned the state posts first, with a token of their own.
+    const forged = await fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
+      body: new URLSearchParams({
+        state: params.get('state') ?? '',
+        id_token: mock.idToken(),
+        email: 'victim@example.com',
+      }).toString(),
+    });
+    expect(forged.status).toBe(200);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？/);
+    // What the forged post claimed is not shown: only what the server says.
+    expect(terminal.out).not.toContain('victim@example.com');
+    const sessions = mock.state.sessions.length;
+    terminal.stdin.write('n\n');
+    await terminal.waitFor(/继续等待网页授权（Ctrl\+C 取消）/);
+    expect(mock.state.sessions).toHaveLength(sessions);
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(true);
+    // The port is still held: the person's own click reaches the CLI.
+    const response = await authorizeLikeTheBrowser(url);
+    expect(response.status).toBe(200);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？[\s\S]*以这个账号登录 Yomi CLI？/);
+    terminal.stdin.write('y\n');
+    expect(await pending).toBe(0);
+    expect(terminal.out).toContain('✓ 已登录账号「Mock Creator」');
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(false);
+    expect((await run(['whoami'])).code).toBe(0);
+  });
+});
+
+/** The login's answers to forged callbacks, refusals, Ctrl+C and a store that will not write. */
+describe('yomi login when something is off', () => {
+  const urlPattern = /http:\/\/127\.0\.0\.1:\d+\/cli\/auth#\S+/;
+  const paramsOf = (url: string) => new URLSearchParams(new URL(url).hash.slice(1));
+  /** A callback posted by someone who learned the state (not through the page). */
+  const forge = (url: string, fields: Record<string, string>) => {
+    const params = paramsOf(url);
+    return fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
+      body: new URLSearchParams({ state: params.get('state') ?? '', ...fields }).toString(),
+    });
+  };
+  /** True when nothing else can bind the port (the CLI still holds it). */
+  const portHeld = (port: number) =>
+    new Promise<boolean>((resolve) => {
+      const probe = createServer();
+      probe.once('error', () => resolve(true));
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(false)));
+    });
+  const signedOut = async () => {
+    await run(['logout']);
+    expect((await run(['whoami'])).code).toBe(1);
+  };
+
+  it('asks about a cancellation it did not see coming, and keeps the port when it was not the person', async () => {
+    await signedOut();
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    expect((await forge(url, { error: 'access_denied' })).status).toBe(200);
+    await terminal.waitFor(/网页上取消了这次授权。输入 y 结束登录/);
+    expect(await portHeld(Number(paramsOf(url).get('port')))).toBe(true);
+    terminal.stdin.write('n\n');
+    await terminal.waitFor(/继续等待网页授权（Ctrl\+C 取消）/);
+    expect((await authorizeLikeTheBrowser(url)).status).toBe(200);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？/);
+    terminal.stdin.write('y\n');
+    expect(await pending).toBe(0);
+    expect((await run(['whoami'])).code).toBe(0);
+  });
+
+  it('without a terminal, a cancellation ends the login with a warning', async () => {
+    await signedOut();
+    const terminal = memoryIo();
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    await forge(url, { error: 'access_denied' });
+    expect(await pending).toBe(1);
+    expect(terminal.err).toContain('如果不是你在网页上点的取消，不要再在网页上授权');
+    expect(terminal.err).toContain('已在网页上取消授权');
+  });
+
+  it('drops an Enter pressed while waiting: only an answer typed at the question counts', async () => {
+    await signedOut();
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    terminal.stdin.write('\n');
+    terminal.stdin.write('y\n');
+    await authorizeLikeTheBrowser(url);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？/);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Neither the typed-ahead Enter nor the typed-ahead y decided anything.
+    expect(terminal.out).not.toContain('已拒绝这个账号');
+    expect(terminal.out).not.toContain('✓ 已登录');
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(false);
+    terminal.stdin.write('maybe\n');
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？[\s\S]*以这个账号登录 Yomi CLI？/);
+    terminal.stdin.write('y\n');
+    expect(await pending).toBe(0);
+    expect(terminal.out).toContain('✓ 已登录');
+  });
+
+  it('revokes a turned-down session even after its auth token went stale', async () => {
+    await signedOut();
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    await forge(url, { id_token: mock.idToken() });
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？/);
+    const turnedDown = mock.state.sessions.at(-1)!;
+    mock.expireAuthTokens();
+    terminal.stdin.write('n\n');
+    await terminal.waitFor(/继续等待网页授权（Ctrl\+C 取消）/);
+    expect(terminal.err).toContain('已拒绝这个账号，刚建立的会话已撤销');
+    expect(turnedDown.revoked).toBe(true);
+    // Nothing was stored for it.
+    expect((await run(['whoami'])).code).toBe(1);
+    await authorizeLikeTheBrowser(url);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？[\s\S]*以这个账号登录 Yomi CLI？/);
+    terminal.stdin.write('y\n');
+    expect(await pending).toBe(0);
+  });
+
+  it('revokes a session whose read-back failed, says why, and keeps waiting', async () => {
+    await signedOut();
+    const terminal = memoryIo();
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    mock.state.accountFailures = 1;
+    const before = mock.state.sessions.length;
+    await authorizeLikeTheBrowser(url);
+    await terminal.waitFor(/继续等待网页授权/);
+    expect(terminal.err).toContain('网页交来的凭证没能换出会话（50300：system busy）');
+    expect(mock.state.sessions).toHaveLength(before + 1);
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(true);
+    // The person tries again: the page is still there, the port still held.
+    await authorizeLikeTheBrowser(url);
+    expect(await pending).toBe(0);
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(false);
+  });
+
+  it('names the last refusal when the time runs out', async () => {
+    await signedOut();
+    const terminal = memoryIo();
+    const pending = main(['login', '--no-browser', '--timeout', '2'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    const before = mock.state.sessions.length;
+    mock.state.loginRefusal = { code: 1101000009, message: 'account blocked in this region' };
+    await authorizeLikeTheBrowser(url);
+    expect(await pending).toBe(1);
+    expect(terminal.err).toContain('没能换出会话（1101000009：account blocked in this region）');
+    expect(terminal.err).toContain(
+      '2 秒内没有完成授权，请重新运行 yomi login（服务端最后一次拒绝：1101000009：account blocked in this region）',
+    );
+    expect(mock.state.sessions).toHaveLength(before);
+  });
+
+  it('cancels on Ctrl+C while the session is being made, and revokes it', async () => {
+    await signedOut();
+    const terminal = memoryIo();
+    const listeners = new Set(process.listeners('SIGINT'));
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    const before = mock.state.sessions.length;
+    mock.state.loginDelayMs = 300;
+    try {
+      void authorizeLikeTheBrowser(url);
+      await terminal.waitFor(/正在建立 CLI 会话/);
+      // As the signal would: only the listener the command added.
+      for (const listener of process.listeners('SIGINT'))
+        if (!listeners.has(listener)) (listener as () => void)();
+      expect(await pending).toBe(1);
+    } finally {
+      mock.state.loginDelayMs = 0;
+    }
+    expect(terminal.err).toContain('已取消登录');
+    // account/login was let finish, and the session it made was revoked before the exit.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const made = mock.state.sessions.slice(before);
+    expect(made).toHaveLength(1);
+    expect(made.every((session) => session.revoked)).toBe(true);
+    expect((await run(['whoami'])).code).toBe(1);
+    expect(process.listeners('SIGINT').filter((listener) => !listeners.has(listener))).toHaveLength(
+      0,
+    );
+  });
+
+  it('revokes the session on Ctrl+C at the account question', async () => {
+    await signedOut();
+    const terminal = memoryIo({ interactive: true });
+    const listeners = new Set(process.listeners('SIGINT'));
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    await authorizeLikeTheBrowser(url);
+    await terminal.waitFor(/以这个账号登录 Yomi CLI？/);
+    const asked = mock.state.sessions.at(-1)!;
+    for (const listener of process.listeners('SIGINT'))
+      if (!listeners.has(listener)) (listener as () => void)();
+    expect(await pending).toBe(1);
+    expect(terminal.err).toContain('已取消登录');
+    expect(asked.revoked).toBe(true);
+    expect((await run(['whoami'])).code).toBe(1);
+  });
+
+  it('revokes the session when the input has ended before the question', async () => {
+    await signedOut();
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    terminal.stdin.end();
+    await authorizeLikeTheBrowser(url);
+    expect(await pending).toBe(1);
+    expect(terminal.err).toContain('输入已结束，没有登录（刚建立的会话已撤销）');
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(true);
+  });
+
+  it('revokes the session it replaces even when another process refreshed it meanwhile', async () => {
+    await signedOut();
+    const first = memoryIo();
+    const signingIn = main(['login', '--no-browser', '--timeout', '20'], first.io);
+    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0]);
+    expect(await signingIn).toBe(0);
+    const old = mock.state.sessions.at(-1)!;
+    const terminal = memoryIo();
+    const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+    const [url] = await terminal.waitFor(urlPattern);
+    // Meanwhile a `yomi relay` refreshes the stored pair (the old one rotates on the server).
+    mock.expireAuthTokens();
+    expect((await run(['whoami'])).code).toBe(0);
+    await authorizeLikeTheBrowser(url);
+    expect(await pending).toBe(0);
+    expect(old.revoked).toBe(true);
+    expect(terminal.err).not.toContain('没能在服务端撤销');
+  });
+
+  it('keeps the old sign-in when the new one cannot be stored, and revokes the new one', async () => {
+    const first = memoryIo();
+    const signingIn = main(['login', '--no-browser', '--timeout', '20'], first.io);
+    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0]);
+    expect(await signingIn).toBe(0);
+    const old = mock.state.sessions.at(-1)!;
+    // The store refuses to write (a locked keychain, a full disk).
+    const refuse = vi.spyOn(FileStore.prototype, 'set').mockImplementationOnce(() => {
+      throw new Error('the keychain is locked');
+    });
+    try {
+      const terminal = memoryIo();
+      const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+      await authorizeLikeTheBrowser((await terminal.waitFor(urlPattern))[0]);
+      expect(await pending).toBe(1);
+      expect(terminal.err).toContain('the keychain is locked');
+    } finally {
+      refuse.mockRestore();
+    }
+    expect(mock.state.sessions.at(-1)?.revoked).toBe(true);
+    expect(old.revoked).toBe(false);
+    expect((await run(['whoami'])).code).toBe(0);
   });
 });

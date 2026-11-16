@@ -7,7 +7,7 @@ import { type CallbackResult, startCallbackServer, verificationCode } from './lo
 
 /**
  * The browser half of `yomi login` (docs/auth-protocol.md), like `gh auth login --web`: a
- * one-time `state`, the callback on 127.0.0.1, the authorize page of the web
+ * fresh `state` per login (still valid after a turned-down answer, void once the login ends), the callback on 127.0.0.1, the authorize page of the web
  * (`<web>/cli/auth#port&state&client&version`) opened in the browser, and the page's answer. The
  * parameters ride in the fragment: never sent to a server, never in a log or a Referer.
  */
@@ -16,7 +16,10 @@ export type AuthorizeRequest = {
   url: string;
   code: string;
   port: number;
-  result: Promise<CallbackResult>;
+  /** The page's next answer (see `CallbackServer.next`). */
+  next(): Promise<CallbackResult>;
+  /** The account just handed over was turned down: wait for the page again. */
+  resume(): void;
   cancel(): void;
 };
 
@@ -42,7 +45,8 @@ export async function beginBrowserAuthorization(
     url: `${env.webOrigin}/cli/auth#${query.toString()}`,
     code: verificationCode(state),
     port: server.port,
-    result: server.result,
+    next: server.next,
+    resume: server.resume,
     cancel: server.close,
   };
 }

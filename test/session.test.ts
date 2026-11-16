@@ -15,6 +15,8 @@ import {
 } from '../src/core/credentials.js';
 import { resolveEnvironment } from '../src/core/env.js';
 import { acquireProcessLock, withFileLock } from '../src/core/lock.js';
+import { signOut } from '../src/auth/session.js';
+import { terminalText } from '../src/core/ui.js';
 
 /**
  * The session across processes: the refresh lock, adopting a pair another process stored, signing
@@ -50,8 +52,11 @@ function rotatingGateway(options: { refreshDelayMs?: number; failRefresh?: () =>
   const validAuth = new Set(['at_0']);
   let validRefresh = 'rt_0';
   const refreshCalls: string[] = [];
+  const logouts: string[] = [];
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    if (url.includes('account/logout'))
+      logouts.push((JSON.parse(String(init?.body)) as { refresh_token: string }).refresh_token);
     if (url.includes('refresh_auth_token')) {
       const body = JSON.parse(String(init?.body)) as { refresh_token: string };
       refreshCalls.push(body.refresh_token);
@@ -75,6 +80,7 @@ function rotatingGateway(options: { refreshDelayMs?: number; failRefresh?: () =>
   return {
     fetcher,
     refreshCalls,
+    logouts,
     expireAuth: () => validAuth.clear(),
   };
 }
@@ -90,6 +96,30 @@ function gatewayFor(dir: string, store: FileStore, fetcher: typeof fetch) {
     lockPath: refreshLockPath('test', dir),
   });
 }
+
+describe('text from elsewhere in the terminal', () => {
+  it('cannot fake a line, hide what follows or reorder it', () => {
+    expect(terminalText('林夏')).toBe('林夏');
+    expect(terminalText('X」（user_id 1）\n✓ 已登录')).toBe('X」（user_id 1）?✓ 已登录');
+    expect(terminalText('a\u001b[8mhidden')).toBe('a?[8mhidden');
+    expect(terminalText('a\u202eb\u2066c\u009bd')).toBe('a?b?c?d');
+  });
+});
+
+describe('signing out', () => {
+  it('revokes the refresh token in use after a refresh, not the one it replaced', async () => {
+    const dir = tempDir();
+    const store = new FileStore(join(dir, 'credentials.json'));
+    store.set('test', credential());
+    const server = rotatingGateway();
+    const gateway = gatewayFor(dir, store, server.fetcher);
+    // The auth token went stale: logout refreshes first, which rotates the refresh token.
+    server.expireAuth();
+    expect(await signOut(gateway)).toBe(true);
+    expect(server.refreshCalls).toEqual(['rt_0']);
+    expect(server.logouts).toEqual(['rt_0', 'rt_1']);
+  });
+});
 
 describe('refreshing the session', () => {
   it('two processes with the same stale token trade it once; neither is signed out', async () => {

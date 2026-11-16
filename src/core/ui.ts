@@ -69,6 +69,80 @@ export async function ask(io: Io, question: string): Promise<string | null> {
 }
 
 /**
+ * A question only an explicit answer settles: `y`/`yes` (true) or `n`/`no` (false); anything else
+ * asks again. Whatever was typed before the question appeared (an Enter pressed while waiting, a
+ * stray `y` without Enter) is dropped first, so it cannot answer it. Null when the input ends or
+ * `signal` aborts (Ctrl+C handled by the caller).
+ */
+export async function askYesOrNo(
+  io: Io,
+  question: string,
+  signal?: AbortSignal,
+): Promise<boolean | null> {
+  const ended = await dropTypeahead(io.stdin);
+  if (ended || signal?.aborted || io.stdin.readableEnded || io.stdin.destroyed) {
+    io.stdout.write(question + '\n');
+    return null;
+  }
+  const rl = createInterface({ input: io.stdin, output: io.stdout, terminal: false });
+  const onAbort = () => rl.close();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    io.stdout.write(question);
+    return await new Promise<boolean | null>((resolve) => {
+      rl.on('line', (line) => {
+        const answer = line.trim().toLowerCase();
+        if (answer === 'y' || answer === 'yes') resolve(true);
+        else if (answer === 'n' || answer === 'no') resolve(false);
+        else io.stdout.write(question);
+      });
+      rl.once('close', () => resolve(null));
+    });
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    rl.close();
+  }
+}
+
+/**
+ * Reads and drops whatever input is already waiting; true when the input ended meanwhile. On a
+ * terminal it reads raw for that moment, so a line typed without Enter goes too.
+ */
+async function dropTypeahead(stdin: Readable, ms = 60): Promise<boolean> {
+  const tty = stdin as Readable & { isTTY?: boolean; setRawMode?: (raw: boolean) => unknown };
+  const raw = Boolean(tty.isTTY && typeof tty.setRawMode === 'function');
+  let ended = false;
+  const drop = () => undefined;
+  const end = () => {
+    ended = true;
+  };
+  stdin.on('data', drop);
+  stdin.once('end', end);
+  try {
+    if (raw) tty.setRawMode!(true);
+    stdin.resume();
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  } finally {
+    stdin.removeListener('data', drop);
+    stdin.removeListener('end', end);
+    stdin.pause();
+    if (raw) tty.setRawMode!(false);
+  }
+  return ended;
+}
+
+/**
+ * Text from elsewhere (a name, an email) safe to print: control, C1 and bidi characters become
+ * `?`, so it cannot fake a line, hide what follows or reorder it.
+ */
+export function terminalText(value: string): string {
+  return value.replace(
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g,
+    '?',
+  );
+}
+
+/**
  * A yes/no that only a typed `y`/`yes` (or the expected word) accepts. Without a person to ask it
  * is a refusal: commands that need consent take an explicit flag instead.
  */

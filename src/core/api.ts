@@ -234,6 +234,17 @@ export class Gateway {
   }
 
   /**
+   * A gateway like this one for `credential` alone: no credential store, account or refresh lock.
+   * Its refreshes rotate only its own pair in memory and never read or write the stored sign-in:
+   * for a session being tried out (`yomi login` before the person confirms it) or an old one
+   * being revoked.
+   */
+  detached(credential: Credential | null): Gateway {
+    const { env, idfv, fetch: fetcher, debug, now, client, channel } = this.options;
+    return new Gateway({ env, idfv, fetch: fetcher, debug, now, client, channel, credential });
+  }
+
+  /**
    * Trades the refresh token for a new pair once, however many requests found the token stale.
    * Across processes (a running `yomi relay` and a `yomi create`) the trade happens under a lock
    * file, and a pair another process stored meanwhile is adopted instead of trading again. Only a
@@ -352,10 +363,13 @@ export class Gateway {
   /**
    * Calls a Gateway route (`path` relative to `/ember/api/v1/`, or absolute) and returns the whole
    * response object, `base_resp` checked. A stale token is refreshed and the call retried once.
+   * `body` may be a function: it is called for each send, so a body that carries part of the
+   * session (logout's refresh token) is rebuilt from the refreshed one on the retry.
    */
   async request(path: string, body: unknown = {}, options: RequestOptions = {}): Promise<Json> {
+    const make = () => (typeof body === 'function' ? (body as () => unknown)() : body);
     try {
-      return await this.send(path, body, options);
+      return await this.send(path, make(), options);
     } catch (error) {
       const stale =
         error instanceof ApiError &&
@@ -364,7 +378,7 @@ export class Gateway {
         this.credentialValue;
       if (!stale) throw error;
       await this.refresh();
-      return this.send(path, body, options);
+      return this.send(path, make(), options);
     }
   }
 

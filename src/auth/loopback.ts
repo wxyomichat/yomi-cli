@@ -3,20 +3,24 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 /**
- * The one-shot callback the web's authorize page posts to (docs/auth-protocol.md):
+ * The callback the web's authorize page posts to (docs/auth-protocol.md):
  * `POST http://127.0.0.1:<port>/callback`, form-encoded, with the `state` the CLI made and either
  * `id_token` (a fresh Firebase ID token of the signed-in account) or `error`.
  *
  * - Listens on 127.0.0.1 only, on a port the system picks; answers loopback peers only, and only
  *   when `Host` names that address and port (DNS rebinding) and `Origin` is the web's origin.
  * - The token comes in the POST body, never a URL: a GET with a query is refused.
- * - `state` is compared in constant time and accepted once; the server closes after the first
- *   valid callback, after too many bad ones, and at the deadline.
+ * - `state` is compared in constant time. A valid answer (a token or a cancellation) is handed to
+ *   the CLI, which holds the callback while the terminal checks it (`resume()` listens again for
+ *   the same state when the person turns it down). Bad callbacks never end the wait: they are
+ *   refused, so nobody can stop a login (and take over its freed port) by sending them. The
+ *   server closes when the CLI is done and at the deadline; the deadline is paused while the
+ *   terminal checks an answer.
+ * - The email and name the page also posts are not used: what the terminal shows comes from the
+ *   server, so a forged callback cannot dress up as the person's account.
  */
 
-export type CallbackResult =
-  | { kind: 'token'; idToken: string; email: string; displayName: string }
-  | { kind: 'denied'; error: string };
+export type CallbackResult = { kind: 'token'; idToken: string } | { kind: 'denied'; error: string };
 
 export class CallbackTimeout extends Error {
   constructor() {
@@ -35,12 +39,20 @@ export class CallbackRejected extends Error {
 export type CallbackServer = {
   port: number;
   callbackURL: string;
-  result: Promise<CallbackResult>;
+  /**
+   * The next valid callback, a token or a denial. The server then holds (a further valid
+   * callback is told the terminal is busy, and the deadline pauses) until `resume()` or
+   * `close()`. Rejects at the deadline or on `close()`.
+   */
+  next(): Promise<CallbackResult>;
+  /** The answer just handed over was turned down: listen again for the same state. */
+  resume(): void;
   close(): void;
 };
 
 const MAX_BODY = 32 * 1024;
-const MAX_BAD = 5;
+/** Refused callbacks reported one by one; after these, one line says the rest are not. */
+const REPORTED = 3;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 /** `XXXX-XXXX` the CLI and the authorize page both show, derived from `state` (SHA-256). */
@@ -137,15 +149,37 @@ export function startCallbackServer(options: {
   /** Told why a callback was refused while the wait goes on, so the terminal can say so. */
   onRejected?: (reason: string) => void;
 }): Promise<CallbackServer> {
-  let settle: { resolve: (r: CallbackResult) => void; reject: (e: Error) => void } | null = null;
-  const result = new Promise<CallbackResult>((resolve, reject) => {
-    settle = { resolve, reject };
-  });
-  // Callers await `result`; keep an early rejection from being reported as unhandled.
-  result.catch(() => undefined);
-  let done = false;
-  let bad = 0;
+  /** waiting: takes a valid callback · holding: the CLI checks the one it got · closed. */
+  let phase: 'waiting' | 'holding' | 'closed' = 'waiting';
+  /** The time left on the deadline while it is paused (holding). */
+  let left = options.timeoutMs;
+  let deadlineAt = 0;
+  let timer: NodeJS.Timeout | null = null;
+  let pending: { resolve: (r: CallbackResult) => void; reject: (e: Error) => void } | null = null;
+  let queued: CallbackResult | null = null;
+  let ending: Error | null = null;
+  let refused = 0;
   let port = 0;
+
+  const current = () => phase;
+  const report = (reason: string) => {
+    refused += 1;
+    if (refused <= REPORTED) options.onRejected?.(reason);
+    else if (refused === REPORTED + 1)
+      options.onRejected?.('还有更多无效回调，之后不再逐条提示（等待继续，直到超时或 Ctrl+C）');
+  };
+
+  const deliver = (outcome: CallbackResult) => {
+    // The deadline waits while the terminal checks this answer.
+    phase = 'holding';
+    if (timer) clearTimeout(timer);
+    timer = null;
+    left = Math.max(0, deadlineAt - Date.now());
+    if (pending) {
+      pending.resolve(outcome);
+      pending = null;
+    } else queued = outcome;
+  };
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -163,8 +197,8 @@ export function startCallbackServer(options: {
       reply(response, 405, page('请求被拒绝', '授权信息只能通过网页提交，不能放在地址里。', false));
       return;
     }
-    if (done) {
-      reply(response, 410, page('授权已完成', '这次授权已经处理过，可以关闭此页。', false));
+    if (phase === 'closed') {
+      reply(response, 410, page('授权已结束', '这次登录已经结束，可以关闭此页。', false));
       return;
     }
     const origin = request.headers.origin;
@@ -172,8 +206,7 @@ export function startCallbackServer(options: {
     const values = body === null ? null : fields(request.headers['content-type'] ?? '', body);
     const state = values?.state ?? '';
     if (origin !== options.expectedOrigin || !values || !sameSecret(state, options.state)) {
-      bad += 1;
-      options.onRejected?.(
+      report(
         origin !== options.expectedOrigin
           ? `来源不符：Origin 为 ${printable(origin)}，应为 ${options.expectedOrigin}`
           : !values
@@ -185,50 +218,107 @@ export function startCallbackServer(options: {
         400,
         page('授权请求无效', '请回到终端重新运行 yomi login，再从它打开的页面授权。', false),
       );
-      if (bad >= MAX_BAD) finish(new CallbackRejected('收到过多无效的授权回调，已停止等待'));
+      return;
+    }
+    // The phase may have moved on while the body was read.
+    if (current() === 'closed') {
+      reply(response, 410, page('授权已结束', '这次登录已经结束，可以关闭此页。', false));
+      return;
+    }
+    if (current() === 'holding') {
+      reply(
+        response,
+        409,
+        page(
+          '终端正在确认',
+          '终端正在确认刚收到的一次授权或取消。要放弃这次登录，在终端按 Ctrl+C；如果终端显示的不是你的账号，在终端拒绝后，回到授权页再点一次授权。',
+          false,
+        ),
+      );
       return;
     }
     if (values.error) {
-      reply(response, 200, page('已取消授权', '终端里的登录已取消，可以关闭此页。', false));
-      finish({ kind: 'denied', error: values.error.slice(0, 64) });
+      reply(
+        response,
+        200,
+        page('已取消授权', '已告知终端，可以关闭此页。如果终端询问，确认结束这次登录即可。', false),
+      );
+      deliver({ kind: 'denied', error: values.error.slice(0, 64) });
       return;
     }
     const idToken = values.id_token ?? '';
     if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)) {
+      report('网页回传的登录凭证格式不正确');
       reply(response, 400, page('授权请求无效', '没有收到有效的登录凭证。', false));
-      finish(new CallbackRejected('网页回传的登录凭证格式不正确'));
       return;
     }
     reply(response, 200, page('已授权 Yomi CLI', '可以关闭此页，回到终端继续。', true));
-    finish({
-      kind: 'token',
-      idToken,
-      email: (values.email ?? '').slice(0, 320),
-      displayName: (values.display_name ?? '').slice(0, 100),
-    });
+    deliver({ kind: 'token', idToken });
   });
 
-  const timer = setTimeout(() => finish(new CallbackTimeout()), options.timeoutMs);
+  /** Starts (or restarts, with what is left) the deadline. */
+  function arm() {
+    deadlineAt = Date.now() + left;
+    timer = setTimeout(() => {
+      if (phase === 'waiting') finish(new CallbackTimeout());
+    }, left);
+  }
 
-  function finish(outcome: CallbackResult | Error) {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    if (outcome instanceof Error) settle?.reject(outcome);
-    else settle?.resolve(outcome);
+  function finish(error: Error | null) {
+    if (phase === 'closed') return;
+    phase = 'closed';
+    ending = error;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (error && pending) {
+      pending.reject(error);
+      pending = null;
+    }
     // Let the answer reach the browser, then stop listening.
     setTimeout(() => server.close(), 50).unref();
     server.closeIdleConnections?.();
   }
 
+  function next(): Promise<CallbackResult> {
+    if (queued) {
+      const outcome = queued;
+      queued = null;
+      return Promise.resolve(outcome);
+    }
+    if (phase === 'closed')
+      return Promise.reject(ending ?? new CallbackRejected('这次登录已经结束'));
+    const waiting = new Promise<CallbackResult>((resolve, reject) => {
+      pending = { resolve, reject };
+    });
+    // Callers await it; keep an early rejection from being reported as unhandled.
+    waiting.catch(() => undefined);
+    return waiting;
+  }
+
+  function resume() {
+    if (phase !== 'holding') return;
+    if (left <= 0) {
+      finish(new CallbackTimeout());
+      return;
+    }
+    phase = 'waiting';
+    arm();
+  }
+
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', (error) => {
+      // Nothing listens, so nothing is waited for: no timer is left behind either.
+      phase = 'closed';
+      reject(error);
+    });
     server.listen(0, '127.0.0.1', () => {
       port = (server.address() as AddressInfo).port;
+      arm();
       resolve({
         port,
         callbackURL: `http://127.0.0.1:${port}/callback`,
-        result,
+        next,
+        resume,
         close: () => finish(new CallbackRejected('已取消')),
       });
     });
