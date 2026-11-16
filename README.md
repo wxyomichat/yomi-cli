@@ -72,13 +72,15 @@ pnpm verify                # 格式检查 + 类型检查 + 单元测试 + 构建
 | `persona avatar -p 描述`              | AI 生成人设头像，按成功的张数扣钻石。选一张写进人设：`--persona ID`、`--new --name --gender --age`，或默认当前使用的人设；`--pick N`、`--resume`、`--create-again`                                                                                                                                                          |
 | `relay --telegram`                    | 自己的 Telegram bot 私聊 ⇄ 已发布角色（实验）。配对码只给本人，默认不花钻石，付费需 `--max-spend`（本机累计上限）与 Telegram 里 `/budget` 两道确认；`--install-service` 装成后台服务。见 [docs/relay.md](docs/relay.md)                                                                                                     |
 
-全局：`--env prod|test`（默认 prod）、`--lane 名称`（仅测试环境）、`--debug`（请求日志，凭证脱敏）。环境变量：`YOMI_ENV`、`YOMI_LANE`、`YOMI_TEST_API_ORIGIN` / `YOMI_TEST_WEB_ORIGIN`（测试环境地址）、`YOMI_API_ORIGIN` / `YOMI_WEB_ORIGIN`（指向 mock 或本地网页构建；这样的运行不算生产）、`YOMI_CONFIG_DIR`、`YOMI_CREDENTIAL_STORE=auto|keychain|file`、`YOMI_LANG`、`NO_COLOR`。
+全局：`--lang zh|en`（输出语言，见下）、`--env prod|test`（默认 prod）、`--lane 名称`（仅测试环境）、`--debug`（请求日志，凭证脱敏）。环境变量：`YOMI_ENV`、`YOMI_LANE`、`YOMI_TEST_API_ORIGIN` / `YOMI_TEST_WEB_ORIGIN`（测试环境地址）、`YOMI_API_ORIGIN` / `YOMI_WEB_ORIGIN`（指向 mock 或本地网页构建；这样的运行不算生产）、`YOMI_CONFIG_DIR`、`YOMI_CREDENTIAL_STORE=auto|keychain|file`、`YOMI_LANG`、`NO_COLOR`。
+
+输出语言：中文或英文，包括提示、进度、错误、帮助、登录时的确认，以及 relay 发到 Telegram 的消息。按顺序取 `--lang zh|en`、`YOMI_LANG`、系统语言（`LC_ALL` → `LC_MESSAGES` → `LANG` → 运行时报告的区域设置）：以 `zh` 开头为中文，其余（包括没有设置）为英文。同一个语言也作为 `sys_language` 发给服务端。服务端返回的文字（模型和风格名、声音名、错误信息、服务端注入的合规提示）按服务端给的原样显示。
 
 字段选项可覆盖文件中的值：`--name --gender --description --opening --background --visibility --voice --tag（可重复）--cover --avatar`。
 
 ## 角色文件
 
-YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)。规则与 App 和网页的创建页相同，长度按 Unicode 码点计。
+YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)（英文示例：[examples/character.en.yaml](examples/character.en.yaml)）。规则与 App 和网页的创建页相同，长度按 Unicode 码点计。
 
 | 字段                               | 规则                                                                                                                      |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 
+import { tr } from '../core/i18n.js';
+
 /**
  * A picture from disk, checked as the app checks it before upload: JPEG / PNG / WebP up to 20 MB
  * and 8192 px a side, and the shape the app crops to: the appearance 1:2 (720 × 1440 in the app),
@@ -98,24 +100,41 @@ export function sniffImage(
 }
 
 export function loadImage(path: string, kind: ImageKind): LocalImage {
-  const label = kind === 'cover' ? '形象图 cover' : '头像 avatar';
+  const label =
+    kind === 'cover' ? tr('形象图 cover', 'Cover image (cover)') : tr('头像 avatar', 'Avatar');
   let size: number;
   try {
     size = statSync(path).size;
   } catch {
-    throw new ImageError(`${label}：找不到文件 ${path}`);
+    throw new ImageError(tr(`${label}：找不到文件 ${path}`, `${label}: file not found: ${path}`));
   }
-  if (size > MAX_IMAGE_BYTES) throw new ImageError(`${label}：文件超过 20 MB`);
+  if (size > MAX_IMAGE_BYTES)
+    throw new ImageError(tr(`${label}：文件超过 20 MB`, `${label}: the file is over 20 MB`));
   const bytes = readFileSync(path);
   const info = sniffImage(bytes);
-  if (!info) throw new ImageError(`${label}：只支持 JPEG、PNG、WebP（${path}）`);
+  if (!info)
+    throw new ImageError(
+      tr(
+        `${label}：只支持 JPEG、PNG、WebP（${path}）`,
+        `${label}: only JPEG, PNG and WebP are supported (${path})`,
+      ),
+    );
   if (!info.width || !info.height || info.width > MAX_SIDE || info.height > MAX_SIDE)
-    throw new ImageError(`${label}：尺寸不合法（${info.width}×${info.height}）`);
+    throw new ImageError(
+      tr(
+        `${label}：尺寸不合法（${info.width}×${info.height}）`,
+        `${label}: invalid size (${info.width}×${info.height})`,
+      ),
+    );
   const aspect = info.width / info.height;
   if (Math.abs(aspect - ASPECT[kind]) > 0.02)
     throw new ImageError(
-      `${label}：比例要 ${kind === 'cover' ? '1:2（宽:高）' : '1:1'}，现在是 ${info.width}×${info.height}；` +
-        `App 用 ${RECOMMENDED[kind]}，先裁好再用`,
+      tr(
+        `${label}：比例要 ${kind === 'cover' ? '1:2（宽:高）' : '1:1'}，现在是 ${info.width}×${info.height}；` +
+          `App 用 ${RECOMMENDED[kind]}，先裁好再用`,
+        `${label}: the aspect ratio must be ${kind === 'cover' ? '1:2 (width:height)' : '1:1'}, but it is ${info.width}×${info.height}; ` +
+          `the app uses ${RECOMMENDED[kind]}, so crop it first`,
+      ),
     );
   return {
     path,

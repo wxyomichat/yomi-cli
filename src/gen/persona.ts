@@ -2,6 +2,7 @@ import { readFileSync, type Stats, statSync } from 'node:fs';
 
 import { ApiError, type Gateway } from '../core/api.js';
 import { UsageError } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import { encodeBody, i64, idOf, type Json, list, optionalObject, RawBody } from '../core/json.js';
 import { sha256 } from '../core/state.js';
 import { call, postForm, putObject, UgcFailure } from '../ugc/api.js';
@@ -47,12 +48,25 @@ export const GENDER_NAMES: Record<string, number> = {
   male: PersonaGender.male,
   female: PersonaGender.female,
   other: PersonaGender.other,
-  男: PersonaGender.male,
-  女: PersonaGender.female,
-  其他: PersonaGender.other,
+  男: PersonaGender.male, // i18n-ignore
+  女: PersonaGender.female, // i18n-ignore
+  其他: PersonaGender.other, // i18n-ignore
 };
 
-export const GENDER_LABEL: Record<number, string> = { 0: '未知', 1: '男', 2: '女', 3: '其他' };
+export const GENDER_LABEL: Record<number, string> = {
+  get 0() {
+    return tr('未知', 'unknown');
+  },
+  get 1() {
+    return tr('男', 'male');
+  },
+  get 2() {
+    return tr('女', 'female');
+  },
+  get 3() {
+    return tr('其他', 'other');
+  },
+};
 export const GENDER_KEY: Record<number, string> = {
   0: 'unknown',
   1: 'male',
@@ -346,22 +360,48 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
     info = statSync(path);
   } catch (error) {
     if (['ENOENT', 'ENOTDIR'].includes(errorCode(error)))
-      throw new UsageError(`找不到参考图：${path}`);
-    throw new UsageError(`参考图读不出来：${path}（${accessHint(error)}）`);
+      throw new UsageError(tr(`找不到参考图：${path}`, `Reference image not found: ${path}`));
+    throw new UsageError(
+      tr(
+        `参考图读不出来：${path}（${accessHint(error)}）`,
+        `Cannot read the reference image: ${path} (${accessHint(error)})`,
+      ),
+    );
   }
   if (info.isDirectory())
-    throw new UsageError(`--reference 要指向一张图片，${path} 是文件夹（JPEG 或 PNG）`);
+    throw new UsageError(
+      tr(
+        `--reference 要指向一张图片，${path} 是文件夹（JPEG 或 PNG）`,
+        `--reference must point to an image; ${path} is a folder (JPEG or PNG)`,
+      ),
+    );
   // A pipe or a device could block or never end: only regular files.
   if (!info.isFile())
-    throw new UsageError(`--reference 要指向一张图片文件（JPEG 或 PNG）：${path}`);
-  if (info.size > MAX_REFERENCE_BYTES) throw new UsageError('参考图不能超过 20 MB');
+    throw new UsageError(
+      tr(
+        `--reference 要指向一张图片文件（JPEG 或 PNG）：${path}`,
+        `--reference must point to an image file (JPEG or PNG): ${path}`,
+      ),
+    );
+  if (info.size > MAX_REFERENCE_BYTES)
+    throw new UsageError(
+      tr('参考图不能超过 20 MB', 'The reference image cannot be larger than 20 MB'),
+    );
   let bytes: Buffer;
   try {
     bytes = readFileSync(path);
   } catch (error) {
-    throw new UsageError(`参考图读不出来：${path}（${accessHint(error)}）`);
+    throw new UsageError(
+      tr(
+        `参考图读不出来：${path}（${accessHint(error)}）`,
+        `Cannot read the reference image: ${path} (${accessHint(error)})`,
+      ),
+    );
   }
-  if (!bytes.length) throw new UsageError(`参考图是空文件：${path}`);
+  if (!bytes.length)
+    throw new UsageError(
+      tr(`参考图是空文件：${path}`, `The reference image is an empty file: ${path}`),
+    );
   try {
     const cropped = centreCrop(decode(bytes), 3 / 4);
     const scale = Math.min(1, 1024 / cropped.height);
@@ -372,8 +412,14 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
     );
     return { jpeg: encodeJpeg(scaled, 90), sha256: sha256(bytes) };
   } catch (error) {
-    if (error instanceof RasterError) throw new UsageError(`参考图：${error.message}`);
-    throw new UsageError('参考图读不出来，请换一张 JPEG 或 PNG');
+    if (error instanceof RasterError)
+      throw new UsageError(tr(`参考图：${error.message}`, `Reference image: ${error.message}`));
+    throw new UsageError(
+      tr(
+        '参考图读不出来，请换一张 JPEG 或 PNG',
+        'Cannot read the reference image; use another JPEG or PNG',
+      ),
+    );
   }
 }
 
@@ -384,9 +430,9 @@ function errorCode(error: unknown): string {
 
 function accessHint(error: unknown): string {
   const code = errorCode(error);
-  if (code === 'EACCES' || code === 'EPERM') return '没有读取权限';
-  if (code === 'EISDIR') return '这是文件夹';
-  return code ? `系统错误 ${code}` : '读取失败';
+  if (code === 'EACCES' || code === 'EPERM') return tr('没有读取权限', 'no read permission');
+  if (code === 'EISDIR') return tr('这是文件夹', 'it is a folder');
+  return code ? tr(`系统错误 ${code}`, `system error ${code}`) : tr('读取失败', 'read failed');
 }
 
 /**
@@ -405,14 +451,28 @@ export async function uploadReference(
   });
   const objectKey = readText(ticket.object_key);
   const url = readText(ticket.upload_url);
-  if (!objectKey || !url) throw new UgcFailure('PROTOCOL', '服务端没有给出参考图的上传地址');
+  if (!objectKey || !url)
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '服务端没有给出参考图的上传地址',
+        'The server gave no upload address for the reference image',
+      ),
+    );
   const fields: Record<string, string> = {};
   for (const [key, value] of Object.entries(optionalObject(ticket.form_fields)))
     fields[key] = String(value);
   const method = (readText(ticket.method) || 'PUT').toUpperCase();
   if (Object.keys(fields).length > 0) await postForm(url, fields, jpeg, 'image/jpeg', fetcher);
   else if (method === 'PUT') await putObject(url, jpeg, 'image/jpeg', fetcher);
-  else throw new UgcFailure('PROTOCOL', `参考图的上传方式（${method}）CLI 暂不支持`);
+  else
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        `参考图的上传方式（${method}）CLI 暂不支持`,
+        `The CLI does not support this reference image upload method yet (${method})`,
+      ),
+    );
   return objectKey;
 }
 
@@ -440,7 +500,8 @@ export function requestFingerprint(
 function readTask(value: unknown, position: number): AvatarTask {
   const task = optionalObject(value);
   const taskId = readId(task.media_task_id);
-  if (!taskId) throw new UgcFailure('PROTOCOL', '生成任务缺少 ID');
+  if (!taskId)
+    throw new UgcFailure('PROTOCOL', tr('生成任务缺少 ID', 'A generation task has no ID'));
   const index = task.image_index === undefined ? position : readInt(task.image_index);
   return {
     index: index + 1,

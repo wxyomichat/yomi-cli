@@ -6,6 +6,7 @@ import { isMap, parseDocument } from 'yaml';
 
 import type { Gateway } from '../core/api.js';
 import { UsageError } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import { encodeBody, idOf, type Json, RawBody } from '../core/json.js';
 import { type LocalState, sha256 } from '../core/state.js';
 import { call, UgcFailure, wireIds } from '../ugc/api.js';
@@ -193,17 +194,34 @@ export function chooseRequest(
   input: { prompt: string; model: string; style: string; ratio: string; count: number | null },
 ): ImageChoice {
   const prompt = input.prompt.trim();
-  if (!prompt) throw new UsageError('需要描述：yomi image -p "<描述>"（不能只有空白）');
+  if (!prompt)
+    throw new UsageError(
+      tr(
+        '需要描述：yomi image -p "<描述>"（不能只有空白）',
+        'A description is needed: yomi image -p "<description>" (not just spaces)',
+      ),
+    );
   const length = [...prompt].length;
   if (length > PROMPT_LIMIT)
-    throw new UsageError(`描述最多 ${PROMPT_LIMIT} 个字，现在 ${length} 个`);
-  if (!config.models.length) throw new UsageError('服务端现在没有可用的生图模型');
+    throw new UsageError(
+      tr(
+        `描述最多 ${PROMPT_LIMIT} 个字，现在 ${length} 个`,
+        `The description can be at most ${PROMPT_LIMIT} characters; it has ${length}`,
+      ),
+    );
+  if (!config.models.length)
+    throw new UsageError(
+      tr('服务端现在没有可用的生图模型', 'The server has no image models available right now'),
+    );
   const model = input.model
     ? config.models.find((item) => item.id === input.model)
     : config.models[0];
   if (!model)
     throw new UsageError(
-      `没有模型 ${input.model}；可选：${config.models.map((item) => item.id).join('、')}（yomi image --options 查看）`,
+      tr(
+        `没有模型 ${input.model}；可选：${config.models.map((item) => item.id).join('、')}（yomi image --options 查看）`,
+        `No model ${input.model}; choose from: ${config.models.map((item) => item.id).join(', ')} (yomi image --options lists them)`,
+      ),
     );
   const offered = stylesFor(config, model.id);
   let style: ImageStyle | null = null;
@@ -211,16 +229,35 @@ export function chooseRequest(
     style = offered.find((item) => item.id === input.style || item.name === input.style) ?? null;
     if (!style)
       throw new UsageError(
-        `模型 ${model.id} 没有风格 ${input.style}；${offered.length ? `可选：${offered.map((item) => item.id).join('、')}` : '这个模型没有可选风格'}（不写 --style 即不选风格）`,
+        tr(
+          `模型 ${model.id} 没有风格 ${input.style}；${offered.length ? `可选：${offered.map((item) => item.id).join('、')}` : '这个模型没有可选风格'}（不写 --style 即不选风格）`,
+          `Model ${model.id} has no style ${input.style}; ${offered.length ? `choose from: ${offered.map((item) => item.id).join(', ')}` : 'this model has no styles'} (leave out --style for no style)`,
+        ),
       );
   }
-  if (!config.ratios.length) throw new UsageError('服务端现在没有可用的图片比例，暂时不能生成');
+  if (!config.ratios.length)
+    throw new UsageError(
+      tr(
+        '服务端现在没有可用的图片比例，暂时不能生成',
+        'The server has no aspect ratios available right now, so images cannot be generated yet',
+      ),
+    );
   const ratio = input.ratio || defaultRatio(config);
   if (!config.ratios.includes(ratio))
-    throw new UsageError(`没有比例 ${ratio}；可选：${config.ratios.join('、')}`);
+    throw new UsageError(
+      tr(
+        `没有比例 ${ratio}；可选：${config.ratios.join('、')}`,
+        `No aspect ratio ${ratio}; choose from: ${config.ratios.join(', ')}`,
+      ),
+    );
   const count = input.count ?? Math.min(DEFAULT_COUNT, config.maxCount);
   if (count < 1 || count > config.maxCount)
-    throw new UsageError(`--count 只能是 1–${config.maxCount}（服务端当前上限）`);
+    throw new UsageError(
+      tr(
+        `--count 只能是 1–${config.maxCount}（服务端当前上限）`,
+        `--count must be 1–${config.maxCount} (the server's current limit)`,
+      ),
+    );
   return { prompt, model, style, ratio, count };
 }
 
@@ -242,19 +279,31 @@ export function batchPrice(
 
 /** A reference picture from disk: JPEG, PNG or WebP, up to 20 MB and 8192 px a side. */
 export function loadReference(path: string): LocalImage {
-  const label = '参考图';
+  const label = tr('参考图', 'Reference image');
   let size: number;
   try {
     size = statSync(path).size;
   } catch {
-    throw new ImageError(`${label}：找不到文件 ${path}`);
+    throw new ImageError(tr(`${label}：找不到文件 ${path}`, `${label}: file not found: ${path}`));
   }
-  if (size > MAX_IMAGE_BYTES) throw new ImageError(`${label}：文件超过 20 MB`);
+  if (size > MAX_IMAGE_BYTES)
+    throw new ImageError(tr(`${label}：文件超过 20 MB`, `${label}: the file is larger than 20 MB`));
   const bytes = readFileSync(path);
   const info = sniffImage(bytes);
-  if (!info) throw new ImageError(`${label}：只支持 JPEG、PNG、WebP（${path}）`);
+  if (!info)
+    throw new ImageError(
+      tr(
+        `${label}：只支持 JPEG、PNG、WebP（${path}）`,
+        `${label}: only JPEG, PNG and WebP are supported (${path})`,
+      ),
+    );
   if (!info.width || !info.height || info.width > MAX_SIDE || info.height > MAX_SIDE)
-    throw new ImageError(`${label}：尺寸不合法（${info.width}×${info.height}）`);
+    throw new ImageError(
+      tr(
+        `${label}：尺寸不合法（${info.width}×${info.height}）`,
+        `${label}: invalid size (${info.width}×${info.height})`,
+      ),
+    );
   return {
     path,
     bytes,
@@ -272,7 +321,7 @@ export function uploadReference(
   image: LocalImage,
   fetcher?: typeof fetch,
 ): Promise<ImageReceipt> {
-  return prepareImage(gateway, state, image, 'reference', '参考图', fetcher);
+  return prepareImage(gateway, state, image, 'reference', tr('参考图', 'reference image'), fetcher);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -558,10 +607,14 @@ function resultUrl(value: unknown): string {
 /** A batch from an answer: outputs in request order, each with its charge state. */
 export function parseBatch(value: unknown): ImageBatch {
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new UgcFailure('PROTOCOL', '回包里没有生成批次');
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('回包里没有生成批次', 'The response has no generation batch'),
+    );
   const batch = value as Json;
   const id = text(batch.batch_id);
-  if (!id) throw new UgcFailure('PROTOCOL', '回包里没有批次 ID');
+  if (!id)
+    throw new UgcFailure('PROTOCOL', tr('回包里没有批次 ID', 'The response has no batch ID'));
   const tasks = Array.isArray(batch.tasks) ? batch.tasks : [];
   const billing = Array.isArray(batch.billing_status) ? batch.billing_status : [];
   const outputs = tasks.map((item, position): ImageOutput => {
@@ -644,26 +697,34 @@ export function outcomeOf(output: ImageOutput): OutputOutcome {
 }
 
 const STAGE: Record<number, string> = {
-  [Generation.queued]: '排队中',
-  [Generation.running]: '生成中',
-  [Generation.persisting]: '保存中',
+  get [Generation.queued]() {
+    return tr('排队中', 'queued');
+  },
+  get [Generation.running]() {
+    return tr('生成中', 'generating');
+  },
+  get [Generation.persisting]() {
+    return tr('保存中', 'saving');
+  },
 };
 
 /** One output's charge in words; refunding is never called refunded. */
 export function billingText(billing: string, unitPrice: number | null): string {
   switch (billing) {
     case 'charged':
-      return unitPrice === null ? '已扣费' : `已扣 ${unitPrice} 钻石`;
+      return unitPrice === null
+        ? tr('已扣费', 'charged')
+        : tr(`已扣 ${unitPrice} 钻石`, `charged ${unitPrice} gems`);
     case 'free':
-      return '免费';
+      return tr('免费', 'free');
     case 'pending':
-      return '扣费确认中';
+      return tr('扣费确认中', 'confirming the charge');
     case 'refunding':
-      return '退款中…';
+      return tr('退款中…', 'refunding…');
     case 'refunded':
-      return '钻石已退回';
+      return tr('钻石已退回', 'gems refunded');
     case 'failed':
-      return '扣费失败';
+      return tr('扣费失败', 'charge failed');
     default:
       return '';
   }
@@ -673,21 +734,43 @@ export function billingText(billing: string, unitPrice: number | null): string {
 export function describeOutput(output: ImageOutput, unitPrice: number | null): string {
   const billing = billingText(output.billing, unitPrice);
   const label = `#${output.index}`;
-  const code = output.failure?.code ? `（${output.failure.code}）` : '';
+  const code = output.failure?.code
+    ? tr(`（${output.failure.code}）`, ` (${output.failure.code})`)
+    : '';
   // A failed output still charged: its refund has not started yet.
   const refund =
-    output.billing === 'charged' ? `${billing}，退款还没有开始，稍后可再查看` : billing;
+    output.billing === 'charged'
+      ? tr(
+          `${billing}，退款还没有开始，稍后可再查看`,
+          `${billing}; the refund has not started yet, check again later`,
+        )
+      : billing;
   switch (outcomeOf(output)) {
     case 'succeeded':
-      return `${label} ✓ 成功${billing ? `（${billing}）` : ''}`;
+      return tr(
+        `${label} ✓ 成功${billing ? `（${billing}）` : ''}`,
+        `${label} ✓ succeeded${billing ? ` (${billing})` : ''}`,
+      );
     case 'failed':
-      return `${label} ✗ 生成失败${code}。${refund}`;
+      return tr(
+        `${label} ✗ 生成失败${code}。${refund}`,
+        `${label} ✗ generation failed${code}${refund ? `: ${refund}` : ''}`,
+      );
     case 'rejected':
-      return `${label} ✗ 未通过内容检查${code}。${refund}`;
+      return tr(
+        `${label} ✗ 未通过内容检查${code}。${refund}`,
+        `${label} ✗ failed the content check${code}${refund ? `: ${refund}` : ''}`,
+      );
     case 'interrupted':
-      return `${label} … 生成已中断，正在确认结果${billing ? `（${billing}）` : ''}`;
+      return tr(
+        `${label} … 生成已中断，正在确认结果${billing ? `（${billing}）` : ''}`,
+        `${label} … generation interrupted, confirming the result${billing ? ` (${billing})` : ''}`,
+      );
     default:
-      return `${label} … ${STAGE[output.generationStatus] ?? '处理中'}${billing ? `（${billing}）` : ''}`;
+      return tr(
+        `${label} … ${STAGE[output.generationStatus] ?? '处理中'}${billing ? `（${billing}）` : ''}`,
+        `${label} … ${STAGE[output.generationStatus] ?? 'processing'}${billing ? ` (${billing})` : ''}`,
+      );
   }
 }
 
@@ -699,16 +782,20 @@ export function progressLine(batch: ImageBatch): string {
     into.set(label, (into.get(label) ?? 0) + 1);
   for (const output of batch.outputs) {
     const outcome = outcomeOf(output);
-    if (outcome === 'succeeded') add(counts, '成功');
-    else if (outcome === 'failed') add(counts, '失败');
-    else if (outcome === 'rejected') add(counts, '未通过内容检查');
-    else if (outcome === 'interrupted') add(counts, '已中断');
-    else add(counts, STAGE[output.generationStatus] ?? '处理中');
-    if (output.billing === 'pending') add(money, '扣费确认中');
-    if (output.billing === 'refunding') add(money, '退款中');
+    if (outcome === 'succeeded') add(counts, tr('成功', 'succeeded'));
+    else if (outcome === 'failed') add(counts, tr('失败', 'failed'));
+    else if (outcome === 'rejected') add(counts, tr('未通过内容检查', 'failed the content check'));
+    else if (outcome === 'interrupted') add(counts, tr('已中断', 'interrupted'));
+    else add(counts, STAGE[output.generationStatus] ?? tr('处理中', 'processing'));
+    if (output.billing === 'pending') add(money, tr('扣费确认中', 'confirming the charge'));
+    if (output.billing === 'refunding') add(money, tr('退款中', 'refunding'));
   }
-  if (!counts.size) return '进度：等待服务端创建任务';
-  return `进度：${[...counts, ...money].map(([label, count]) => `${label} ${count}`).join(' · ')}`;
+  if (!counts.size)
+    return tr('进度：等待服务端创建任务', 'Progress: waiting for the server to create the tasks');
+  return tr(
+    `进度：${[...counts, ...money].map(([label, count]) => `${label} ${count}`).join(' · ')}`,
+    `Progress: ${[...counts, ...money].map(([label, count]) => `${label} ${count}`).join(' · ')}`,
+  );
 }
 
 /** Gems by charge state (null without a known unit price), and pictures by charge state. */
@@ -779,7 +866,7 @@ export async function saveOutput(
       cover: '',
       avatar: '',
       mime,
-      note: error instanceof Error ? error.message : '无法解码',
+      note: error instanceof Error ? error.message : tr('无法解码', 'cannot decode'),
     };
   }
   return {
@@ -798,17 +885,33 @@ export type CharacterImage = { path: string } | { assetId: string };
 export function checkCharacterFile(file: string): string {
   const absolute = resolve(file);
   if (extname(absolute).toLowerCase() === '.json')
-    throw new UsageError('--into 只支持 YAML 角色文件（.yaml / .yml）');
+    throw new UsageError(
+      tr(
+        '--into 只支持 YAML 角色文件（.yaml / .yml）',
+        '--into only supports YAML character files (.yaml / .yml)',
+      ),
+    );
   let raw: string;
   try {
     raw = readFileSync(absolute, 'utf8');
   } catch {
-    throw new UsageError(`读不到角色文件：${file}`);
+    throw new UsageError(tr(`读不到角色文件：${file}`, `Cannot read the character file: ${file}`));
   }
   const document = parseDocument(raw);
   if (document.errors.length)
-    throw new UsageError(`角色文件格式错误：${document.errors[0].message}`);
-  if (!isMap(document.contents)) throw new UsageError('角色文件的顶层必须是键值对象');
+    throw new UsageError(
+      tr(
+        `角色文件格式错误：${document.errors[0].message}`,
+        `The character file could not be parsed: ${document.errors[0].message}`,
+      ),
+    );
+  if (!isMap(document.contents))
+    throw new UsageError(
+      tr(
+        '角色文件的顶层必须是键值对象',
+        'The top level of the character file must be a key-value map',
+      ),
+    );
   return absolute;
 }
 

@@ -1,3 +1,4 @@
+import { tr } from '../core/i18n.js';
 import { type ImParagraph, ParagraphType } from '../im/models.js';
 
 /**
@@ -34,7 +35,7 @@ function pieces(paragraph: ImParagraph, options: RenderOptions, limit: number): 
   const text = paragraph.text.trim();
   if (!text) return [];
   const name = speaker(paragraph, options);
-  const prefix = name ? `${name}：` : '';
+  const prefix = name ? tr(`${name}：`, `${name}: `) : '';
   const room = Math.max(200, limit - prefix.length);
   const parts: string[] = [];
   let rest = text;
@@ -44,7 +45,7 @@ function pieces(paragraph: ImParagraph, options: RenderOptions, limit: number): 
     const cut = Math.max(
       window.lastIndexOf('\n'),
       window.lastIndexOf(' '),
-      window.lastIndexOf('。'),
+      window.lastIndexOf('。'), // i18n-ignore
     );
     const at = cut > room / 2 ? cut + 1 : room;
     parts.push(rest.slice(0, at));
@@ -55,7 +56,8 @@ function pieces(paragraph: ImParagraph, options: RenderOptions, limit: number): 
     const body = escapeHtml(part);
     if (paragraph.type === ParagraphType.narration)
       return { html: `<i>${body}</i>`, length: part.length };
-    const label = index === 0 && name ? `<b>${escapeHtml(name)}</b>：` : '';
+    const label =
+      index === 0 && name ? tr(`<b>${escapeHtml(name)}</b>：`, `<b>${escapeHtml(name)}</b>: `) : '';
     return { html: label + body, length: part.length + (index === 0 ? prefix.length : 0) };
   });
 }

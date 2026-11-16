@@ -13,6 +13,7 @@ import { uptime } from 'node:os';
 import { dirname } from 'node:path';
 
 import { ensurePrivateDir } from './files.js';
+import { tr } from './i18n.js';
 
 /**
  * A lock file shared by every `yomi` process of this user (`gh`-style, no native module): created
@@ -24,7 +25,12 @@ import { ensurePrivateDir } from './files.js';
 
 export class LockTimeout extends Error {
   constructor(path: string) {
-    super(`等待锁超时：${path}（另一个 yomi 进程正在使用）`);
+    super(
+      tr(
+        `等待锁超时：${path}（另一个 yomi 进程正在使用）`,
+        `Timed out waiting for the lock: ${path} (another yomi process is using it)`,
+      ),
+    );
     this.name = 'LockTimeout';
   }
 }

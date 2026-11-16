@@ -3,6 +3,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 
 import { ApiError, NotSignedIn } from './core/api.js';
 import { UsageError } from './core/env.js';
+import { type Language, parseLanguage, setLanguage, tr } from './core/i18n.js';
 import { redact } from './core/redact.js';
 import { type Io, paint, processIo, say } from './core/ui.js';
 import { VERSION } from './core/version.js';
@@ -25,7 +26,9 @@ import {
   specFromObject,
 } from './ugc/spec.js';
 
-const HELP = `yomi ${VERSION} — Yomi 命令行工具
+function help(): string {
+  return tr(
+    `yomi ${VERSION} — Yomi 命令行工具
 
 用法：yomi <命令> [选项]
 
@@ -49,6 +52,7 @@ const HELP = `yomi ${VERSION} — Yomi 命令行工具
   --env <prod|test>  环境，默认 prod（生产，创建和花钻石前要再确认）；test 需自己配置地址
                      （YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN）
   --lane <名称>      测试环境的泳道，加 Lane 请求头
+  --lang zh|en       输出语言（默认按 YOMI_LANG 或系统语言：zh 开头为中文，其余英文）
   --debug            打印请求日志（凭证已脱敏）
   -h, --help         帮助；yomi <命令> --help 查看命令选项
   -v, --version      版本
@@ -58,14 +62,61 @@ const HELP = `yomi ${VERSION} — Yomi 命令行工具
   yomi init lin-xia.yaml && yomi check -f lin-xia.yaml
   yomi preview -f lin-xia.yaml
   yomi create -f lin-xia.yaml
-`;
+`,
+    `yomi ${VERSION} — Yomi command-line tool
 
-const COMMAND_HELP: Record<string, string> = {
-  login: `yomi login [--no-browser] [--timeout 秒]
+Usage: yomi <command> [options]
+
+Commands:
+  login              Sign in through the web (opens a browser; you confirm on the web page)
+  logout             Sign out; revoke and delete the credentials on this machine
+  whoami             Show the signed-in account
+  init [file]        Write a character file template (default character.yaml)
+  check -f <file>    Check a character file against the app's rules (offline)
+  voices             List the available voices
+  tags               List the available tags
+  create -f <file>   Create a character
+  preview -f <file>  Preview a chat with the draft character in the terminal (creates nothing)
+  image -p <prompt>  Generate character images with AI (cover / avatar), gems charged per image
+  video -f <file>    Generate character videos with AI (dynamic cover / intro video), gems charged per quote
+  persona list       Your chat personas
+  persona avatar     Generate a persona avatar with AI
+  relay --telegram   Relay private chats with your own Telegram bot to a published Yomi character (experimental)
+
+Global options:
+  --env <prod|test>  Environment, default prod (production: asks again before creating or spending gems); test
+                     needs its addresses set up (YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN)
+  --lane <name>      Lane in the test environment; adds the Lane request header
+  --lang zh|en       Output language (default from YOMI_LANG or the system language: zh… is Chinese, anything else English)
+  --debug            Print request logs (credentials redacted)
+  -h, --help         Help; yomi <command> --help shows a command's options
+  -v, --version      Version
+
+Examples:
+  yomi login
+  yomi init lin-xia.yaml && yomi check -f lin-xia.yaml
+  yomi preview -f lin-xia.yaml
+  yomi create -f lin-xia.yaml
+`,
+  );
+}
+
+/** Built per call, in the language of this run. */
+function commandHelp(): Record<string, string> {
+  return {
+    login: tr(
+      `yomi login [--no-browser] [--timeout 秒]
   打开 Yomi 网页的授权页，确认码一致后点「授权」。CLI 会建立自己的会话，不影响 App 和网页的登录。
   --no-browser   只打印授权地址，不自动打开浏览器
   --timeout      等待授权的秒数，默认 300`,
-  create: `yomi create -f <文件> [字段选项] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
+      `yomi login [--no-browser] [--timeout seconds]
+  Opens the authorization page on the Yomi website; when the confirmation codes match, click "Authorize". The CLI
+  gets its own session and does not affect your sign-in on the app or the web.
+  --no-browser   Only print the authorization URL; do not open a browser
+  --timeout      Seconds to wait for authorization, default 300`,
+    ),
+    create: tr(
+      `yomi create -f <文件> [字段选项] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
   按文件创建一个角色（字段规则同 App）。会先确认 18+ 与版权声明，再上传并审核图片、提交。
   --accept-declaration  非交互运行时明确确认声明
   --dry-run             只打印请求体，不创建（图片仍会上传审核）
@@ -73,14 +124,35 @@ const COMMAND_HELP: Record<string, string> = {
   --confirm-prod        非交互在生产环境运行时明确确认
 ${'  '}字段选项（覆盖文件里的值）：--name --gender --description --opening --background
   --visibility --voice --tag（可重复）--cover --avatar`,
-  preview: `yomi preview -f <文件> [字段选项] [-m 消息 ...] [--allow-paid] [--accept-declaration]
+      `yomi create -f <file> [field options] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
+  Creates a character from the file (same field rules as the app). First confirms the 18+ and copyright
+  declaration, then uploads the images for review and submits.
+  --accept-declaration  Accept the declaration explicitly when running non-interactively
+  --dry-run             Only print the request body; create nothing (images are still uploaded for review)
+  --new                 Create another new character when this file's content was already created
+  --confirm-prod        Confirm explicitly when running non-interactively in production
+${'  '}Field options (override the values in the file): --name --gender --description --opening --background
+  --visibility --voice --tag (repeatable) --cover --avatar`,
+    ),
+    preview: tr(
+      `yomi preview -f <文件> [字段选项] [-m 消息 ...] [--allow-paid] [--accept-declaration]
   用文件里的草稿内容开一个临时预演会话（与 App 的「预览」相同），流式显示回复。
   先显示服务端返回的免费条数；用完后发送会按标准费率扣钻石，扣之前必须输入 yes 确认。
   -m, --message         非交互：依次发送这些消息，收完回复后退出
   --allow-paid          非交互时允许免费条数用完后继续付费发送
   --reply-timeout       等待一条回复的秒数，默认 90，超时后改为读取消息记录
   --accept-declaration  非交互运行时明确确认声明`,
-  image: `yomi image -p <描述> [--count N] [--model ID] [--style ID] [--reference 图片] [选项]
+      `yomi preview -f <file> [field options] [-m message ...] [--allow-paid] [--accept-declaration]
+  Opens a temporary preview session with the draft in the file (the same as "Preview" in the app) and streams
+  the replies. Shows the free messages the server grants first; once they run out, each message is charged
+  gems at the standard rate, and you must type yes to confirm before any charge.
+  -m, --message         Non-interactive: send these messages in order, exit once the replies are in
+  --allow-paid          Non-interactive: keep sending, paid, after the free messages run out
+  --reply-timeout       Seconds to wait for a reply, default 90; after that, read the message history instead
+  --accept-declaration  Accept the declaration explicitly when running non-interactively`,
+    ),
+    image: tr(
+      `yomi image -p <描述> [--count N] [--model ID] [--style ID] [--reference 图片] [选项]
   用 AI 生成角色图片，下载原图并裁好封面（1:2）和头像（1:1）。先显示单价、张数、总价和余额，
   输入 yes（或 --accept-price）才扣钻石；生成失败的那张自动退款。
   --options            列出可用模型、风格、比例和价格（不扣费）
@@ -96,7 +168,29 @@ ${'  '}字段选项（覆盖文件里的值）：--name --gender --description -
   --resume ID --forget 放弃本机对这个请求或批次的跟踪（不取消、不退款；同样的命令会重新扣费）
   --accept-price       非交互时同意显示的价格
   --json               输出 JSON`,
-  video: `yomi video -f <角色文件> [--template ID | --prompt 描述] [--duration 秒] [选项]
+      `yomi image -p <prompt> [--count N] [--model ID] [--style ID] [--reference image] [options]
+  Generates character images with AI, downloads the originals and crops a cover (1:2) and an avatar (1:1).
+  Shows the unit price, count, total and balance first; gems are charged only after you type yes (or
+  --accept-price). An image that fails to generate is refunded automatically.
+  --options            List the models, styles, aspect ratios and prices (no charge)
+  --count N            Number of images (1–4, default 4)
+  --model / --style    Model and style (default: the first model, no style)
+  --ratio R            Aspect ratio (default 9:16, else the first one)
+  --reference image    Reference image (uploaded for review first)
+  --out dir            Where to save, default ./yomi-media
+  --pick N --into file --as cover|avatar|both
+                       Write the Nth cropped image into the character file's cover/avatar (comments kept)
+  --resume batch|request
+                       Continue an earlier run: what was accepted is only checked and downloaded, not charged
+                       again; a request with an unknown outcome is resent as is (same request ID, charged once
+                       at most)
+  --resume ID --forget Stop tracking this request or batch on this machine (no cancel, no refund; the same
+                       command charges again)
+  --accept-price       Accept the shown price when running non-interactively
+  --json               Output JSON`,
+    ),
+    video: tr(
+      `yomi video -f <角色文件> [--template ID | --prompt 描述] [--duration 秒] [选项]
   用 AI 为角色生成视频。首帧默认取角色封面（裁成 9:16），先上传首帧、拿到报价，显示价格和余额，
   输入 yes（或 --accept-price）才创建任务扣钻石；失败自动退款。结果记在本机，下次 yomi create
   这个角色文件时一起提交（yomi preview 试聊不带视频）。
@@ -110,7 +204,25 @@ ${'  '}字段选项（覆盖文件里的值）：--name --gender --description -
                        （同一请求 ID，最多扣一次）
   --out 目录           保存预览视频，默认 ./yomi-media
   --accept-price / --confirm-prod / --json`,
-  persona: `yomi persona list
+      `yomi video -f <character file> [--template ID | --prompt text] [--duration seconds] [options]
+  Generates a video for the character with AI. The first frame is the character's cover by default (cropped to
+  9:16): the CLI uploads it, gets a quote and shows the price and balance; the task is created and gems are
+  charged only after you type yes (or --accept-price); a failure is refunded automatically. The result is kept
+  on this machine and submitted the next time you run yomi create with this character file (a yomi preview
+  does not include the video).
+  --options            List the templates, durations and listed prices (no charge)
+  --template ID        Template; without it, a custom video (--prompt text)
+  --duration seconds   Duration (default: the template's or the custom default)
+  --frame image        Your own first frame (JPEG/PNG, cropped to 9:16)
+  --as dynamic-cover|intro-video   Use as the dynamic cover (default) or the intro video
+  --list               List the video tasks generated for this character file
+  --resume ID          Continue an earlier task: what was accepted is only checked, not charged again; a
+                       request with an unknown outcome is resent as is (same request ID, charged once at most)
+  --out dir            Where to save the preview video, default ./yomi-media
+  --accept-price / --confirm-prod / --json`,
+    ),
+    persona: tr(
+      `yomi persona list
 yomi persona avatar -p <描述> [--persona ID | --new --name 名字 --gender male|female|other --age N] [选项]
   AI 生成聊天人设（主控）头像，选一张写进人设。先显示单价、张数、总价和余额，输入 yes 才扣钻石；
   失败或未通过内容检查的那张不扣费。
@@ -123,7 +235,25 @@ yomi persona avatar -p <描述> [--persona ID | --new --name 名字 --gender mal
                        重发（同一请求 ID，最多扣一次）
   --create-again       新建人设的结果未知、persona list 里确认没有它时，非交互地再建一次
   --accept-price / --confirm-prod / --json`,
-  relay: `yomi relay --telegram [--character ID] [--max-spend 钻石] [选项]
+      `yomi persona list
+yomi persona avatar -p <prompt> [--persona ID | --new --name name --gender male|female|other --age N] [options]
+  Generates chat persona avatars with AI; pick one to write into the persona. Shows the unit price, count, total
+  and balance first; gems are charged only after you type yes. An image that fails or does not pass the
+  content check is not charged.
+  --options            List the available models and styles (no charge)
+  --count N            Number of images (default: the server's limit)
+  --reference image    Reference image
+  --pick N             Use the Nth image directly; without it, pick interactively (a non-interactive run only
+                       downloads, writes nothing)
+  --out dir            Where to save, default ./yomi-media
+  --resume ID          Continue an earlier generation: what was accepted is only checked, not charged again; a
+                       request with an unknown outcome is resent as is (same request ID, charged once at most)
+  --create-again       When creating the new persona had an unknown outcome and persona list shows it is not
+                       there, create it again non-interactively
+  --accept-price / --confirm-prod / --json`,
+    ),
+    relay: tr(
+      `yomi relay --telegram [--character ID] [--max-spend 钻石] [选项]
   用你在 @BotFather 建的 bot，把你本人在 Telegram 私聊里发的消息转给 Yomi 角色，流式回复。
   只服务配对过的本人。默认不花钻石：付费要先在 Telegram 里用 /budget 设预算并点按钮确认，
   累计不超过本机的 --max-spend。服务端支持「只用免费额度」之前，没设预算不会发出任何消息。
@@ -142,17 +272,48 @@ yomi persona avatar -p <描述> [--persona ID | --new --name 名字 --gender mal
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
   --no-drafts           不用流式草稿，改为编辑消息
   --confirm-prod        非交互在生产环境运行时明确确认`,
-  check: `yomi check -f <文件> [字段选项]
+      `yomi relay --telegram [--character ID] [--max-spend gems] [options]
+  With the bot you created with @BotFather, relays the messages you yourself send it in a Telegram private chat
+  to a Yomi character and streams the replies. Serves only the paired owner. Spends no gems by default: paying
+  needs a budget set with /budget in Telegram and confirmed with a button, and the total never goes over the
+  local spending cap (--max-spend). Until the server supports "free messages only", nothing is sent without a
+  budget. See docs/relay.md.
+  --set-token           Set or replace the bot token (typed in the terminal, hidden; or with --token-stdin)
+  --token-stdin         Read the token from standard input (never from arguments or environment variables)
+  --pair                Pair again (shows a new pairing code)
+  --character ID        The character to start with
+  --max-spend amount    Local spending cap: the gems relay may spend in total on this machine, default 0 (no gems)
+  --reset-spend         Reset the total counted against the local spending cap
+  --allow-file-store    Without a system keychain, allow keeping the token and session in a 0600 file
+  --install-service     Install as a background service (macOS launchd / Linux systemd --user); pair first
+  --uninstall-service   Stop and remove the background service
+  --service-status      Show the background service status
+  --forget              Delete the bot token and pairing saved on this machine
+  --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
+  --no-drafts           Edit messages instead of streaming drafts
+  --confirm-prod        Confirm explicitly when running non-interactively in production`,
+    ),
+    check: tr(
+      `yomi check -f <文件> [字段选项]
   按 App 的必填项和长度限制检查角色文件，不联网。`,
-  init: `yomi init [文件] [--force]
+      `yomi check -f <file> [field options]
+  Checks a character file against the app's required fields and length limits, offline.`,
+    ),
+    init: tr(
+      `yomi init [文件] [--force]
   写一份角色文件模板。`,
-  voices: `yomi voices [--json]`,
-  tags: `yomi tags [--query 关键词] [--json]`,
-  logout: `yomi logout`,
-  whoami: `yomi whoami`,
-};
+      `yomi init [file] [--force]
+  Writes a character file template.`,
+    ),
+    voices: `yomi voices [--json]`,
+    tags: tr(`yomi tags [--query 关键词] [--json]`, `yomi tags [--query keyword] [--json]`),
+    logout: `yomi logout`,
+    whoami: `yomi whoami`,
+  };
+}
 
 const GLOBAL: ParseArgsConfig['options'] = {
+  lang: { type: 'string' },
   env: { type: 'string' },
   lane: { type: 'string' },
   debug: { type: 'boolean' },
@@ -282,7 +443,12 @@ function specFrom(values: Values): CharacterSpec {
     if (typeof values[key] === 'string') overrides[key] = values[key];
   if (Array.isArray(values.tag)) overrides.tags = values.tag;
   if (!base && Object.keys(overrides).length === 0)
-    throw new UsageError('需要角色文件：-f character.yaml（yomi init 生成模板）');
+    throw new UsageError(
+      tr(
+        '需要角色文件：-f character.yaml（yomi init 生成模板）',
+        'A character file is needed: -f character.yaml (yomi init writes a template)',
+      ),
+    );
   if (!base) return specFromObject(overrides);
   if (Object.keys(overrides).length === 0) return base;
   const patched = specFromObject(overrides);
@@ -300,7 +466,12 @@ function seconds(value: unknown, fallback: number, label: string): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 3600)
-    throw new UsageError(`${label} 必须是 1–3600 之间的秒数`);
+    throw new UsageError(
+      tr(
+        `${label} 必须是 1–3600 之间的秒数`,
+        `${label} must be a number of seconds from 1 to 3600`,
+      ),
+    );
   return parsed;
 }
 
@@ -309,7 +480,12 @@ function whole(value: unknown, label: string, min: number, max: number): number 
   if (value === undefined) return null;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max)
-    throw new UsageError(`${label} 必须是 ${min}–${max} 的整数`);
+    throw new UsageError(
+      tr(
+        `${label} 必须是 ${min}–${max} 的整数`,
+        `${label} must be a whole number from ${min} to ${max}`,
+      ),
+    );
   return parsed;
 }
 
@@ -317,26 +493,67 @@ function gems(value: unknown): number {
   if (value === undefined) return 0;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1_000_000)
-    throw new UsageError('--max-spend 必须是 0–1000000 的整数（钻石）');
+    throw new UsageError(
+      tr(
+        '--max-spend 必须是 0–1000000 的整数（钻石）',
+        '--max-spend must be a whole number of gems from 0 to 1000000',
+      ),
+    );
   return parsed;
 }
 
+/**
+ * `--lang zh|en` (or `--lang=…`) anywhere on the line: undefined when absent, null when the value is
+ * neither (refused by `main`).
+ */
+function langFlag(argv: string[]): Language | null | undefined {
+  const at = argv.findIndex((arg) => arg === '--lang' || arg.startsWith('--lang='));
+  if (at < 0) return undefined;
+  const value = argv[at].startsWith('--lang=') ? argv[at].slice('--lang='.length) : argv[at + 1];
+  return /^(zh|en)([-_].*)?$/i.test(value ?? '') ? parseLanguage(value) : null;
+}
+
+/** The arguments with `--lang` and its value taken out (it may come before the command). */
+function withoutLang(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--lang') i++;
+    else if (!argv[i].startsWith('--lang=')) out.push(argv[i]);
+  }
+  return out;
+}
+
 export async function main(argv: string[], io: Io = processIo()): Promise<number> {
+  const requested = langFlag(argv);
+  if (requested === null) {
+    io.stderr.write('--lang 只能是 zh 或 en / --lang must be zh or en\n'); // i18n-ignore
+    return 2;
+  }
+  // For this run only: the next one (a test, a second command) starts from the environment again.
+  setLanguage(requested ?? null);
+  try {
+    return await run(withoutLang(argv), io);
+  } finally {
+    setLanguage(null);
+  }
+}
+
+async function run(argv: string[], io: Io): Promise<number> {
   process.exitCode = undefined;
   const command = argv[0] && !argv[0].startsWith('-') ? argv[0] : '';
   const rest = command ? argv.slice(1) : argv;
   if (!command) {
     const { values } = parseArgs({ args: rest, options: GLOBAL, strict: false });
-    say(io, values.version ? VERSION : HELP);
+    say(io, values.version ? VERSION : help());
     return 0;
   }
   if (command === 'help') {
-    say(io, COMMAND_HELP[rest[0] ?? ''] ?? HELP);
+    say(io, commandHelp()[rest[0] ?? ''] ?? help());
     return 0;
   }
   const own = OPTIONS[command];
   if (!own) {
-    io.stderr.write(`不认识的命令：${command}\n\n${HELP}`);
+    io.stderr.write(tr(`不认识的命令：${command}\n\n`, `Unknown command: ${command}\n\n`) + help());
     return 2;
   }
   let parsed;
@@ -350,13 +567,13 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
   } catch (error) {
     // A token pasted as an argument must not be printed back.
     io.stderr.write(
-      `${redact(error instanceof Error ? error.message : String(error))}\n\n${COMMAND_HELP[command]}\n`,
+      `${redact(error instanceof Error ? error.message : String(error))}\n\n${commandHelp()[command]}\n`,
     );
     return 2;
   }
   const values = parsed.values as Values;
   if (values.help) {
-    say(io, COMMAND_HELP[command]);
+    say(io, commandHelp()[command]);
     return 0;
   }
   try {
@@ -502,7 +719,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
 function reportError(io: Io, error: unknown) {
   const line = (text: string) => io.stderr.write(paint(io, 'red', redact(text)) + '\n');
   if (error instanceof SpecError) {
-    line('角色文件有问题：');
+    line(tr('角色文件有问题：', 'The character file has problems:'));
     for (const problem of error.problems) io.stderr.write(`  · ${problem}\n`);
   } else if (
     error instanceof NotSignedIn ||
@@ -512,13 +729,22 @@ function reportError(io: Io, error: unknown) {
     line(error.message);
   else if (error instanceof UgcFailure)
     line(
-      `请求失败（${error.code}）${error.message && error.message !== error.code ? '：' + error.message : ''}`,
+      tr(
+        `请求失败（${error.code}）${error.message && error.message !== error.code ? '：' + error.message : ''}`,
+        `Request failed (${error.code})${error.message && error.message !== error.code ? ': ' + error.message : ''}`,
+      ),
     );
   else if (error instanceof ApiError) {
-    if (error.needsSignIn) line('登录已失效，请重新运行 yomi login');
+    if (error.needsSignIn)
+      line(
+        tr('登录已失效，请重新运行 yomi login', 'Your sign-in has expired; run yomi login again'),
+      );
     else
       line(
-        `请求失败（${error.code}${error.path ? ' ' + error.path : ''}）${error.message ? '：' + error.message : ''}`,
+        tr(
+          `请求失败（${error.code}${error.path ? ' ' + error.path : ''}）${error.message ? '：' + error.message : ''}`,
+          `Request failed (${error.code}${error.path ? ' ' + error.path : ''})${error.message ? ': ' + error.message : ''}`,
+        ),
       );
   } else line(error instanceof Error ? error.message : String(error));
 }

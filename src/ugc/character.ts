@@ -1,4 +1,5 @@
 import type { Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import type { Json } from '../core/json.js';
 import type { LocalState } from '../core/state.js';
 import { videoFeatures } from '../gen/ugcVideo.js';
@@ -61,7 +62,7 @@ async function resolveImage(
   progress: Progress,
   fetcher?: typeof fetch,
 ): Promise<{ ref: ImageRef; url: string }> {
-  const label = kind === 'cover' ? '形象图' : '头像';
+  const label = kind === 'cover' ? tr('形象图', 'cover image') : tr('头像', 'avatar');
   if (input.kind === 'asset') return { ref: { asset_id: input.assetId }, url: '' };
   if (input.kind === 'upload') {
     const result = await call(
@@ -73,7 +74,10 @@ async function resolveImage(
     if (Number(upload.review_status) !== Review.passed || upload.purpose !== kind)
       throw new UgcFailure(
         'IMAGE_REJECTED',
-        `${label} upload_id ${input.uploadId} 不是审核通过的 ${kind} 图片`,
+        tr(
+          `${label} upload_id ${input.uploadId} 不是审核通过的 ${kind} 图片`,
+          `The ${label} upload_id ${input.uploadId} isn't a ${kind} image that passed review`,
+        ),
       );
     return { ref: { upload_id: input.uploadId }, url: String(upload.image_url ?? '') };
   }
@@ -81,8 +85,14 @@ async function resolveImage(
   const known = state.upload(image.sha256, kind);
   progress(
     known?.status === Review.passed
-      ? `${label}（${image.width}×${image.height}）已审核通过，沿用`
-      : `上传并审核${label}（${image.width}×${image.height}）…`,
+      ? tr(
+          `${label}（${image.width}×${image.height}）已审核通过，沿用`,
+          `The ${label} (${image.width}×${image.height}) already passed review; reusing it`,
+        )
+      : tr(
+          `上传并审核${label}（${image.width}×${image.height}）…`,
+          `Uploading the ${label} (${image.width}×${image.height}) for review…`,
+        ),
   );
   const receipt = await prepareImage(gateway, state, image, kind, label, fetcher);
   return { ref: { upload_id: receipt.uploadId }, url: receipt.url };
@@ -97,14 +107,19 @@ export async function resolveCharacter(
 ): Promise<ResolvedCharacter> {
   checkSpec(spec);
   const voice = spec.voice!;
-  progress('读取声音目录…');
+  progress(tr('读取声音目录…', 'Loading the voice catalog…'));
   const catalog = await loadVoiceCatalog(gateway);
   const missing = voice.voices.filter(
     (item) => !catalog.voices.some((entry) => entry.id === item.id),
   );
   if (missing.length)
     throw new SpecError(
-      missing.map((item) => `声音 ${item.id} 不在当前目录里（yomi voices 查看可选声音）`),
+      missing.map((item) =>
+        tr(
+          `声音 ${item.id} 不在当前目录里（yomi voices 查看可选声音）`,
+          `Voice ${item.id} isn't in the current catalog (run yomi voices to see the voices you can use)`,
+        ),
+      ),
     );
   const voiceNames = voice.voices.map(
     (item) => catalog.voices.find((entry) => entry.id === item.id)?.name ?? item.id,
@@ -112,15 +127,22 @@ export async function resolveCharacter(
   let tagIds: string[] = [];
   let tagNames: string[] = [];
   if (spec.tags.length) {
-    progress('读取标签目录…');
+    progress(tr('读取标签目录…', 'Loading the tag catalog…'));
     const tags = await loadAllTags(gateway);
     const resolved = resolveTags(spec.tags, tags.tags);
     if (resolved.unknown.length)
       throw new SpecError(
-        resolved.unknown.map((tag) => `标签「${tag}」不在当前目录里（yomi tags 查看）`),
+        resolved.unknown.map((tag) =>
+          tr(
+            `标签「${tag}」不在当前目录里（yomi tags 查看）`,
+            `Tag "${tag}" isn't in the current catalog (see yomi tags)`,
+          ),
+        ),
       );
     if (resolved.ids.length > tags.maxSelect)
-      throw new SpecError([`标签最多选 ${tags.maxSelect} 个`]);
+      throw new SpecError([
+        tr(`标签最多选 ${tags.maxSelect} 个`, `You can pick at most ${tags.maxSelect} tags`),
+      ]);
     tagIds = resolved.ids;
     tagNames = tagIds.map((id) => tags.tags.find((tag) => tag.id === id)?.name ?? id);
   }
@@ -183,7 +205,11 @@ export function contentForSubmission(
   character: ResolvedCharacter,
   declarationAccepted: boolean,
 ): Json {
-  if (!declarationAccepted) throw new UgcFailure('DECLARATION', '需要先确认 18+ 与版权声明');
+  if (!declarationAccepted)
+    throw new UgcFailure(
+      'DECLARATION',
+      tr('需要先确认 18+ 与版权声明', 'Confirm the 18+ and copyright declaration first'),
+    );
   return {
     ...baseContent(character),
     features: featureContent(character),

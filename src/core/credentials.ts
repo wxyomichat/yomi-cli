@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 
 import type { Environment } from './env.js';
 import { configDir, readJsonFile, writeJsonFile } from './files.js';
+import { tr } from './i18n.js';
 
 /**
  * A signed-in CLI session: its own Gateway session (`account/login`), never the web's or the
@@ -186,7 +187,12 @@ export class KeychainStore implements CredentialStore {
       `-l ${quote(label)} -X ${hex}\n`;
     const result = this.exec(SECURITY, ['-i'], command);
     if (result.status !== 0 || this.getRaw(account) !== value)
-      throw new Error('无法写入系统钥匙串（security add-generic-password 失败）');
+      throw new Error(
+        tr(
+          '无法写入系统钥匙串（security add-generic-password 失败）',
+          'Could not write to the system keychain (security add-generic-password failed)',
+        ),
+      );
   }
   get(account: string) {
     return parse(this.getRaw(account));
@@ -202,7 +208,10 @@ export class KeychainStore implements CredentialStore {
     return this.getRaw(secretAccount(name));
   }
   setSecret(name: string, value: string) {
-    if (!/^[\x20-\x7e]+$/.test(value)) throw new Error('只能保存可打印 ASCII 字符');
+    if (!/^[\x20-\x7e]+$/.test(value))
+      throw new Error(
+        tr('只能保存可打印 ASCII 字符', 'Only printable ASCII characters can be saved'),
+      );
     this.setRaw(secretAccount(name), value);
   }
   deleteSecret(name: string) {
@@ -225,7 +234,13 @@ export class SecretServiceStore implements CredentialStore {
       ['store', `--label=Yomi CLI (${account})`, 'service', SERVICE, 'account', account],
       value,
     );
-    if (result.status !== 0) throw new Error('无法写入 Secret Service（secret-tool store 失败）');
+    if (result.status !== 0)
+      throw new Error(
+        tr(
+          '无法写入 Secret Service（secret-tool store 失败）',
+          'Could not write to the Secret Service (secret-tool store failed)',
+        ),
+      );
   }
   get(account: string) {
     return parse(this.getRaw(account));
@@ -260,16 +275,32 @@ export function openCredentialStore(environ: NodeJS.ProcessEnv = process.env): C
   const forced = environ.YOMI_CREDENTIAL_STORE;
   if (forced === 'file') return new FileStore(join(configDir(environ), 'credentials.json'));
   if (forced && forced !== 'keychain' && forced !== 'auto')
-    throw new Error(`YOMI_CREDENTIAL_STORE 只能是 auto、keychain 或 file`);
+    throw new Error(
+      tr(
+        `YOMI_CREDENTIAL_STORE 只能是 auto、keychain 或 file`,
+        `YOMI_CREDENTIAL_STORE must be auto, keychain or file`,
+      ),
+    );
   if (process.platform === 'darwin' && existsSync('/usr/bin/security')) return new KeychainStore();
   if (process.platform === 'linux' && available('secret-tool', ['--version']))
     return new SecretServiceStore();
-  if (forced === 'keychain') throw new Error('这台机器没有可用的系统钥匙串');
+  if (forced === 'keychain')
+    throw new Error(
+      tr('这台机器没有可用的系统钥匙串', 'This machine has no usable system keychain'),
+    );
   return new FileStore(join(configDir(environ), 'credentials.json'));
 }
 
 export function storeDescription(kind: StoreKind): string {
-  if (kind === 'keychain') return 'macOS 钥匙串（服务名 yomi-cli）';
-  if (kind === 'secret-service') return '系统 Secret Service（服务名 yomi-cli）';
-  return `本地文件 ${join(configDir(), 'credentials.json')}（权限 0600）`;
+  if (kind === 'keychain')
+    return tr('macOS 钥匙串（服务名 yomi-cli）', 'macOS keychain (service name yomi-cli)');
+  if (kind === 'secret-service')
+    return tr(
+      '系统 Secret Service（服务名 yomi-cli）',
+      'system Secret Service (service name yomi-cli)',
+    );
+  return tr(
+    `本地文件 ${join(configDir(), 'credentials.json')}（权限 0600）`,
+    `local file ${join(configDir(), 'credentials.json')} (mode 0600)`,
+  );
 }

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { currentLanguage } from '../core/device.js';
 import { describeEnvironment, isProduction, UsageError } from '../core/env.js';
 import { configDir, ensurePrivateDir } from '../core/files.js';
+import { tr } from '../core/i18n.js';
 import { acquireProcessLock } from '../core/lock.js';
 import { readSecret } from '../core/prompt.js';
 import { paint, say, warn } from '../core/ui.js';
@@ -95,12 +96,20 @@ async function askToken(context: Context, fromStdin: boolean): Promise<string> {
       paint(
         io,
         'dim',
-        '在 Telegram 的 @BotFather 里新建一个 bot（/newbot），把它给的 token 粘贴到这里（不会显示）。',
+        tr(
+          '在 Telegram 的 @BotFather 里新建一个 bot（/newbot），把它给的 token 粘贴到这里（不会显示）。',
+          'Create a bot with @BotFather in Telegram (/newbot) and paste the token it gives you here (it will not be shown).',
+        ),
       ),
     );
   const token = await readSecret(io, 'Bot token: ', { fromStdin });
   if (!BOT_TOKEN.test(token))
-    throw new UsageError('这不像是 bot token（应为 123456789:AA… 的形式）');
+    throw new UsageError(
+      tr(
+        '这不像是 bot token（应为 123456789:AA… 的形式）',
+        'This does not look like a bot token (it should look like 123456789:AA…)',
+      ),
+    );
   return token;
 }
 
@@ -112,7 +121,10 @@ async function verifiedBot(token: string) {
   } catch (error) {
     if (error instanceof TelegramError && error.unauthorized)
       throw new UsageError(
-        'Telegram 不认这个 token：确认是 BotFather 给的、没有在 /revoke 后失效。',
+        tr(
+          'Telegram 不认这个 token：确认是 BotFather 给的、没有在 /revoke 后失效。',
+          'Telegram does not accept this token: check that it came from BotFather and was not invalidated with /revoke.',
+        ),
       );
     throw error;
   }
@@ -121,29 +133,54 @@ async function verifiedBot(token: string) {
 function printPairing(context: Context, code: PairingCode, username: string) {
   const { io } = context;
   say(io);
-  say(io, `在 Telegram 里打开 @${username}，发送：`);
+  say(io, tr(`在 Telegram 里打开 @${username}，发送：`, `Open @${username} in Telegram and send:`));
   say(io, `  ${paint(io, 'bold', `/start ${code.code}`)}`);
-  say(io, `或直接打开：${code.link(username)}`);
-  say(io, paint(io, 'dim', '配对码 15 分钟内有效、只能用一次，只显示在这个终端里：不要发给别人。'));
+  say(io, tr(`或直接打开：${code.link(username)}`, `Or open: ${code.link(username)}`));
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      tr(
+        '配对码 15 分钟内有效、只能用一次，只显示在这个终端里：不要发给别人。',
+        'The pairing code is valid for 15 minutes, works once and is shown only in this terminal: do not send it to anyone.',
+      ),
+    ),
+  );
   say(io);
 }
 
 export async function relay(context: Context, options: RelayCommandOptions) {
   const { io, store } = context;
-  if (!options.telegram) throw new UsageError('目前只支持 Telegram：yomi relay --telegram');
+  if (!options.telegram)
+    throw new UsageError(
+      tr(
+        '目前只支持 Telegram：yomi relay --telegram',
+        'Only Telegram is supported for now: yomi relay --telegram',
+      ),
+    );
   // Taking things away works without a keychain too.
   if (options.uninstallService) {
     const plan = planFor(context, options);
     const removed = uninstallService(plan);
-    say(io, removed ? `已停止并删除后台服务（${plan.path}）` : '没有安装后台服务。');
+    say(
+      io,
+      removed
+        ? tr(
+            `已停止并删除后台服务（${plan.path}）`,
+            `Stopped and removed the background service (${plan.path})`,
+          )
+        : tr('没有安装后台服务。', 'No background service is installed.'),
+    );
     return;
   }
   if (options.serviceStatus) {
     const plan = planFor(context, options);
-    if (!existsSync(plan.path)) return void say(io, '没有安装后台服务。');
+    if (!existsSync(plan.path))
+      return void say(io, tr('没有安装后台服务。', 'No background service is installed.'));
     const [command, ...args] = plan.status;
     const result = runCommand(command, args);
-    say(io, result.output || `${plan.label}：没有运行`);
+    say(io, result.output || tr(`${plan.label}：没有运行`, `${plan.label}: not running`));
     return;
   }
   if (options.forget) {
@@ -154,30 +191,58 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       );
       if ('heldBy' in lock)
         throw new UsageError(
-          `relay 正在运行${lock.heldBy ? `（进程 ${lock.heldBy}）` : ''}：先停止它（Ctrl+C，或 --uninstall-service），再 --forget。`,
+          tr(
+            `relay 正在运行${lock.heldBy ? `（进程 ${lock.heldBy}）` : ''}：先停止它（Ctrl+C，或 --uninstall-service），再 --forget。`,
+            `Relay is running${lock.heldBy ? ` (process ${lock.heldBy})` : ''}: stop it first (Ctrl+C, or --uninstall-service), then --forget.`,
+          ),
         );
       lock.release();
     }
     const plan = planFor(context, options);
     if (existsSync(plan.path)) {
       uninstallService(plan);
-      say(io, `已停止并删除后台服务（${plan.path}）`);
+      say(
+        io,
+        tr(
+          `已停止并删除后台服务（${plan.path}）`,
+          `Stopped and removed the background service (${plan.path})`,
+        ),
+      );
     }
     const states = forgetRelayStates(context.account);
     const removed = store.deleteSecret(tokenName(context));
     say(
       io,
       removed || states
-        ? `已删除本机保存的 bot token 和配对信息（${states} 份）。`
-        : '本机没有保存 bot token 或配对信息。',
+        ? tr(
+            `已删除本机保存的 bot token 和配对信息（${states} 份）。`,
+            `Deleted the bot token and pairing info saved on this machine (${states} record(s)).`,
+          )
+        : tr(
+            '本机没有保存 bot token 或配对信息。',
+            'No bot token or pairing info is saved on this machine.',
+          ),
     );
-    say(io, paint(io, 'dim', '如果 token 可能泄露，请在 @BotFather 里用 /revoke 让它失效。'));
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '如果 token 可能泄露，请在 @BotFather 里用 /revoke 让它失效。',
+          'If the token may have leaked, invalidate it with /revoke in @BotFather.',
+        ),
+      ),
+    );
     return;
   }
 
   if (store.kind === 'file' && !options.allowFileStore)
     throw new UsageError(
-      '这台机器没有可用的系统钥匙串，relay 默认不启动（bot token 和会话会以明文文件保存）。确认接受时加 --allow-file-store。',
+      tr(
+        '这台机器没有可用的系统钥匙串，relay 默认不启动（bot token 和会话会以明文文件保存）。确认接受时加 --allow-file-store。',
+        'This machine has no system keychain available, so relay does not start by default (the bot token and session would be saved in plain-text files). To accept that, add --allow-file-store.',
+      ),
     );
 
   if (options.setToken) {
@@ -186,9 +251,18 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     store.setSecret(tokenName(context), token);
     say(
       io,
-      `已保存 @${me.username ?? me.first_name} 的 token（${store.kind === 'file' ? '本地文件 0600' : '系统钥匙串'}）。`,
+      tr(
+        `已保存 @${me.username ?? me.first_name} 的 token（${store.kind === 'file' ? '本地文件 0600' : '系统钥匙串'}）。`,
+        `Saved the token for @${me.username ?? me.first_name} (${store.kind === 'file' ? 'local file, mode 0600' : 'system keychain'}).`,
+      ),
     );
-    say(io, '接下来运行 yomi relay --telegram，在 Telegram 里完成配对。');
+    say(
+      io,
+      tr(
+        '接下来运行 yomi relay --telegram，在 Telegram 里完成配对。',
+        'Next, run yomi relay --telegram and finish pairing in Telegram.',
+      ),
+    );
     return;
   }
 
@@ -196,7 +270,10 @@ export async function relay(context: Context, options: RelayCommandOptions) {
   if (
     !(await confirmProduction(
       context,
-      '把 Telegram 私聊转给角色（会使用真实账号的免费额度和钻石）',
+      tr(
+        '把 Telegram 私聊转给角色（会使用真实账号的免费额度和钻石）',
+        "forward Telegram private chats to a character (uses the real account's free messages and gems)",
+      ),
       options.confirmProd,
     ))
   )
@@ -205,7 +282,13 @@ export async function relay(context: Context, options: RelayCommandOptions) {
   if (!token) {
     if (!io.interactive && !options.tokenStdin) {
       // A service restarting would not fix this: say so and end without failing.
-      warn(io, '还没有设置 bot token：先运行 yomi relay --telegram --set-token');
+      warn(
+        io,
+        tr(
+          '还没有设置 bot token：先运行 yomi relay --telegram --set-token',
+          'No bot token set yet: run yomi relay --telegram --set-token first',
+        ),
+      );
       return;
     }
     token = await askToken(context, options.tokenStdin);
@@ -229,34 +312,62 @@ export async function relay(context: Context, options: RelayCommandOptions) {
   if (options.installService) {
     if (!state.data.owner)
       throw new UsageError(
-        '还没有配对：先在终端里运行一次 yomi relay --telegram 完成配对，再安装后台服务。',
+        tr(
+          '还没有配对：先在终端里运行一次 yomi relay --telegram 完成配对，再安装后台服务。',
+          'Not paired yet: run yomi relay --telegram once in a terminal to pair, then install the background service.',
+        ),
       );
     const plan = planFor(context, options);
     if (/[\\/](_npx|\.npm|tmp|temp)[\\/]/i.test(plan.content))
       warn(
         io,
-        '当前 yomi 像是从临时目录运行的（npx 或缓存），后台服务可能在缓存清理后失效：建议全局安装后再装服务。',
+        tr(
+          '当前 yomi 像是从临时目录运行的（npx 或缓存），后台服务可能在缓存清理后失效：建议全局安装后再装服务。',
+          'This yomi seems to run from a temporary directory (npx or a cache), so the background service may break when the cache is cleaned: install yomi globally before installing the service.',
+        ),
       );
     ensurePrivateDir(join(configDir(), 'logs'));
     installService(plan);
-    say(io, `已安装并启动后台服务：${plan.path}`);
+    say(
+      io,
+      tr(
+        `已安装并启动后台服务：${plan.path}`,
+        `Installed and started the background service: ${plan.path}`,
+      ),
+    );
     say(
       io,
       paint(
         io,
         'dim',
-        `日志：${join(configDir(), 'logs')}；停止并删除：yomi relay --telegram --uninstall-service`,
+        tr(
+          `日志：${join(configDir(), 'logs')}；停止并删除：yomi relay --telegram --uninstall-service`,
+          `Logs: ${join(configDir(), 'logs')}; to stop and remove: yomi relay --telegram --uninstall-service`,
+        ),
       ),
     );
     if (plan.platform === 'linux')
-      say(io, paint(io, 'dim', '退出登录后也要运行：loginctl enable-linger（需要时）。'));
+      say(
+        io,
+        paint(
+          io,
+          'dim',
+          tr(
+            '退出登录后也要运行：loginctl enable-linger（需要时）。',
+            'To keep it running after you log out: loginctl enable-linger (if needed).',
+          ),
+        ),
+      );
     return;
   }
 
   const lock = acquireProcessLock(join(configDir(), 'locks', `relay-${bot.id}.lock`));
   if ('heldBy' in lock)
     throw new UsageError(
-      `这个 bot 已经有一个 relay 在运行${lock.heldBy ? `（进程 ${lock.heldBy}）` : ''}。同一个 bot 只能运行一个。`,
+      tr(
+        `这个 bot 已经有一个 relay 在运行${lock.heldBy ? `（进程 ${lock.heldBy}）` : ''}。同一个 bot 只能运行一个。`,
+        `A relay is already running for this bot${lock.heldBy ? ` (process ${lock.heldBy})` : ''}. Only one can run per bot.`,
+      ),
     );
   try {
     // Another person may pair now: their consent to spend starts over.
@@ -267,7 +378,10 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       if (!io.interactive && !options.pair) {
         warn(
           io,
-          '还没有配对：请在终端里运行一次 yomi relay --telegram，按提示在 Telegram 里发送配对码。',
+          tr(
+            '还没有配对：请在终端里运行一次 yomi relay --telegram，按提示在 Telegram 里发送配对码。',
+            'Not paired yet: run yomi relay --telegram once in a terminal and send the pairing code in Telegram as prompted.',
+          ),
         );
         return;
       }
@@ -276,7 +390,10 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     }
     say(
       io,
-      `relay 运行中：@${username} ⇄ Yomi ${credential.displayName || credential.userId}（${describeEnvironment(context.env)}）`,
+      tr(
+        `relay 运行中：@${username} ⇄ Yomi ${credential.displayName || credential.userId}（${describeEnvironment(context.env)}）`,
+        `Relay running: @${username} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
+      ),
     );
     say(
       io,
@@ -284,9 +401,14 @@ export async function relay(context: Context, options: RelayCommandOptions) {
         io,
         'dim',
         (options.maxSpend
-          ? `本机允许 relay 最多花 ${options.maxSpend} 钻石（累计；--reset-spend 重新计算）。`
-          : '本机不允许 relay 花钻石（要允许，用 --max-spend <数量> 启动）。服务端支持「只用免费额度」之前，这样不会发出任何消息。') +
-          'Ctrl+C 停止。',
+          ? tr(
+              `本机允许 relay 最多花 ${options.maxSpend} 钻石（累计；--reset-spend 重新计算）。`,
+              `Local spending cap: relay may spend up to ${options.maxSpend} gems in total on this machine (--reset-spend starts the count over). `,
+            )
+          : tr(
+              '本机不允许 relay 花钻石（要允许，用 --max-spend <数量> 启动）。服务端支持「只用免费额度」之前，这样不会发出任何消息。',
+              'Local spending cap: 0, so relay spends no gems (to allow spending, start with --max-spend <amount>). Until the server supports "free messages only", no messages are sent in this setup. ',
+            )) + tr('Ctrl+C 停止。', 'Press Ctrl+C to stop.'),
       ),
     );
     const controller = new AbortController();
@@ -299,7 +421,14 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       characterId: options.characterId,
       pairing,
       onPairingCode: (code) => {
-        say(io, paint(io, 'yellow', '配对码已过期，新的配对码：'));
+        say(
+          io,
+          paint(
+            io,
+            'yellow',
+            tr('配对码已过期，新的配对码：', 'The pairing code expired. New pairing code:'),
+          ),
+        );
         printPairing(context, code, username);
       },
       replyTimeoutMs: options.replyTimeoutMs,
@@ -323,7 +452,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       process.removeListener('SIGINT', stop);
       process.removeListener('SIGTERM', stop);
     }
-    say(io, 'relay 已停止。');
+    say(io, tr('relay 已停止。', 'Relay stopped.'));
   } finally {
     lock.release();
   }

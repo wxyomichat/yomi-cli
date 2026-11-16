@@ -1,5 +1,6 @@
 import { release } from 'node:os';
 
+import { language, languageFrom } from './i18n.js';
 import { VERSION } from './version.js';
 
 /** The app's id; the Gateway refuses a request without it. */
@@ -11,10 +12,13 @@ export const OS_WEB = 3;
 /** The web's version code; the gateway gates features on it. */
 export const VERSION_CODE = 1000000;
 
-/** The interface language the server writes its text in: `zh-Hans` or `en`. */
+/**
+ * The interface language the server writes its text in: `zh-Hans` or `en`, the CLI's own language
+ * (`--lang`, `YOMI_LANG`, the system locale; see i18n.ts).
+ */
 export function currentLanguage(environ: NodeJS.ProcessEnv = process.env): string {
-  const raw = environ.YOMI_LANG || environ.LC_ALL || environ.LC_MESSAGES || environ.LANG || 'en';
-  return /^zh/i.test(raw) ? 'zh-Hans' : 'en';
+  const chosen = environ === process.env ? language() : languageFrom(environ);
+  return chosen === 'zh' ? 'zh-Hans' : 'en';
 }
 
 /**

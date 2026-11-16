@@ -9,6 +9,8 @@
  * Actions that create or spend in production ask for a typed `prod` (or `--confirm-prod`).
  */
 
+import { tr } from './i18n.js';
+
 export type EnvName = 'test' | 'prod';
 
 export type Environment = {
@@ -40,13 +42,25 @@ export function normalizeOrigin(value: string, label: string): string {
   try {
     url = new URL(value);
   } catch {
-    throw new UsageError(`${label} 不是合法地址：${value}`);
+    throw new UsageError(
+      tr(`${label} 不是合法地址：${value}`, `${label} is not a valid address: ${value}`),
+    );
   }
   const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))
-    throw new UsageError(`${label} 必须是 https（本机 127.0.0.1 可用 http）：${value}`);
+    throw new UsageError(
+      tr(
+        `${label} 必须是 https（本机 127.0.0.1 可用 http）：${value}`,
+        `${label} must be https (http is allowed for 127.0.0.1 on this machine): ${value}`,
+      ),
+    );
   if (url.username || url.password || (url.pathname !== '/' && url.pathname !== ''))
-    throw new UsageError(`${label} 只能是 origin（不带路径和账号）：${value}`);
+    throw new UsageError(
+      tr(
+        `${label} 只能是 origin（不带路径和账号）：${value}`,
+        `${label} must be an origin only (no path or account): ${value}`,
+      ),
+    );
   return url.origin;
 }
 
@@ -56,10 +70,22 @@ export function resolveEnvironment(
 ): Environment {
   const name = (options.env ?? environ.YOMI_ENV ?? 'prod') as EnvName;
   if (name !== 'test' && name !== 'prod')
-    throw new UsageError(`--env 只能是 test 或 prod，收到：${String(name)}`);
+    throw new UsageError(
+      tr(
+        `--env 只能是 test 或 prod，收到：${String(name)}`,
+        `--env must be test or prod, got: ${String(name)}`,
+      ),
+    );
   const lane = options.lane ?? environ.YOMI_LANE ?? '';
-  if (lane && !LANE.test(lane)) throw new UsageError(`泳道名不合法：${lane}`);
-  if (lane && name === 'prod') throw new UsageError('泳道只在测试环境（--env test）可用');
+  if (lane && !LANE.test(lane))
+    throw new UsageError(tr(`泳道名不合法：${lane}`, `Invalid lane name: ${lane}`));
+  if (lane && name === 'prod')
+    throw new UsageError(
+      tr(
+        '泳道只在测试环境（--env test）可用',
+        'Lanes are only available in the test environment (--env test)',
+      ),
+    );
   const apiOverride = environ.YOMI_API_ORIGIN;
   const webOverride = environ.YOMI_WEB_ORIGIN;
   let base = PRODUCTION;
@@ -68,7 +94,10 @@ export function resolveEnvironment(
     const web = environ.YOMI_TEST_WEB_ORIGIN;
     if ((!api && !apiOverride) || (!web && !webOverride))
       throw new UsageError(
-        '测试环境的地址需要自己配置：设置 YOMI_TEST_API_ORIGIN 和 YOMI_TEST_WEB_ORIGIN（或 YOMI_API_ORIGIN / YOMI_WEB_ORIGIN）',
+        tr(
+          '测试环境的地址需要自己配置：设置 YOMI_TEST_API_ORIGIN 和 YOMI_TEST_WEB_ORIGIN（或 YOMI_API_ORIGIN / YOMI_WEB_ORIGIN）',
+          'The test environment has no built-in addresses: set YOMI_TEST_API_ORIGIN and YOMI_TEST_WEB_ORIGIN (or YOMI_API_ORIGIN / YOMI_WEB_ORIGIN)',
+        ),
       );
     base = {
       apiOrigin: api ? normalizeOrigin(api, 'YOMI_TEST_API_ORIGIN') : '',
@@ -115,9 +144,13 @@ export function isProduction(env: Environment): boolean {
 /** What the CLI prints about where it is talking to. */
 export function describeEnvironment(env: Environment): string {
   const parts = [
-    env.custom ? `自定义地址（${env.name}）` : env.name === 'prod' ? '生产环境' : '测试环境 test',
+    env.custom
+      ? tr(`自定义地址（${env.name}）`, `custom address (${env.name})`)
+      : env.name === 'prod'
+        ? tr('生产环境', 'production')
+        : tr('测试环境 test', 'test environment'),
   ];
-  if (env.lane) parts.push(`泳道 ${env.lane}`);
+  if (env.lane) parts.push(tr(`泳道 ${env.lane}`, `lane ${env.lane}`));
   if (env.custom) parts.push(`API ${env.apiOrigin}`);
   return parts.join(' · ');
 }

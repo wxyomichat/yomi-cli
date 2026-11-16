@@ -1,3 +1,4 @@
+import { tr } from '../core/i18n.js';
 import type { ImParagraph } from '../im/models.js';
 import { renderReply, type RenderOptions } from './render.js';
 import { type TelegramBot, TelegramError } from './telegram.js';
@@ -158,7 +159,10 @@ export class ReplyPresenter {
     if (error instanceof TelegramError && error.code === 429)
       this.nextAt = Date.now() + Math.max(1, error.retryAfter) * 1000;
     this.options.log?.(
-      `Telegram 调用失败：${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
+      tr(
+        `Telegram 调用失败：${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
+        `Telegram call failed: ${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
+      ),
     );
   }
 
@@ -222,7 +226,12 @@ export class ReplyPresenter {
       if (error instanceof TelegramError && !error.transient && !refresh) {
         // Drafts refused here (an older server, a client setting): edit a message instead.
         this.useDrafts = false;
-        this.options.log?.('这个 bot 不能发流式草稿，改为编辑消息');
+        this.options.log?.(
+          tr(
+            '这个 bot 不能发流式草稿，改为编辑消息',
+            "This bot can't stream drafts, editing messages instead",
+          ),
+        );
         return;
       }
       throw error;

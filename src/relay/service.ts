@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:f
 import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { tr } from '../core/i18n.js';
+
 /**
  * `yomi relay --telegram --install-service`: keep the relay running for this user, as a launchd
  * LaunchAgent (macOS, `gui/<uid>` domain, so it can read the login keychain while the user is
@@ -159,7 +161,12 @@ WantedBy=default.target
       status: ['systemctl', '--user', 'status', '--no-pager', unit],
     };
   }
-  throw new Error('后台服务只支持 macOS（launchd）和 Linux（systemd --user）');
+  throw new Error(
+    tr(
+      '后台服务只支持 macOS（launchd）和 Linux（systemd --user）',
+      'The background service supports only macOS (launchd) and Linux (systemd --user)',
+    ),
+  );
 }
 
 export type Runner = (command: string, args: string[]) => { status: number | null; output: string };
@@ -191,7 +198,10 @@ export function installService(plan: ServicePlan, run: Runner = runCommand) {
     const result = run(command, args);
     if (result.status !== 0)
       throw new Error(
-        `${command} ${args.join(' ')} 失败${result.output ? `：${result.output.slice(0, 300)}` : ''}`,
+        tr(
+          `${command} ${args.join(' ')} 失败${result.output ? `：${result.output.slice(0, 300)}` : ''}`,
+          `${command} ${args.join(' ')} failed${result.output ? `: ${result.output.slice(0, 300)}` : ''}`,
+        ),
       );
   }
 }

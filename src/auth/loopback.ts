@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tr } from '../core/i18n.js';
 
 /**
  * The callback the web's authorize page posts to (docs/auth-protocol.md):
@@ -24,7 +25,7 @@ export type CallbackResult = { kind: 'token'; idToken: string } | { kind: 'denie
 
 export class CallbackTimeout extends Error {
   constructor() {
-    super('等待网页授权超时');
+    super(tr('等待网页授权超时', 'Timed out waiting for authorization on the web'));
     this.name = 'CallbackTimeout';
   }
 }
@@ -78,13 +79,13 @@ function sameSecret(a: string, b: string): boolean {
 
 /** A header the caller sent, safe for a terminal: printable ASCII only, cut short. */
 function printable(value: string | undefined): string {
-  if (value === undefined) return '（未提供）';
+  if (value === undefined) return tr('（未提供）', '(not provided)');
   return JSON.stringify(value.slice(0, 80).replace(/[^\x20-\x7e]/g, '?'));
 }
 
 function page(title: string, message: string, ok: boolean): string {
   const colour = ok ? '#1f9d55' : '#c53030';
-  return `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="${tr('zh', 'en')}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <style>body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f0f14;color:#eee;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}
@@ -166,7 +167,12 @@ export function startCallbackServer(options: {
     refused += 1;
     if (refused <= REPORTED) options.onRejected?.(reason);
     else if (refused === REPORTED + 1)
-      options.onRejected?.('还有更多无效回调，之后不再逐条提示（等待继续，直到超时或 Ctrl+C）');
+      options.onRejected?.(
+        tr(
+          '还有更多无效回调，之后不再逐条提示（等待继续，直到超时或 Ctrl+C）',
+          'more invalid callbacks; they will no longer be reported one by one (still waiting until the timeout or Ctrl+C)',
+        ),
+      );
   };
 
   const deliver = (outcome: CallbackResult) => {
@@ -186,19 +192,63 @@ export function startCallbackServer(options: {
     const peer = request.socket.remoteAddress ?? '';
     const host = request.headers.host ?? '';
     if (!LOOPBACK.has(peer) || (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`)) {
-      reply(response, 403, page('请求被拒绝', '只接受本机发来的授权回调。', false));
+      reply(
+        response,
+        403,
+        page(
+          tr('请求被拒绝', 'Request refused'),
+          tr(
+            '只接受本机发来的授权回调。',
+            'Only authorization callbacks from this machine are accepted.',
+          ),
+          false,
+        ),
+      );
       return;
     }
     if (url.pathname !== '/callback') {
-      reply(response, 404, page('找不到页面', '这是 Yomi CLI 的本地授权回调。', false));
+      reply(
+        response,
+        404,
+        page(
+          tr('找不到页面', 'Page not found'),
+          tr(
+            '这是 Yomi CLI 的本地授权回调。',
+            'This is the Yomi CLI local authorization callback.',
+          ),
+          false,
+        ),
+      );
       return;
     }
     if (request.method !== 'POST' || url.search) {
-      reply(response, 405, page('请求被拒绝', '授权信息只能通过网页提交，不能放在地址里。', false));
+      reply(
+        response,
+        405,
+        page(
+          tr('请求被拒绝', 'Request refused'),
+          tr(
+            '授权信息只能通过网页提交，不能放在地址里。',
+            'Authorization details can only be submitted from the web page, not in the address.',
+          ),
+          false,
+        ),
+      );
       return;
     }
     if (phase === 'closed') {
-      reply(response, 410, page('授权已结束', '这次登录已经结束，可以关闭此页。', false));
+      reply(
+        response,
+        410,
+        page(
+          tr('授权已结束', 'Authorization has ended'),
+          tr(
+            '这次登录已经结束，可以关闭此页。',
+            'This sign-in has already ended. You can close this page.',
+          ),
+          false,
+        ),
+      );
       return;
     }
     const origin = request.headers.origin;
@@ -208,21 +258,42 @@ export function startCallbackServer(options: {
     if (origin !== options.expectedOrigin || !values || !sameSecret(state, options.state)) {
       report(
         origin !== options.expectedOrigin
-          ? `来源不符：Origin 为 ${printable(origin)}，应为 ${options.expectedOrigin}`
+          ? tr(
+              `来源不符：Origin 为 ${printable(origin)}，应为 ${options.expectedOrigin}`,
+              `origin mismatch: Origin is ${printable(origin)}, expected ${options.expectedOrigin}`,
+            )
           : !values
-            ? '内容格式不对'
-            : 'state 与本次登录不符',
+            ? tr('内容格式不对', 'malformed body')
+            : tr('state 与本次登录不符', 'state does not match this sign-in'),
       );
       reply(
         response,
         400,
-        page('授权请求无效', '请回到终端重新运行 yomi login，再从它打开的页面授权。', false),
+        page(
+          tr('授权请求无效', 'Invalid authorization request'),
+          tr(
+            '请回到终端重新运行 yomi login，再从它打开的页面授权。',
+            'Go back to the terminal, run yomi login again, and authorize from the page it opens.',
+          ),
+          false,
+        ),
       );
       return;
     }
     // The phase may have moved on while the body was read.
     if (current() === 'closed') {
-      reply(response, 410, page('授权已结束', '这次登录已经结束，可以关闭此页。', false));
+      reply(
+        response,
+        410,
+        page(
+          tr('授权已结束', 'Authorization has ended'),
+          tr(
+            '这次登录已经结束，可以关闭此页。',
+            'This sign-in has already ended. You can close this page.',
+          ),
+          false,
+        ),
+      );
       return;
     }
     if (current() === 'holding') {
@@ -230,8 +301,11 @@ export function startCallbackServer(options: {
         response,
         409,
         page(
-          '终端正在确认',
-          '终端正在确认刚收到的一次授权或取消。要放弃这次登录，在终端按 Ctrl+C；如果终端显示的不是你的账号，在终端拒绝后，回到授权页再点一次授权。',
+          tr('终端正在确认', 'Confirming in the terminal'),
+          tr(
+            '终端正在确认刚收到的一次授权或取消。要放弃这次登录，在终端按 Ctrl+C；如果终端显示的不是你的账号，在终端拒绝后，回到授权页再点一次授权。',
+            'The terminal is checking an authorization or cancellation it just received. To abandon this sign-in, press Ctrl+C in the terminal; if the terminal shows an account that is not yours, refuse it there, then come back to the authorization page and click authorize again.',
+          ),
           false,
         ),
       );
@@ -241,18 +315,46 @@ export function startCallbackServer(options: {
       reply(
         response,
         200,
-        page('已取消授权', '已告知终端，可以关闭此页。如果终端询问，确认结束这次登录即可。', false),
+        page(
+          tr('已取消授权', 'Authorization cancelled'),
+          tr(
+            '已告知终端，可以关闭此页。如果终端询问，确认结束这次登录即可。',
+            'The terminal has been told; you can close this page. If the terminal asks, confirm ending this sign-in.',
+          ),
+          false,
+        ),
       );
       deliver({ kind: 'denied', error: values.error.slice(0, 64) });
       return;
     }
     const idToken = values.id_token ?? '';
     if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)) {
-      report('网页回传的登录凭证格式不正确');
-      reply(response, 400, page('授权请求无效', '没有收到有效的登录凭证。', false));
+      report(
+        tr(
+          '网页回传的登录凭证格式不正确',
+          'the sign-in credentials sent back by the web page are malformed',
+        ),
+      );
+      reply(
+        response,
+        400,
+        page(
+          tr('授权请求无效', 'Invalid authorization request'),
+          tr('没有收到有效的登录凭证。', 'No valid sign-in credentials were received.'),
+          false,
+        ),
+      );
       return;
     }
-    reply(response, 200, page('已授权 Yomi CLI', '可以关闭此页，回到终端继续。', true));
+    reply(
+      response,
+      200,
+      page(
+        tr('已授权 Yomi CLI', 'Yomi CLI authorized'),
+        tr('可以关闭此页，回到终端继续。', 'You can close this page and continue in the terminal.'),
+        true,
+      ),
+    );
     deliver({ kind: 'token', idToken });
   });
 
@@ -286,7 +388,9 @@ export function startCallbackServer(options: {
       return Promise.resolve(outcome);
     }
     if (phase === 'closed')
-      return Promise.reject(ending ?? new CallbackRejected('这次登录已经结束'));
+      return Promise.reject(
+        ending ?? new CallbackRejected(tr('这次登录已经结束', 'This sign-in has already ended')),
+      );
     const waiting = new Promise<CallbackResult>((resolve, reject) => {
       pending = { resolve, reject };
     });
@@ -319,7 +423,7 @@ export function startCallbackServer(options: {
         callbackURL: `http://127.0.0.1:${port}/callback`,
         next,
         resume,
-        close: () => finish(new CallbackRejected('已取消')),
+        close: () => finish(new CallbackRejected(tr('已取消', 'Cancelled'))),
       });
     });
   });

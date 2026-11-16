@@ -1,3 +1,5 @@
+import { tr } from '../core/i18n.js';
+
 /**
  * The Telegram Bot API (https://core.telegram.org/bots/api), the few methods the relay uses,
  * over `fetch` with JSON bodies (a photo goes up as multipart/form-data). The bot token is part of
@@ -110,7 +112,12 @@ export function telegramOrigin(value: string | undefined): string {
   const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
   if (url.origin === TELEGRAM_API) return TELEGRAM_API;
   if (!loopback || (url.protocol !== 'http:' && url.protocol !== 'https:'))
-    throw new Error('Telegram API 地址只能是 https://api.telegram.org 或本机测试地址');
+    throw new Error(
+      tr(
+        'Telegram API 地址只能是 https://api.telegram.org 或本机测试地址',
+        'The Telegram API address can only be https://api.telegram.org or a local test address',
+      ),
+    );
   return url.origin;
 }
 
@@ -122,7 +129,13 @@ export class TelegramBot {
     private readonly token: string,
     options: BotOptions = {},
   ) {
-    if (!BOT_TOKEN.test(token)) throw new Error('bot token 格式不对（应为 123456789:AA… 的形式）');
+    if (!BOT_TOKEN.test(token))
+      throw new Error(
+        tr(
+          'bot token 格式不对（应为 123456789:AA… 的形式）',
+          'The bot token has the wrong format (it should look like 123456789:AA…)',
+        ),
+      );
     this.origin = telegramOrigin(options.apiOrigin);
     this.fetcher = options.fetch ?? fetch;
   }
@@ -196,7 +209,9 @@ export class TelegramBot {
       throw new TelegramError(
         method,
         0,
-        error instanceof Error && error.name === 'AbortError' ? '请求超时' : '网络请求失败',
+        error instanceof Error && error.name === 'AbortError'
+          ? tr('请求超时', 'Request timed out')
+          : tr('网络请求失败', 'Network request failed'),
       );
     } finally {
       clearTimeout(timer);
@@ -295,7 +310,9 @@ export class TelegramBot {
     extra: Record<string, unknown> = {},
   ) {
     if (photo.bytes.length > MAX_PHOTO_BYTES)
-      return Promise.reject(new TelegramError('sendPhoto', 400, '图片超过 10 MB'));
+      return Promise.reject(
+        new TelegramError('sendPhoto', 400, tr('图片超过 10 MB', 'The image is over 10 MB')),
+      );
     const params: Record<string, unknown> = { chat_id: chatId, ...extra };
     if (captionHtml) {
       params.caption = captionHtml;

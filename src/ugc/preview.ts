@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import { i64, type Json, idOf } from '../core/json.js';
 import type { LocalState } from '../core/state.js';
 import { type ImParagraph, parseContent, parseParagraph } from '../im/models.js';
@@ -61,7 +62,11 @@ export async function ensureServerDraft(gateway: Gateway, state: LocalState, sou
   );
   const allocated = (result.draft ?? {}) as Json;
   const id = idOf(allocated.draft_id);
-  if (!id || id === '0') throw new UgcFailure('PROTOCOL', '草稿分配回包没有 draft_id');
+  if (!id || id === '0')
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('草稿分配回包没有 draft_id', 'The draft response has no draft_id'),
+    );
   state.updateDraft(source, {
     serverDraftId: id,
     mutationRevision: idOf(allocated.mutation_revision) || '0',
@@ -98,7 +103,7 @@ export async function preparePreview(
     Number(preview.state) !== 2 ||
     !quota
   )
-    throw new UgcFailure('PROTOCOL', '预演回包不完整');
+    throw new UgcFailure('PROTOCOL', tr('预演回包不完整', 'The preview response is incomplete'));
   state.updateDraft(source, {
     previewNpcId: npc,
     mutationRevision: idOf(preview.mutation_revision) || draft.mutationRevision,
@@ -117,7 +122,13 @@ export async function preparePreview(
   // A server without the shared presentation cannot show this preview: close the CID it made.
   if (text === null || ![1, 2, 3].includes(mode) || !usable) {
     await closePreview(gateway, cid);
-    throw new UgcFailure('VERSION_MISMATCH', '服务端版本与预演协议不匹配，请稍后再试');
+    throw new UgcFailure(
+      'VERSION_MISMATCH',
+      tr(
+        '服务端版本与预演协议不匹配，请稍后再试',
+        "The server's version doesn't match the preview protocol; try again later",
+      ),
+    );
   }
   return {
     cid,
@@ -153,7 +164,10 @@ export async function listPreviewMessages(gateway: Gateway, cid: string) {
     const mid = idOf(message.mid);
     const sender = Number(message.sender_type);
     if (idOf(message.cid) !== cid || !mid || mid === '0' || (sender !== 1 && sender !== 2))
-      throw new UgcFailure('PROTOCOL', '预演消息回包不合法');
+      throw new UgcFailure(
+        'PROTOCOL',
+        tr('预演消息回包不合法', 'The preview messages response is invalid'),
+      );
     const content = parseContent(message.content);
     messages.push({ mid, user: sender === 1, text: content.text, paragraphs: content.paragraphs });
   }
@@ -189,6 +203,6 @@ export async function sendPreviewMessage(
   const assistant = idOf(data.assistant_mid);
   const stream = typeof data.stream_id === 'string' ? data.stream_id : '';
   if (idOf(data.cid) !== cid || !mid || !assistant || !stream)
-    throw new UgcFailure('PROTOCOL', '发送回包不完整');
+    throw new UgcFailure('PROTOCOL', tr('发送回包不完整', 'The send response is incomplete'));
   return { mid, assistantMid: assistant, streamId: stream, quota: readQuota(data.preview_quota) };
 }

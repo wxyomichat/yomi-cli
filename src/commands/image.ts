@@ -1,5 +1,6 @@
 import { NotSignedIn } from '../core/api.js';
 import { describeEnvironment, UsageError } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import type { LocalState } from '../core/state.js';
 import { type Io, paint, say, warn } from '../core/ui.js';
 import { confirmSpend, explainRefusal, GenRefusal, mediaDir, pollUntil } from '../gen/common.js';
@@ -129,26 +130,61 @@ const PICK_TARGETS = ['cover', 'avatar', 'both'];
 function checkFlags(options: ImageCommandOptions) {
   if (options.listOptions) return;
   if (options.resume && options.prompt)
-    throw new UsageError('--resume 用来继续查看已有的一批，不能同时给 -p');
+    throw new UsageError(
+      tr(
+        '--resume 用来继续查看已有的一批，不能同时给 -p',
+        '--resume is for watching an existing batch; it cannot be used with -p',
+      ),
+    );
   if (options.resume && !/^[A-Za-z0-9_.:-]{1,128}$/.test(options.resume.trim()))
-    throw new UsageError(`--resume 需要批次 ID 或请求 ID，收到：${options.resume}`);
+    throw new UsageError(
+      tr(
+        `--resume 需要批次 ID 或请求 ID，收到：${options.resume}`,
+        `--resume needs a batch ID or request ID, got: ${options.resume}`,
+      ),
+    );
   if (options.forget && !options.resume)
-    throw new UsageError('--forget 需要配合 --resume <批次 ID 或请求 ID>');
+    throw new UsageError(
+      tr(
+        '--forget 需要配合 --resume <批次 ID 或请求 ID>',
+        '--forget needs --resume <batch ID or request ID>',
+      ),
+    );
   if (options.forget && (options.pick !== null || options.into))
-    throw new UsageError('--forget 只放弃本机的记录，不能同时用 --pick / --into');
+    throw new UsageError(
+      tr(
+        '--forget 只放弃本机的记录，不能同时用 --pick / --into',
+        '--forget only stops tracking on this machine; it cannot be used with --pick / --into',
+      ),
+    );
   if (!options.resume && !options.prompt.trim())
     throw new UsageError(
-      '需要描述：yomi image -p "<描述>"（yomi image --options 查看可选模型和风格）',
+      tr(
+        '需要描述：yomi image -p "<描述>"（yomi image --options 查看可选模型和风格）',
+        'A description is needed: yomi image -p "<description>" (yomi image --options lists the models and styles)',
+      ),
     );
   if (options.pick !== null && !options.into)
-    throw new UsageError('--pick 需要配合 --into <角色文件> --as cover|avatar|both');
-  if (options.into && options.pick === null) throw new UsageError('--into 需要配合 --pick N');
-  if (options.as && !options.into) throw new UsageError('--as 需要配合 --pick N --into <角色文件>');
+    throw new UsageError(
+      tr(
+        '--pick 需要配合 --into <角色文件> --as cover|avatar|both',
+        '--pick needs --into <character file> --as cover|avatar|both',
+      ),
+    );
+  if (options.into && options.pick === null)
+    throw new UsageError(tr('--into 需要配合 --pick N', '--into needs --pick N'));
+  if (options.as && !options.into)
+    throw new UsageError(
+      tr('--as 需要配合 --pick N --into <角色文件>', '--as needs --pick N --into <character file>'),
+    );
   if (options.into && !PICK_TARGETS.includes(options.as))
     throw new UsageError(
       options.as
-        ? '--as 只能是 cover、avatar 或 both'
-        : '--into 需要配合 --as cover|avatar|both（写封面、头像或两者）',
+        ? tr('--as 只能是 cover、avatar 或 both', '--as must be cover, avatar or both')
+        : tr(
+            '--into 需要配合 --as cover|avatar|both（写封面、头像或两者）',
+            '--into needs --as cover|avatar|both (write the cover, the avatar or both)',
+          ),
     );
 }
 
@@ -190,42 +226,79 @@ async function listOptions(context: Context, json: boolean) {
   }
   say(
     io,
-    `AI 生成角色图片：${config.enabled ? '可用' : paint(io, 'yellow', '暂未开放')}${config.version ? paint(io, 'dim', `（配置 ${config.version}）`) : ''}`,
+    tr(
+      `AI 生成角色图片：${config.enabled ? '可用' : paint(io, 'yellow', '暂未开放')}${config.version ? paint(io, 'dim', `（配置 ${config.version}）`) : ''}`,
+      `AI character images: ${config.enabled ? 'available' : paint(io, 'yellow', 'not available yet')}${config.version ? paint(io, 'dim', ` (config ${config.version})`) : ''}`,
+    ),
   );
   say(io);
-  say(io, paint(io, 'bold', '模型（--model，默认第一个）'));
+  say(
+    io,
+    paint(io, 'bold', tr('模型（--model，默认第一个）', 'Models (--model, default: the first)')),
+  );
   for (const model of config.models) {
     const price =
-      model.price === null ? paint(io, 'yellow', '价格未知（不能生成）') : `${model.price} 钻石/张`;
+      model.price === null
+        ? paint(io, 'yellow', tr('价格未知（不能生成）', 'price unknown (cannot generate)'))
+        : tr(`${model.price} 钻石/张`, `${model.price} gems/image`);
     const original =
       model.price !== null && model.originalPrice !== null && model.originalPrice > model.price
-        ? paint(io, 'dim', `（原价 ${model.originalPrice}）`)
+        ? paint(io, 'dim', tr(`（原价 ${model.originalPrice}）`, ` (was ${model.originalPrice})`))
         : '';
     say(io, `  ${paint(io, 'bold', model.id)}  ${model.name}  ${price}${original}`);
     if (model.description) say(io, paint(io, 'dim', `      ${model.description}`));
   }
   say(io);
-  say(io, paint(io, 'bold', '风格（--style，默认不选；按模型）'));
+  say(
+    io,
+    paint(
+      io,
+      'bold',
+      tr('风格（--style，默认不选；按模型）', 'Styles (--style, default: none; per model)'),
+    ),
+  );
   for (const model of config.models) {
     const styles = stylesFor(config, model.id);
     say(
       io,
-      `  ${model.id}：${styles.length ? styles.map((style) => (style.name === style.id ? style.id : `${style.id}（${style.name}）`)).join('、') : paint(io, 'dim', '没有可选风格')}`,
+      tr(
+        `  ${model.id}：${styles.length ? styles.map((style) => (style.name === style.id ? style.id : `${style.id}（${style.name}）`)).join('、') : paint(io, 'dim', '没有可选风格')}`,
+        `  ${model.id}: ${styles.length ? styles.map((style) => (style.name === style.id ? style.id : `${style.id} (${style.name})`)).join(', ') : paint(io, 'dim', 'no styles')}`,
+      ),
     );
   }
   say(io);
   say(
     io,
-    `比例（--ratio）：${config.ratios.length ? config.ratios.join('、') : '无'}${config.ratios.length ? paint(io, 'dim', `，默认 ${defaultRatio(config)}`) : ''}`,
+    tr(
+      `比例（--ratio）：${config.ratios.length ? config.ratios.join('、') : '无'}${config.ratios.length ? paint(io, 'dim', `，默认 ${defaultRatio(config)}`) : ''}`,
+      `Aspect ratios (--ratio): ${config.ratios.length ? config.ratios.join(', ') : 'none'}${config.ratios.length ? paint(io, 'dim', `, default ${defaultRatio(config)}`) : ''}`,
+    ),
   );
-  say(io, `张数（--count）：1–${config.maxCount}，默认 ${Math.min(4, config.maxCount)}`);
-  say(io, paint(io, 'dim', '价格按张计算；生成失败或未通过内容检查的那张自动退款。'));
+  say(
+    io,
+    tr(
+      `张数（--count）：1–${config.maxCount}，默认 ${Math.min(4, config.maxCount)}`,
+      `Images (--count): 1–${config.maxCount}, default ${Math.min(4, config.maxCount)}`,
+    ),
+  );
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      tr(
+        '价格按张计算；生成失败或未通过内容检查的那张自动退款。',
+        'Priced per image; an image that fails to generate or fails the content check is refunded automatically.',
+      ),
+    ),
+  );
 }
 
 function errorCode(error: unknown): string {
   if (error instanceof UgcFailure)
     return error.message && error.message !== error.code
-      ? `${error.code}：${error.message}`
+      ? tr(`${error.code}：${error.message}`, `${error.code}: ${error.message}`)
       : error.code;
   return error instanceof Error ? error.message : String(error);
 }
@@ -247,16 +320,33 @@ async function generate(
   report: ImageReport,
 ) {
   const { gateway } = context;
-  say(human, `AI 生成角色图片（${describeEnvironment(context.env)}）`);
+  say(
+    human,
+    tr(
+      `AI 生成角色图片（${describeEnvironment(context.env)}）`,
+      `AI character images (${describeEnvironment(context.env)})`,
+    ),
+  );
   const config = await loadImageConfig(gateway);
   if (!config.enabled) {
-    warn(human, 'AI 生成角色图片暂未开放。没有发出生成请求，没有扣费。');
+    warn(
+      human,
+      tr(
+        'AI 生成角色图片暂未开放。没有发出生成请求，没有扣费。',
+        'AI character images are not available yet. No generation request was sent; nothing was charged.',
+      ),
+    );
     report.refusal = { kind: 'unavailable', code: 'DISABLED' };
     return stop(report, 'refused');
   }
   const choice = chooseRequest(config, options);
   if (options.pick !== null && options.pick > choice.count)
-    throw new UsageError(`--pick 不能大于张数 ${choice.count}`);
+    throw new UsageError(
+      tr(
+        `--pick 不能大于张数 ${choice.count}`,
+        `--pick cannot be greater than the number of images (${choice.count})`,
+      ),
+    );
   report.request = {
     prompt: choice.prompt,
     model: choice.model.id,
@@ -266,7 +356,10 @@ async function generate(
   };
   say(
     human,
-    `模型 ${choice.model.name}（${choice.model.id}）· 风格 ${choice.style ? choice.style.name : '不选'} · 比例 ${choice.ratio} · ${choice.count} 张`,
+    tr(
+      `模型 ${choice.model.name}（${choice.model.id}）· 风格 ${choice.style ? choice.style.name : '不选'} · 比例 ${choice.ratio} · ${choice.count} 张`,
+      `Model ${choice.model.name} (${choice.model.id}) · style ${choice.style ? choice.style.name : 'none'} · aspect ratio ${choice.ratio} · ${choice.count} image(s)`,
+    ),
   );
   const reference = options.reference ? loadReference(options.reference) : null;
   const intent = intentOf(choice, reference?.sha256 ?? '');
@@ -275,8 +368,14 @@ async function generate(
   if (others.length)
     warn(
       human,
-      `还有 ${others.length} 个结果未知的请求（${others.map((record) => record.requestId).join('、')}）：` +
-        '可运行 yomi image --resume <请求 ID> 用原来的请求 ID 确认，避免重复生成；不要了就再加 --forget 放弃。',
+      tr(
+        `还有 ${others.length} 个结果未知的请求（${others.map((record) => record.requestId).join('、')}）：`,
+        `There are still ${others.length} request(s) with an unknown outcome (${others.map((record) => record.requestId).join(', ')}): `,
+      ) +
+        tr(
+          '可运行 yomi image --resume <请求 ID> 用原来的请求 ID 确认，避免重复生成；不要了就再加 --forget 放弃。',
+          'run yomi image --resume <request ID> to confirm with the original request ID and avoid generating twice; to stop tracking one, add --forget.',
+        ),
     );
   // An accepted batch of this very request that has not settled yet is shown again, never paid
   // for again (the latest, should there be several), as the app keeps showing it.
@@ -288,20 +387,38 @@ async function generate(
     return;
   }
   if (!config.version) {
-    warn(human, '生图配置缺少版本号，无法冻结报价。没有发出生成请求。');
+    warn(
+      human,
+      tr(
+        '生图配置缺少版本号，无法冻结报价。没有发出生成请求。',
+        'The image configuration has no version, so the price cannot be locked. No generation request was sent.',
+      ),
+    );
     return stop(report, 'refused');
   }
   const price = batchPrice(choice.model, choice.count);
   if (!price) {
-    warn(human, `读不到模型 ${choice.model.id} 的价格，为避免扣费出错没有继续。`);
+    warn(
+      human,
+      tr(
+        `读不到模型 ${choice.model.id} 的价格，为避免扣费出错没有继续。`,
+        `Could not read the price of model ${choice.model.id}; stopped to avoid a wrong charge.`,
+      ),
+    );
     return stop(report, 'refused');
   }
   const replay = pending.find((record) => record.intent === intent) ?? null;
   if (replay)
     warn(
       human,
-      `上次同样的请求（${replay.requestId}）结果未知。这次用同一个请求 ID 重发：服务端已受理过就直接返回原来的批次，不会重复扣费。` +
-        `（不想重发它：yomi image --resume ${replay.requestId} --forget）`,
+      tr(
+        `上次同样的请求（${replay.requestId}）结果未知。这次用同一个请求 ID 重发：服务端已受理过就直接返回原来的批次，不会重复扣费。`,
+        `The outcome of the same request last time (${replay.requestId}) is unknown. Resending it with the same request ID: if the server already accepted it, it returns the original batch and nothing is charged twice.`,
+      ) +
+        tr(
+          `（不想重发它：yomi image --resume ${replay.requestId} --forget）`,
+          ` (if you don't want to resend it: yomi image --resume ${replay.requestId} --forget)`,
+        ),
     );
   const unit = replay?.unitPrice ?? price.unit;
   const total = replay?.total ?? price.total;
@@ -309,27 +426,43 @@ async function generate(
   report.total = total;
   const notes: string[] = [];
   if (!replay && price.original !== null)
-    notes.push(`原价 ${price.original} 钻石（划线价，仅展示）`);
-  notes.push('按张扣费：生成失败或未通过内容检查的那张自动退款。');
+    notes.push(
+      tr(
+        `原价 ${price.original} 钻石（划线价，仅展示）`,
+        `Original price ${price.original} gems (shown struck through, for display only)`,
+      ),
+    );
+  notes.push(
+    tr(
+      '按张扣费：生成失败或未通过内容检查的那张自动退款。',
+      'Charged per image: an image that fails to generate or fails the content check is refunded automatically.',
+    ),
+  );
   const agreed = await confirmSpend(human, gateway, {
-    action: `生成 ${choice.count} 张角色图片`,
+    action: tr(`生成 ${choice.count} 张角色图片`, `Generate ${choice.count} character image(s)`),
     total,
-    unit: { price: unit, count: choice.count, label: '张' },
+    unit: { price: unit, count: choice.count, label: tr('张', 'image') },
     acceptPrice: options.acceptPrice,
     notes,
     replay: Boolean(replay),
   });
   if (!agreed) {
-    say(human, '没有发出生成请求，没有扣费。');
+    say(
+      human,
+      tr('没有发出生成请求，没有扣费。', 'No generation request was sent; nothing was charged.'),
+    );
     return stop(report, 'cancelled');
   }
   const production = await confirmProduction(
     { ...context, io: human },
-    `花 ${total} 钻石生成 ${choice.count} 张角色图片`,
+    tr(
+      `花 ${total} 钻石生成 ${choice.count} 张角色图片`,
+      `spend ${total} gems to generate ${choice.count} character image(s)`,
+    ),
     options.confirmProd,
   );
   if (!production) {
-    say(human, '已取消，没有扣费。');
+    say(human, tr('已取消，没有扣费。', 'Cancelled; nothing was charged.'));
     return stop(report, 'cancelled');
   }
   let record = replay;
@@ -338,14 +471,27 @@ async function generate(
     if (reference) {
       say(
         human,
-        paint(human, 'dim', `上传并审核参考图（${reference.width}×${reference.height}）…`),
+        paint(
+          human,
+          'dim',
+          tr(
+            `上传并审核参考图（${reference.width}×${reference.height}）…`,
+            `Uploading and reviewing the reference image (${reference.width}×${reference.height})…`,
+          ),
+        ),
       );
       try {
         const receipt = await uploadReference(gateway, state, reference, context.fetch);
         uploaded = { uploadId: receipt.uploadId, sha256: reference.sha256 };
       } catch (error) {
         if (error instanceof UgcFailure && error.code === 'IMAGE_REJECTED') {
-          warn(human, '参考图未通过审核，请换一张。没有发出生成请求，没有扣费。');
+          warn(
+            human,
+            tr(
+              '参考图未通过审核，请换一张。没有发出生成请求，没有扣费。',
+              'The reference image did not pass review; please use another one. No generation request was sent; nothing was charged.',
+            ),
+          );
           report.refusal = { kind: 'rejected', code: 'REFERENCE_REJECTED' };
           return stop(report, 'refused');
         }
@@ -356,7 +502,13 @@ async function generate(
     record = frozen.record;
     if (frozen.existing && record.batchId) {
       // Another yomi process sent this very request while this one waited for the yes.
-      say(human, '同样的请求刚由另一个 yomi 进程提交并已受理：这里接着查看那一批，不会再扣费。');
+      say(
+        human,
+        tr(
+          '同样的请求刚由另一个 yomi 进程提交并已受理：这里接着查看那一批，不会再扣费。',
+          'Another yomi process just sent the same request and it was accepted: watching that batch here; nothing more is charged.',
+        ),
+      );
       await continueBatch(context, human, state, record, options, target, report);
       return;
     }
@@ -364,8 +516,14 @@ async function generate(
       report.requestId = record.requestId;
       warn(
         human,
-        `同样的请求刚由另一个 yomi 进程提交（请求 ID ${record.requestId}），结果还没回来：这里没有再发，没有扣费。` +
-          `稍后运行 yomi image --resume ${record.requestId} 查看它。`,
+        tr(
+          `同样的请求刚由另一个 yomi 进程提交（请求 ID ${record.requestId}），结果还没回来：这里没有再发，没有扣费。`,
+          `Another yomi process just sent the same request (request ID ${record.requestId}) and its result is not back yet: nothing was sent here and nothing was charged. `,
+        ) +
+          tr(
+            `稍后运行 yomi image --resume ${record.requestId} 查看它。`,
+            `Run yomi image --resume ${record.requestId} later to check on it.`,
+          ),
       );
       return stop(report, 'unknown');
     }
@@ -395,33 +553,58 @@ async function resume(
     report.unitPrice = record.unitPrice;
     report.total = record.total;
     if (options.pick !== null && options.pick > record.count)
-      throw new UsageError(`--pick 不能大于张数 ${record.count}`);
+      throw new UsageError(
+        tr(
+          `--pick 不能大于张数 ${record.count}`,
+          `--pick cannot be greater than the number of images (${record.count})`,
+        ),
+      );
   }
   if (record && !record.batchId) {
     // The create's answer was lost: the same request again, same ID, same body.
     say(
       human,
-      `重新确认结果未知的请求 ${record.requestId}（${record.count} 张 · ${record.modelId}，${describeEnvironment(context.env)}）`,
+      tr(
+        `重新确认结果未知的请求 ${record.requestId}（${record.count} 张 · ${record.modelId}，${describeEnvironment(context.env)}）`,
+        `Rechecking request ${record.requestId}, whose outcome is unknown (${record.count} image(s) · ${record.modelId}, ${describeEnvironment(context.env)})`,
+      ),
     );
     const agreed = await confirmSpend(human, context.gateway, {
-      action: `重发同一请求：生成 ${record.count} 张角色图片`,
+      action: tr(
+        `重发同一请求：生成 ${record.count} 张角色图片`,
+        `Resend the same request: generate ${record.count} character image(s)`,
+      ),
       total: record.total,
-      unit: { price: record.unitPrice, count: record.count, label: '张' },
+      unit: { price: record.unitPrice, count: record.count, label: tr('张', 'image') },
       acceptPrice: options.acceptPrice,
-      notes: ['用的是原来的请求 ID 和请求内容：服务端已受理过就直接返回原来的批次，不会重复扣费。'],
+      notes: [
+        tr(
+          '用的是原来的请求 ID 和请求内容：服务端已受理过就直接返回原来的批次，不会重复扣费。',
+          'It uses the original request ID and content: if the server already accepted it, it returns the original batch and nothing is charged twice.',
+        ),
+      ],
       replay: true,
     });
     if (!agreed) {
-      say(human, '没有重发，没有扣费。这个请求仍然记着，可以之后再 --resume。');
+      say(
+        human,
+        tr(
+          '没有重发，没有扣费。这个请求仍然记着，可以之后再 --resume。',
+          'Not resent; nothing was charged. The request is still saved, so you can --resume it later.',
+        ),
+      );
       return stop(report, 'cancelled');
     }
     const production = await confirmProduction(
       { ...context, io: human },
-      `重发一个可能扣 ${record.total} 钻石的生图请求`,
+      tr(
+        `重发一个可能扣 ${record.total} 钻石的生图请求`,
+        `resend an image request that may charge ${record.total} gems`,
+      ),
       options.confirmProd,
     );
     if (!production) {
-      say(human, '已取消，没有重发。');
+      say(human, tr('已取消，没有重发。', 'Cancelled; nothing was resent.'));
       return stop(report, 'cancelled');
     }
     // Resent on purpose: a request let go earlier is followed again.
@@ -429,7 +612,14 @@ async function resume(
     if (record.forgottenAt)
       say(
         human,
-        paint(human, 'dim', '这个请求之前已放弃；现在按原样重发，之后同样的命令也会接着用它。'),
+        paint(
+          human,
+          'dim',
+          tr(
+            '这个请求之前已放弃；现在按原样重发，之后同样的命令也会接着用它。',
+            'Tracking of this request was stopped earlier; it is now resent as it was, and the same command uses it again from now on.',
+          ),
+        ),
       );
     report.replayed = true;
     await submitAndFollow(context, human, state, sent, options, target, report);
@@ -437,9 +627,25 @@ async function resume(
   }
   const batchId = record?.batchId || id;
   report.batchId = batchId;
-  say(human, `继续查看批次 ${batchId}（只读取结果，不会扣费）`);
+  say(
+    human,
+    tr(
+      `继续查看批次 ${batchId}（只读取结果，不会扣费）`,
+      `Watching batch ${batchId} (reading results only; nothing is charged)`,
+    ),
+  );
   if (record && recordStatus(record) === 'forgotten')
-    say(human, paint(human, 'dim', '这一批之前已放弃跟踪；查看不会改变这一点。'));
+    say(
+      human,
+      paint(
+        human,
+        'dim',
+        tr(
+          '这一批之前已放弃跟踪；查看不会改变这一点。',
+          'Tracking of this batch was stopped earlier; viewing it does not change that.',
+        ),
+      ),
+    );
   const first = await firstReading(context, human, batchId, record);
   await follow(context, human, state, batchId, record, options, target, report, first);
 }
@@ -467,8 +673,14 @@ async function continueBatch(
     paint(
       human,
       'yellow',
-      `上次同样的请求已受理（批次 ${record.batchId}），还没有结束：继续查看这一批，不会再扣费。` +
-        '这一批结束后，再运行同样的命令才会生成新的一批（重新扣费）。',
+      tr(
+        `上次同样的请求已受理（批次 ${record.batchId}），还没有结束：继续查看这一批，不会再扣费。`,
+        `The same request was accepted last time (batch ${record.batchId}) and has not finished: watching that batch; nothing more is charged. `,
+      ) +
+        tr(
+          '这一批结束后，再运行同样的命令才会生成新的一批（重新扣费）。',
+          'Only after it finishes does the same command generate a new batch (charged again).',
+        ),
     ),
   );
   const first = await firstReading(context, human, record.batchId, record);
@@ -491,8 +703,14 @@ async function firstReading(
     if (record && recordStatus(record) === 'running' && !(error instanceof NotSignedIn))
       warn(
         human,
-        `读不到批次 ${batchId}（${errorCode(error)}）。它可能还在服务端进行，稍后再试；在它结束前，同样的命令只会继续查看它。` +
-          `确定不再等它：运行 yomi image --resume ${batchId} --forget 放弃跟踪（之后同样的命令会生成新的一批并重新扣费）。`,
+        tr(
+          `读不到批次 ${batchId}（${errorCode(error)}）。它可能还在服务端进行，稍后再试；在它结束前，同样的命令只会继续查看它。`,
+          `Could not read batch ${batchId} (${errorCode(error)}). It may still be running on the server; try again later. Until it finishes, the same command only watches it. `,
+        ) +
+          tr(
+            `确定不再等它：运行 yomi image --resume ${batchId} --forget 放弃跟踪（之后同样的命令会生成新的一批并重新扣费）。`,
+            `To stop waiting for it: run yomi image --resume ${batchId} --forget to stop tracking it (the same command then generates a new batch and charges again).`,
+          ),
       );
     throw error;
   }
@@ -506,7 +724,12 @@ async function firstReading(
 function forget(human: Io, state: LocalState, id: string, report: ImageReport) {
   const record = findRecord(state, id);
   if (!record)
-    throw new UsageError(`本机没有 ${id} 的记录（--forget 只能放弃这台电脑记着的批次或请求）`);
+    throw new UsageError(
+      tr(
+        `本机没有 ${id} 的记录（--forget 只能放弃这台电脑记着的批次或请求）`,
+        `No record of ${id} on this machine (--forget can only stop tracking batches or requests recorded on this machine)`,
+      ),
+    );
   report.requestId = record.requestId;
   report.batchId = record.batchId || null;
   report.request = {
@@ -519,39 +742,77 @@ function forget(human: Io, state: LocalState, id: string, report: ImageReport) {
   report.unitPrice = record.unitPrice;
   report.total = record.total;
   const status = recordStatus(record);
-  const label = record.batchId ? `批次 ${record.batchId}` : `请求 ${record.requestId}`;
+  const label = record.batchId
+    ? tr(`批次 ${record.batchId}`, `Batch ${record.batchId}`)
+    : tr(`请求 ${record.requestId}`, `Request ${record.requestId}`);
   if (status === 'settled') {
-    say(human, `${label} 已经结束，不需要放弃：同样的命令会生成新的一批。`);
+    say(
+      human,
+      tr(
+        `${label} 已经结束，不需要放弃：同样的命令会生成新的一批。`,
+        `${label} has already finished, so there is nothing to stop tracking: the same command generates a new batch.`,
+      ),
+    );
     report.status = 'done';
     return;
   }
   report.status = 'forgotten';
   if (status === 'forgotten') {
-    say(human, `${label} 之前已经放弃，没有变化。`);
+    say(
+      human,
+      tr(`${label} 之前已经放弃，没有变化。`, `${label} was already untracked; nothing changed.`),
+    );
     return;
   }
   forgetRecord(state, record.key);
   if (status === 'running') {
     say(
       human,
-      `已放弃跟踪批次 ${record.batchId}：同样的命令不会再继续查看它，而会生成新的一批（重新扣费）。`,
+      tr(
+        `已放弃跟踪批次 ${record.batchId}：同样的命令不会再继续查看它，而会生成新的一批（重新扣费）。`,
+        `Stopped tracking batch ${record.batchId}: the same command no longer watches it but generates a new batch (charged again).`,
+      ),
     );
     warn(
       human,
-      '放弃跟踪不会取消服务端的生成，也不会退款：这一批已扣的钻石照常扣除，生成失败的那张仍会自动退款。',
+      tr(
+        '放弃跟踪不会取消服务端的生成，也不会退款：这一批已扣的钻石照常扣除，生成失败的那张仍会自动退款。',
+        'This does not cancel the generation on the server or refund anything: the gems charged for this batch stay charged, and an image that fails to generate is still refunded automatically.',
+      ),
     );
-    say(human, `之后仍可运行 yomi image --resume ${record.batchId} 查看和下载这一批（不会扣费）。`);
+    say(
+      human,
+      tr(
+        `之后仍可运行 yomi image --resume ${record.batchId} 查看和下载这一批（不会扣费）。`,
+        `You can still run yomi image --resume ${record.batchId} later to view and download this batch (nothing is charged).`,
+      ),
+    );
     return;
   }
-  say(human, `已放弃请求 ${record.requestId}：同样的命令不会再重发它，而会作为新请求重新扣费。`);
+  say(
+    human,
+    tr(
+      `已放弃请求 ${record.requestId}：同样的命令不会再重发它，而会作为新请求重新扣费。`,
+      `Stopped tracking request ${record.requestId}: the same command no longer resends it but sends a new request and charges again.`,
+    ),
+  );
   warn(
     human,
-    `注意：如果这个请求其实已经被服务端受理，它的扣费照常生效（最多 ${record.total} 钻石，生成失败的那张仍会自动退款），` +
-      '只是本机没有它的批次 ID，看不到也下载不到那批结果。',
+    tr(
+      `注意：如果这个请求其实已经被服务端受理，它的扣费照常生效（最多 ${record.total} 钻石，生成失败的那张仍会自动退款），`,
+      `Note: if the server did accept this request, its charge stands (at most ${record.total} gems; an image that fails to generate is still refunded automatically), `,
+    ) +
+      tr(
+        '只是本机没有它的批次 ID，看不到也下载不到那批结果。',
+        'but this machine has no batch ID for it, so those results cannot be viewed or downloaded.',
+      ),
   );
   say(
     human,
-    `改主意了可以运行 yomi image --resume ${record.requestId}：用原来的请求 ID 重发，已受理就拿回原来的批次，不会重复扣费。`,
+    tr(
+      `改主意了可以运行 yomi image --resume ${record.requestId}：用原来的请求 ID 重发，已受理就拿回原来的批次，不会重复扣费。`,
+      `Changed your mind? Run yomi image --resume ${record.requestId}: it resends with the original request ID, gets the original batch back if it was accepted, and charges nothing twice.`,
+    ),
   );
 }
 
@@ -565,7 +826,17 @@ async function submitAndFollow(
   report: ImageReport,
 ) {
   report.requestId = record.requestId;
-  say(human, paint(human, 'dim', `提交生成请求（请求 ID ${record.requestId}）…`));
+  say(
+    human,
+    paint(
+      human,
+      'dim',
+      tr(
+        `提交生成请求（请求 ID ${record.requestId}）…`,
+        `Sending the generation request (request ID ${record.requestId})…`,
+      ),
+    ),
+  );
   let batch: ImageBatch;
   try {
     batch = await submitBatch(context.gateway, state, record, { replay: report.replayed });
@@ -574,8 +845,14 @@ async function submitAndFollow(
       explainRefusal(human, error.refusal);
       warn(
         human,
-        `被拒的只是这次重发。上次那次的结果一直未知，可能已经受理并扣了钻石（最多 ${record.total} 钻石），所以请求 ${record.requestId} 仍然记着：` +
-          `之后运行 yomi image --resume ${record.requestId} 用同一个请求 ID 再确认，服务端按请求 ID 去重，最多扣一次；确定不要了就再加 --forget。`,
+        tr(
+          `被拒的只是这次重发。上次那次的结果一直未知，可能已经受理并扣了钻石（最多 ${record.total} 钻石），所以请求 ${record.requestId} 仍然记着：`,
+          `Only this resend was refused. The outcome of the earlier send is still unknown; it may have been accepted and charged (at most ${record.total} gems), so request ${record.requestId} is still saved: `,
+        ) +
+          tr(
+            `之后运行 yomi image --resume ${record.requestId} 用同一个请求 ID 再确认，服务端按请求 ID 去重，最多扣一次；确定不要了就再加 --forget。`,
+            `run yomi image --resume ${record.requestId} later to confirm with the same request ID (the server deduplicates by request ID and charges at most once); if you no longer want it, add --forget.`,
+          ),
       );
       report.refusal = { kind: error.refusal.kind, code: error.refusal.code };
       return stop(report, 'unknown');
@@ -588,22 +865,34 @@ async function submitAndFollow(
     if (error instanceof NotSignedIn) throw error;
     warn(
       human,
-      `这次生成请求的结果未知（${errorCode(error)}）：可能已经受理并扣费，也可能没有。没有自动重发。`,
+      tr(
+        `这次生成请求的结果未知（${errorCode(error)}）：可能已经受理并扣费，也可能没有。没有自动重发。`,
+        `The outcome of this generation request is unknown (${errorCode(error)}): it may or may not have been accepted and charged. It was not resent automatically.`,
+      ),
     );
     warn(
       human,
-      `运行 yomi image --resume ${record.requestId} 会用同一个请求 ID 重新确认，不会重复扣费。`,
+      tr(
+        `运行 yomi image --resume ${record.requestId} 会用同一个请求 ID 重新确认，不会重复扣费。`,
+        `Run yomi image --resume ${record.requestId} to confirm with the same request ID; nothing is charged twice.`,
+      ),
     );
     warn(
       human,
-      `同样的命令也会这样重发它；不想要这个请求了，运行 yomi image --resume ${record.requestId} --forget 放弃（如果其实已经受理，扣费照常生效）。`,
+      tr(
+        `同样的命令也会这样重发它；不想要这个请求了，运行 yomi image --resume ${record.requestId} --forget 放弃（如果其实已经受理，扣费照常生效）。`,
+        `The same command resends it the same way; if you no longer want this request, run yomi image --resume ${record.requestId} --forget to stop tracking it (if it was in fact accepted, the charge stands).`,
+      ),
     );
     return stop(report, 'unknown');
   }
   report.batchId = batch.id;
   say(
     human,
-    `已受理，批次 ${batch.id}。生成在服务端进行，中途退出不会取消；之后可运行 yomi image --resume ${batch.id} 继续查看（不会再扣费）。`,
+    tr(
+      `已受理，批次 ${batch.id}。生成在服务端进行，中途退出不会取消；之后可运行 yomi image --resume ${batch.id} 继续查看（不会再扣费）。`,
+      `Accepted, batch ${batch.id}. Generation runs on the server and quitting does not cancel it; run yomi image --resume ${batch.id} later to keep watching it (nothing more is charged).`,
+    ),
   );
   await follow(context, human, state, batch.id, record, options, target, report, batch);
 }
@@ -665,7 +954,14 @@ async function follow(
         maxRounds: POLL_ROUNDS,
         done: pollingComplete,
         onTick: show,
-        onError: (error) => warn(human, `查询进度失败（${errorCode(error)}），继续查询…`),
+        onError: (error) =>
+          warn(
+            human,
+            tr(
+              `查询进度失败（${errorCode(error)}），继续查询…`,
+              `Checking progress failed (${errorCode(error)}); still checking…`,
+            ),
+          ),
         signal: watching.signal,
         sleep: (ms) => pause(ms, watching.signal),
       });
@@ -676,19 +972,28 @@ async function follow(
     }
     stopped = watching.signal.aborted;
   }
-  if (stopped) say(human, '已停止查看。');
+  if (stopped) say(human, tr('已停止查看。', 'Stopped watching.'));
   if (done && record) markSettled(state, record.key);
   if (!done) {
     warn(
       human,
-      `还没有全部完成。停止查看不会取消服务端的生成，也不影响退款；稍后运行 yomi image --resume ${batchId} 继续查看（不会再扣费）。`,
+      tr(
+        `还没有全部完成。停止查看不会取消服务端的生成，也不影响退款；稍后运行 yomi image --resume ${batchId} 继续查看（不会再扣费）。`,
+        `Not everything has finished. Stopping does not cancel the generation on the server or affect refunds; run yomi image --resume ${batchId} later to keep watching (nothing more is charged).`,
+      ),
     );
     const tracked = record ? findRecord(state, record.key) : null;
     if (tracked && recordStatus(tracked) === 'running')
       warn(
         human,
-        '在这一批结束前，同样的命令只会继续查看它，不会重新生成。' +
-          `如果它一直不结束、确定不再等：运行 yomi image --resume ${batchId} --forget 放弃跟踪。`,
+        tr(
+          '在这一批结束前，同样的命令只会继续查看它，不会重新生成。',
+          'Until this batch finishes, the same command only watches it and does not generate again. ',
+        ) +
+          tr(
+            `如果它一直不结束、确定不再等：运行 yomi image --resume ${batchId} --forget 放弃跟踪。`,
+            `If it never finishes and you want to stop waiting: run yomi image --resume ${batchId} --forget to stop tracking it.`,
+          ),
       );
   }
 
@@ -699,7 +1004,13 @@ async function follow(
     try {
       batch = await readBatch(gateway, batchId);
     } catch (error) {
-      warn(human, `重新读取结果地址失败（${errorCode(error)}），先用刚才的结果。`);
+      warn(
+        human,
+        tr(
+          `重新读取结果地址失败（${errorCode(error)}），先用刚才的结果。`,
+          `Could not re-read the result URLs (${errorCode(error)}); using the ones already read.`,
+        ),
+      );
     }
     const dir = mediaDir(options.out);
     for (const listed of batch.outputs) {
@@ -714,7 +1025,10 @@ async function follow(
         }
       }
       if (!output.url) {
-        problems.set(output.index, '服务端没有给出可下载的地址');
+        problems.set(
+          output.index,
+          tr('服务端没有给出可下载的地址', 'the server gave no download URL'),
+        );
         continue;
       }
       try {
@@ -739,38 +1053,62 @@ async function follow(
     );
     const files = saved.get(output.index);
     if (files) {
-      say(human, `    原图     ${files.original}`);
+      say(human, tr(`    原图     ${files.original}`, `    Original   ${files.original}`));
       if (files.cover) {
-        say(human, `    封面 1:2 ${files.cover}`);
-        say(human, `    头像 1:1 ${files.avatar}`);
+        say(human, tr(`    封面 1:2 ${files.cover}`, `    Cover 1:2  ${files.cover}`));
+        say(human, tr(`    头像 1:1 ${files.avatar}`, `    Avatar 1:1 ${files.avatar}`));
       } else {
         say(
           human,
-          paint(human, 'yellow', `    本机不能裁剪这张原图（${files.note}），只保留了原图。`),
+          paint(
+            human,
+            'yellow',
+            tr(
+              `    本机不能裁剪这张原图（${files.note}），只保留了原图。`,
+              `    This machine cannot crop this image (${files.note}); only the original was kept.`,
+            ),
+          ),
         );
         if (usableAsset(output.assetId))
           say(
             human,
-            `    角色文件里可以直接引用这次的生成结果（未裁剪）：cover: { asset_id: "${output.assetId}" }`,
+            tr(
+              `    角色文件里可以直接引用这次的生成结果（未裁剪）：cover: { asset_id: "${output.assetId}" }`,
+              `    A character file can use this result directly (not cropped): cover: { asset_id: "${output.assetId}" }`,
+            ),
           );
       }
     }
     const problem = problems.get(output.index);
     if (problem)
-      warn(human, `    下载失败：${problem}。可运行 yomi image --resume ${batchId} 重新下载。`);
+      warn(
+        human,
+        tr(
+          `    下载失败：${problem}。可运行 yomi image --resume ${batchId} 重新下载。`,
+          `    Download failed: ${problem}. Run yomi image --resume ${batchId} to download again.`,
+        ),
+      );
   }
   const totals = billingTotals(batch, unit);
   if (unit !== null) {
-    const parts = [`共扣 ${totals.charged} 钻石`];
-    if (totals.refunded) parts.push(`已退回 ${totals.refunded} 钻石`);
-    if (totals.refunding) parts.push(`退款中 ${totals.refunding} 钻石`);
-    if (totals.pending) parts.push(`扣费确认中 ${totals.pending} 钻石`);
-    say(human, parts.join('，') + '。');
+    const parts = [tr(`共扣 ${totals.charged} 钻石`, `Charged ${totals.charged} gems in total`)];
+    if (totals.refunded)
+      parts.push(tr(`已退回 ${totals.refunded} 钻石`, `refunded ${totals.refunded} gems`));
+    if (totals.refunding)
+      parts.push(tr(`退款中 ${totals.refunding} 钻石`, `refunding ${totals.refunding} gems`));
+    if (totals.pending)
+      parts.push(
+        tr(`扣费确认中 ${totals.pending} 钻石`, `confirming the charge of ${totals.pending} gems`),
+      );
+    say(human, parts.join(tr('，', ', ')) + tr('。', '.'));
   } else {
     const { pictures } = totals;
     say(
       human,
-      `已扣费 ${pictures.charged} 张，已退款 ${pictures.refunded} 张${pictures.refunding ? `，退款中 ${pictures.refunding} 张` : ''}。`,
+      tr(
+        `已扣费 ${pictures.charged} 张，已退款 ${pictures.refunded} 张${pictures.refunding ? `，退款中 ${pictures.refunding} 张` : ''}。`,
+        `Charged ${pictures.charged} image(s), refunded ${pictures.refunded}${pictures.refunding ? `, refunding ${pictures.refunding}` : ''}.`,
+      ),
     );
   }
   const unsettled = batch.outputs.some((output) => {
@@ -780,7 +1118,10 @@ async function follow(
   if (done && unsettled)
     warn(
       human,
-      `有的图片还在确认结果；稍后运行 yomi image --resume ${batchId} 再查看（不会再扣费）。`,
+      tr(
+        `有的图片还在确认结果；稍后运行 yomi image --resume ${batchId} 再查看（不会再扣费）。`,
+        `Some images are still being confirmed; run yomi image --resume ${batchId} later to check again (nothing more is charged).`,
+      ),
     );
 
   let pickFailed = false;
@@ -793,7 +1134,13 @@ async function follow(
       !files ||
       (!files.cover && !usableAsset(output.assetId))
     ) {
-      warn(human, `第 ${options.pick} 张没有可用的结果，没有写入 ${options.into}。`);
+      warn(
+        human,
+        tr(
+          `第 ${options.pick} 张没有可用的结果，没有写入 ${options.into}。`,
+          `Image ${options.pick} has no usable result; nothing was written to ${options.into}.`,
+        ),
+      );
       pickFailed = true;
     } else {
       const asset: CharacterImage = { assetId: output.assetId };
@@ -807,15 +1154,23 @@ async function follow(
         paint(
           human,
           'green',
-          `✓ 已把第 ${options.pick} 张写进 ${options.into}：${Object.entries(values)
-            .map(([key, value]) => `${key}: ${value}`)
-            .join('，')}`,
+          tr(
+            `✓ 已把第 ${options.pick} 张写进 ${options.into}：${Object.entries(values)
+              .map(([key, value]) => `${key}: ${value}`)
+              .join('，')}`,
+            `✓ Wrote image ${options.pick} into ${options.into}: ${Object.entries(values)
+              .map(([key, value]) => `${key}: ${value}`)
+              .join(', ')}`,
+          ),
         ),
       );
       if (!files.cover)
         warn(
           human,
-          '这张没有裁剪成 1:2 / 1:1，写入的是生成结果本身的引用；如果创建时不被接受，请自己裁好原图后改成文件路径。',
+          tr(
+            '这张没有裁剪成 1:2 / 1:1，写入的是生成结果本身的引用；如果创建时不被接受，请自己裁好原图后改成文件路径。',
+            'This image was not cropped to 1:2 / 1:1, so a reference to the generated result itself was written; if creating the character rejects it, crop the original yourself and use its file path instead.',
+          ),
         );
     }
   }

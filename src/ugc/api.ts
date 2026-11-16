@@ -1,5 +1,6 @@
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
 import { loopbackHttpAllowed } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import { i64, type Json, object, optionalObject } from '../core/json.js';
 
 /**
@@ -51,7 +52,10 @@ export function wireIds(value: unknown, path: string[] = []): unknown {
   if ((NUMERIC_IDS.has(key) || list) && value !== undefined && value !== null) {
     const digits = String(value);
     if (!/^[1-9][0-9]{0,18}$/.test(digits) || BigInt(digits) > 9223372036854775807n)
-      throw new UgcFailure('INVALID_ARGUMENT', `${key} 不是合法 ID：${digits}`);
+      throw new UgcFailure(
+        'INVALID_ARGUMENT',
+        tr(`${key} 不是合法 ID：${digits}`, `${key} isn't a valid ID: ${digits}`),
+      );
     return i64(digits);
   }
   return value;
@@ -98,7 +102,8 @@ export async function walletBalance(gateway: Gateway): Promise<number> {
   const page = optionalObject(result.data ?? result);
   const total = optionalObject(page.balance).total_amount;
   const value = typeof total === 'number' ? total : Number(total);
-  if (!Number.isFinite(value)) throw new UgcFailure('PROTOCOL', '钱包回包没有余额');
+  if (!Number.isFinite(value))
+    throw new UgcFailure('PROTOCOL', tr('钱包回包没有余额', 'The wallet response has no balance'));
   return value;
 }
 
@@ -113,7 +118,7 @@ export async function putObject(
 ) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new UgcFailure('PROTOCOL', '上传地址不是 https');
+    throw new UgcFailure('PROTOCOL', tr('上传地址不是 https', "The upload URL isn't https"));
   let response: Response;
   try {
     response = await fetcher(url, {
@@ -123,10 +128,16 @@ export async function putObject(
       redirect: 'error',
     });
   } catch {
-    throw new UgcFailure('UPLOAD_FAILED', '图片上传失败');
+    throw new UgcFailure('UPLOAD_FAILED', tr('图片上传失败', 'Image upload failed'));
   }
   if (response.status < 200 || response.status >= 300)
-    throw new UgcFailure('UPLOAD_FAILED', `图片上传失败（HTTP ${response.status}）`);
+    throw new UgcFailure(
+      'UPLOAD_FAILED',
+      tr(
+        `图片上传失败（HTTP ${response.status}）`,
+        `Image upload failed (HTTP ${response.status})`,
+      ),
+    );
 }
 
 /**
@@ -142,7 +153,7 @@ export async function postForm(
 ) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new UgcFailure('PROTOCOL', '上传地址不是 https');
+    throw new UgcFailure('PROTOCOL', tr('上传地址不是 https', "The upload URL isn't https"));
   const form = new FormData();
   for (const key of Object.keys(fields).sort()) form.append(key, fields[key]);
   form.append('file', new Blob([new Uint8Array(data)], { type: mime }), 'image');
@@ -150,10 +161,16 @@ export async function postForm(
   try {
     response = await fetcher(url, { method: 'POST', body: form, redirect: 'error' });
   } catch {
-    throw new UgcFailure('UPLOAD_FAILED', '图片上传失败');
+    throw new UgcFailure('UPLOAD_FAILED', tr('图片上传失败', 'Image upload failed'));
   }
   if (response.status < 200 || response.status >= 300)
-    throw new UgcFailure('UPLOAD_FAILED', `图片上传失败（HTTP ${response.status}）`);
+    throw new UgcFailure(
+      'UPLOAD_FAILED',
+      tr(
+        `图片上传失败（HTTP ${response.status}）`,
+        `Image upload failed (HTTP ${response.status})`,
+      ),
+    );
 }
 
 export { object };

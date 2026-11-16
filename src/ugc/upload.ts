@@ -1,4 +1,5 @@
 import type { Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import { idOf } from '../core/json.js';
 import type { LocalState } from '../core/state.js';
 import { call, putObject, UgcFailure, wireIds } from './api.js';
@@ -22,7 +23,10 @@ function readUpload(value: unknown, purpose: UploadPurpose): ImageReceipt {
   const upload = (value ?? {}) as Record<string, unknown>;
   const id = idOf(upload.upload_id);
   if (!id || id === '0' || upload.purpose !== purpose)
-    throw new UgcFailure('PROTOCOL', '服务端没有确认这次图片上传');
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('服务端没有确认这次图片上传', "The server didn't confirm this image upload"),
+    );
   const status = Number(upload.review_status);
   const url = typeof upload.image_url === 'string' ? upload.image_url : '';
   if (
@@ -30,7 +34,10 @@ function readUpload(value: unknown, purpose: UploadPurpose): ImageReceipt {
     !url.startsWith('https://') &&
     !url.startsWith('http://127.0.0.1')
   )
-    throw new UgcFailure('PROTOCOL', '图片审核通过但没有地址');
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('图片审核通过但没有地址', 'The image passed review but has no URL'),
+    );
   return {
     uploadId: id,
     status: [Review.unknown, Review.passed, Review.rejected].includes(status as 0)
@@ -43,7 +50,13 @@ function readUpload(value: unknown, purpose: UploadPurpose): ImageReceipt {
 
 export class ImageRejected extends UgcFailure {
   constructor(label: string, reason: string) {
-    super('IMAGE_REJECTED', `${label}没有通过审核${reason ? `（${reason}）` : ''}，请换一张`);
+    super(
+      'IMAGE_REJECTED',
+      tr(
+        `${label}没有通过审核${reason ? `（${reason}）` : ''}，请换一张`,
+        `The ${label} didn't pass review${reason ? ` (${reason})` : ''}; please use another one`,
+      ),
+    );
   }
 }
 
@@ -90,6 +103,12 @@ export async function prepareImage(
   }
   if (current.status === Review.rejected) throw new ImageRejected(label, current.reason);
   if (current.status !== Review.passed || !current.url)
-    throw new UgcFailure('REVIEW_PENDING', `${label}的审核还没有结果，请稍后重试`);
+    throw new UgcFailure(
+      'REVIEW_PENDING',
+      tr(
+        `${label}的审核还没有结果，请稍后重试`,
+        `The ${label} has no review result yet; please try again later`,
+      ),
+    );
   return current;
 }

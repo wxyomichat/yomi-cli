@@ -19,6 +19,7 @@ import {
   submitFeedback,
 } from '../chat/api.js';
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import { LocalState } from '../core/state.js';
 import { VERSION } from '../core/version.js';
 import {
@@ -338,12 +339,20 @@ export class Relay {
     if (webhook.url)
       throw new RelayStopped(
         'webhook',
-        '这个 bot 设置了 webhook（正被别的服务使用）。relay 不会删除它：请为 relay 单独建一个 bot。',
+        tr(
+          '这个 bot 设置了 webhook（正被别的服务使用）。relay 不会删除它：请为 relay 单独建一个 bot。',
+          'This bot has a webhook set (another service is using it). Relay will not delete it: please create a separate bot for relay.',
+        ),
       );
     const commands = /^zh/i.test(this.options.language) ? COMMANDS.zh : COMMANDS.en;
     await this.bot.setMyCommands(commands).catch(() => undefined);
     if (this.state.bindAccount(this.userId))
-      this.log('这台电脑上登录的 Yomi 账号和上次不同：预算、角色和记录已重置');
+      this.log(
+        tr(
+          '这台电脑上登录的 Yomi 账号和上次不同：预算、角色和记录已重置',
+          'A different Yomi account is signed in on this machine than last time: budget, character and records have been reset',
+        ),
+      );
     this.state.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
     this.policy = await relayPolicy(this.gateway);
     this.applyPolicy();
@@ -352,16 +361,35 @@ export class Relay {
     // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
     // next send) settles it, never a reading taken now.
     if (this.state.data.pending && !kept && !(await this.settlePending()))
-      this.log('上次有一条消息的花费还没核对：读不到余额，下一条发送前再核对');
+      this.log(
+        tr(
+          '上次有一条消息的花费还没核对：读不到余额，下一条发送前再核对',
+          "The cost of a message from last time is not checked yet: can't read the balance, will check before the next send",
+        ),
+      );
     // A picture asked for before the restart is still followed (and forwarded when it is ours).
     if (kept?.taskId) {
-      this.log('上次请求的图片还没有结算，继续跟进');
+      this.log(
+        tr(
+          '上次请求的图片还没有结算，继续跟进',
+          'The image requested last time is not settled yet, still following it',
+        ),
+      );
       this.startImageJob(kept);
-    } else if (kept) this.log('上次的生图请求结果未知：主人发送 /image resume 用同一个请求重发');
+    } else if (kept)
+      this.log(
+        tr(
+          '上次的生图请求结果未知：主人发送 /image resume 用同一个请求重发',
+          'The outcome of the last image request is unknown: the owner can send /image resume to resend the same request',
+        ),
+      );
     const { billing, allowance } = this.state.data;
     if (billing.mode === 'paid')
       this.log(
-        `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机上限 ${allowance.maxSpend}，还可花 ${Math.max(0, this.left())}`,
+        tr(
+          `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机上限 ${allowance.maxSpend}，还可花 ${Math.max(0, this.left())}`,
+          `Budget ${billing.budget} gems (used ${billing.spent}); local spending cap ${allowance.maxSpend}, ${Math.max(0, this.left())} left to spend`,
+        ),
       );
     this.connect();
   }
@@ -373,11 +401,21 @@ export class Relay {
       this.gate = 'tooOld';
     else this.gate = '';
     if (this.gate === 'tooOld')
-      this.log(`yomi ${VERSION} 低于服务端要求的 ${this.policy.minVersion}，relay 暂停`);
+      this.log(
+        tr(
+          `yomi ${VERSION} 低于服务端要求的 ${this.policy.minVersion}，relay 暂停`,
+          `yomi ${VERSION} is older than the ${this.policy.minVersion} the server requires, relay paused`,
+        ),
+      );
     this.log(
-      `服务端策略：${this.policy.source === 'server' ? '已读取' : '未提供（按最严格的默认值）'}` +
-        `；只用免费额度${this.policy.freeOnly ? '已支持' : '未确认'}` +
-        `；合规提示${this.policy.complianceNotices ? '由服务端注入' : '由 relay 显示'}`,
+      tr(
+        `服务端策略：${this.policy.source === 'server' ? '已读取' : '未提供（按最严格的默认值）'}` +
+          `；只用免费额度${this.policy.freeOnly ? '已支持' : '未确认'}` +
+          `；合规提示${this.policy.complianceNotices ? '由服务端注入' : '由 relay 显示'}`,
+        `Server policy: ${this.policy.source === 'server' ? 'loaded' : 'not provided (using the strictest defaults)'}` +
+          `; free messages only: ${this.policy.freeOnly ? 'supported' : 'not confirmed'}` +
+          `; compliance notices: ${this.policy.complianceNotices ? 'added by the server' : 'shown by relay'}`,
+      ),
     );
   }
 
@@ -400,14 +438,25 @@ export class Relay {
         if (error instanceof TelegramError && error.conflict)
           throw new RelayStopped(
             'conflict',
-            '另一个程序正在用这个 bot 收消息（Telegram 409）。同一个 bot 只能运行一个 relay。',
+            tr(
+              '另一个程序正在用这个 bot 收消息（Telegram 409）。同一个 bot 只能运行一个 relay。',
+              'Another program is receiving messages with this bot (Telegram 409). Only one relay can run per bot.',
+            ),
           );
         if (error instanceof TelegramError && error.unauthorized)
           throw new RelayStopped(
             'token',
-            'Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 yomi relay --telegram --set-token 重新设置。',
+            tr(
+              'Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 yomi relay --telegram --set-token 重新设置。',
+              'Telegram does not accept this bot token (it may have been reset in BotFather). Set it again with yomi relay --telegram --set-token.',
+            ),
           );
-        this.log(`Telegram 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`);
+        this.log(
+          tr(
+            `Telegram 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
+            `Can't reach Telegram right now, retrying in ${Math.round(backoff / 1000)} s`,
+          ),
+        );
         await sleep(backoff, this.abort.signal);
         backoff = Math.min(backoff * 2, 30_000);
         continue;
@@ -466,7 +515,7 @@ export class Relay {
         chat.type !== 'private' &&
         ['member', 'administrator', 'restricted'].includes(member.status)
       ) {
-        this.log('有人把 bot 拉进了群，已退出');
+        this.log(tr('有人把 bot 拉进了群，已退出', 'Someone added the bot to a group; it left'));
         await this.bot.leaveChat(chat.id).catch(() => undefined);
       }
       return;
@@ -478,7 +527,12 @@ export class Relay {
     if (!this.owns(message.from.id, message.chat.id)) {
       this.strangers += 1;
       if (this.strangers === 1 || this.strangers % 20 === 0)
-        this.log(`已忽略非主人的消息（共 ${this.strangers} 条，没有转发、没有扣费）`);
+        this.log(
+          tr(
+            `已忽略非主人的消息（共 ${this.strangers} 条，没有转发、没有扣费）`,
+            `Ignored messages from someone other than the owner (${this.strangers} in total, not forwarded, not charged)`,
+          ),
+        );
       return;
     }
     if (Date.now() - message.date * 1000 > this.options.staleMs)
@@ -517,7 +571,12 @@ export class Relay {
         pairedAt: Date.now(),
       },
     });
-    this.log(`已配对：Telegram 用户 ${message.from.first_name}（${message.from.id}）`);
+    this.log(
+      tr(
+        `已配对：Telegram 用户 ${message.from.first_name}（${message.from.id}）`,
+        `Paired: Telegram user ${message.from.first_name} (${message.from.id})`,
+      ),
+    );
     await this.say(this.texts.paired(`@${this.state.data.botUsername}`));
     const character = this.state.data.character;
     if (character) await this.say(this.texts.characterIs(character.name, character.npcId));
@@ -571,14 +630,19 @@ export class Relay {
       profile = await characterProfile(this.gateway, npcId);
     } catch (error) {
       if (error instanceof NotSignedIn) throw error;
-      this.log('角色读取失败');
+      this.log(tr('角色读取失败', "Couldn't load the character"));
       if (announce) await this.say(this.texts.characterBad);
       return;
     }
     const character: RelayCharacter = { npcId, name: profile.name, group: profile.group };
     this.state.update({ character });
     this.price = null;
-    this.log(`当前角色：${character.name}（${npcId}${character.group ? '，群聊' : ''}）`);
+    this.log(
+      tr(
+        `当前角色：${character.name}（${npcId}${character.group ? '，群聊' : ''}）`,
+        `Current character: ${character.name} (${npcId}${character.group ? ', group chat' : ''})`,
+      ),
+    );
     if (!announce) return;
     await this.say(this.texts.characterSet(character.name));
     await this.notice(character, true);
@@ -676,7 +740,9 @@ export class Relay {
 
   private async budget(argument: string) {
     if (!argument) return void (await this.say(this.budgetLine() + '\n' + this.texts.budgetUsage));
-    if (/^(off|free|0|关|免费)$/i.test(argument)) {
+    if (
+      /^(off|free|0|关|免费)$/i.test(argument) // i18n-ignore
+    ) {
       // A charged "free" reply stays paused: free-only is what failed.
       this.state.update({
         billing: { mode: 'free', budget: 0, spent: 0, setAt: Date.now() },
@@ -779,7 +845,12 @@ export class Relay {
         billing: { mode: 'paid', budget: button.amount, spent: 0, setAt: Date.now() },
         billingPause: '',
       });
-      this.log(`主人确认了预算 ${button.amount} 钻石`);
+      this.log(
+        tr(
+          `主人确认了预算 ${button.amount} 钻石`,
+          `The owner confirmed a budget of ${button.amount} gems`,
+        ),
+      );
       return void (await this.say(this.texts.budgetSet(button.amount)));
     }
     if (choice === 'c') {
@@ -895,7 +966,13 @@ export class Relay {
       await this.say(this.texts.priceLine(price) + this.texts.balanceLine(before));
       this.priceShown.add(character.npcId);
     }
-    if (before === null) this.log('读不到余额：这条只用免费额度的回复无法核对是否扣费');
+    if (before === null)
+      this.log(
+        tr(
+          '读不到余额：这条只用免费额度的回复无法核对是否扣费',
+          "Can't read the balance: can't check whether this free-messages-only reply was charged",
+        ),
+      );
     else this.state.update({ pending: { before, mode: billing.mode, price, at: Date.now() } });
     const presenter = new ReplyPresenter(this.bot, message.chat.id, {
       render: { characterName: character.name, group: character.group },
@@ -938,7 +1015,9 @@ export class Relay {
       await this.refused(error);
       return;
     }
-    this.log(`已转发一条消息给「${character.name}」`);
+    this.log(
+      tr(`已转发一条消息给「${character.name}」`, `Forwarded a message to "${character.name}"`),
+    );
     turn.streamId = answer.streamId;
     turn.assistantMid = answer.assistantMid;
     turn.cid = answer.cid;
@@ -961,7 +1040,12 @@ export class Relay {
     if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
       return this.signedOut();
     if (error instanceof ChatRefusal) {
-      this.log(`发送被拒绝：${error.kind}（${error.code}）`);
+      this.log(
+        tr(
+          `发送被拒绝：${error.kind}（${error.code}）`,
+          `Send refused: ${error.kind} (${error.code})`,
+        ),
+      );
       switch (error.kind) {
         case 'gems':
           return void (await this.say(this.texts.insufficientGems));
@@ -995,7 +1079,12 @@ export class Relay {
       }
     }
     if (unknownOutcome(error)) return void (await this.say(this.texts.sendUnknown));
-    this.log(`发送失败：${error instanceof Error ? error.name : 'error'}`);
+    this.log(
+      tr(
+        `发送失败：${error instanceof Error ? error.name : 'error'}`,
+        `Send failed: ${error instanceof Error ? error.name : 'error'}`,
+      ),
+    );
     await this.say(this.texts.refused(''));
   }
 
@@ -1127,12 +1216,20 @@ export class Relay {
       await show();
     } catch (error) {
       this.log(
-        `回复发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
+        tr(
+          `回复发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
+          `Couldn't send the reply to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+        ),
       );
     }
     try {
       if (!turn.booked && !(await this.settlePending()))
-        this.log('暂时读不到余额：这条回复的花费会在下一条发送前核对');
+        this.log(
+          tr(
+            '暂时读不到余额：这条回复的花费会在下一条发送前核对',
+            "Can't read the balance right now: this reply's cost will be checked before the next send",
+          ),
+        );
     } catch (error) {
       if (error instanceof NotSignedIn) await this.signedOut();
       else throw error;
@@ -1151,7 +1248,7 @@ export class Relay {
     if (!turn && this.job) return this.stopImage();
     if (!turn || turn.settled || turn.presenter.isClosed)
       return void (await this.say(this.texts.nothingToStop));
-    this.log('主人停止了这条回复的转发');
+    this.log(tr('主人停止了这条回复的转发', 'The owner stopped forwarding this reply'));
     await turn.presenter.stop(this.texts.stopped);
   }
 
@@ -1170,7 +1267,12 @@ export class Relay {
     if (drop >= 0) await this.book(drop, pending.mode);
     else if (pending.mode === 'paid') {
       const estimate = pending.price ?? Math.max(0, this.left());
-      this.log(`余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入预算`);
+      this.log(
+        tr(
+          `余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入预算`,
+          `The balance went up during this reply, so the cost can't be measured: counting ${estimate} gems against the budget`,
+        ),
+      );
       await this.book(estimate, pending.mode);
     }
     return true;
@@ -1182,7 +1284,12 @@ export class Relay {
     const allowance = this.state.data.allowance;
     this.state.update({ allowance: { ...allowance, spent: allowance.spent + amount } });
     if (mode === 'free') {
-      this.log(`只用免费额度时被扣了 ${amount} 钻石，relay 暂停`);
+      this.log(
+        tr(
+          `只用免费额度时被扣了 ${amount} 钻石，relay 暂停`,
+          `Charged ${amount} gems while on free messages only, relay paused`,
+        ),
+      );
       this.state.update({ billingPause: 'freeCharged' });
       await this.say(this.texts.freeCharged(amount));
       return;
@@ -1191,7 +1298,10 @@ export class Relay {
     const spent = billing.spent + amount;
     this.state.update({ billing: { ...billing, spent } });
     this.log(
-      `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机还可花 ${Math.max(0, this.ceilingLeft())}）`,
+      tr(
+        `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机还可花 ${Math.max(0, this.ceilingLeft())}）`,
+        `This reply cost ${amount} gems (budget ${billing.budget}, used ${spent}; ${Math.max(0, this.ceilingLeft())} left under the local spending cap)`,
+      ),
     );
     if (this.left() <= 0) {
       this.state.update({ billingPause: 'budget' });
@@ -1224,7 +1334,12 @@ export class Relay {
       if (kept.taskId) return void (await this.say(this.texts.imageForgetAccepted));
       // Only an unknown outcome goes; its pending charge is still settled before the next send.
       this.keepImage(null);
-      this.log('主人放弃追踪上一次结果未知的生图请求');
+      this.log(
+        tr(
+          '主人放弃追踪上一次结果未知的生图请求',
+          'The owner stopped tracking the last image request with an unknown outcome',
+        ),
+      );
       return void (await this.say(this.texts.imageForgotten));
     }
     if (this.job) return void (await this.say(this.texts.imageBusy));
@@ -1277,7 +1392,7 @@ export class Relay {
       if (error instanceof ApiError && error.code === CHARACTER_REMOVED)
         return void (await this.say(this.texts.unavailable));
       // An unknown price is "not free": nothing is asked for.
-      this.log('读不到生图配置');
+      this.log(tr('读不到生图配置', "Can't read the image generation settings"));
       return void (await this.say(this.texts.imageConfigUnavailable));
     }
     if (!config.enabled) return void (await this.say(this.texts.imageDisabled));
@@ -1427,7 +1542,12 @@ export class Relay {
       if (replay && (refusal || signedOut)) {
         this.keepImage({ ...record, taskId: '' });
         if (signedOut) return this.signedOut();
-        this.log(`重发的生图请求被拒绝：${refusal?.kind}（${refusal?.code}），保留请求`);
+        this.log(
+          tr(
+            `重发的生图请求被拒绝：${refusal?.kind}（${refusal?.code}），保留请求`,
+            `The resent image request was refused: ${refusal?.kind} (${refusal?.code}), keeping the request`,
+          ),
+        );
         return void (await this.say(
           this.texts.imageReplayRefused(
             refusal && refusal.message !== refusal.code ? refusal.message : (refusal?.code ?? ''),
@@ -1441,7 +1561,12 @@ export class Relay {
         return this.signedOut();
       }
       const code = error instanceof ApiError ? `${error.code}/HTTP ${error.httpStatus}` : 'error';
-      this.log(`生图请求结果未知（${code}）：保留请求，等主人用 /image resume 重发同一个请求`);
+      this.log(
+        tr(
+          `生图请求结果未知（${code}）：保留请求，等主人用 /image resume 重发同一个请求`,
+          `Image request outcome unknown (${code}): keeping the request until the owner resends it with /image resume`,
+        ),
+      );
       return void (await this.say(this.texts.imageUnknown));
     }
     record.taskId = answer.task.taskId;
@@ -1450,15 +1575,26 @@ export class Relay {
     this.keepImage(record);
     this.log(
       answer.replay
-        ? '同一个生图请求已被受理过：继续跟进，不会重复扣费'
-        : `已为「${record.name}」请求一张图片（${record.price > 0 ? `${record.price} 钻石` : '免费'}）`,
+        ? tr(
+            '同一个生图请求已被受理过：继续跟进，不会重复扣费',
+            'This image request was already accepted: still following it, no second charge',
+          )
+        : tr(
+            `已为「${record.name}」请求一张图片（${record.price > 0 ? `${record.price} 钻石` : '免费'}）`,
+            `Requested an image for "${record.name}" (${record.price > 0 ? `${record.price} gems` : 'free'})`,
+          ),
     );
     await this.say(this.texts.imageStarted(record.price));
     this.startImageJob(record);
   }
 
   private async imageRefused(refusal: GenRefusal) {
-    this.log(`生图被拒绝：${refusal.kind}（${refusal.code}）`);
+    this.log(
+      tr(
+        `生图被拒绝：${refusal.kind}（${refusal.code}）`,
+        `Image generation refused: ${refusal.kind} (${refusal.code})`,
+      ),
+    );
     switch (refusal.kind) {
       case 'gems':
         return void (await this.say(this.texts.imageGems));
@@ -1546,7 +1682,10 @@ export class Relay {
       } catch (error) {
         if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
           return this.signedOut();
-        if (!reported) this.log('读取生图进度失败，继续重试');
+        if (!reported)
+          this.log(
+            tr('读取生图进度失败，继续重试', "Couldn't read the image progress, still retrying"),
+          );
         reported = true;
       }
       if (job.stop.signal.aborted) return;
@@ -1554,9 +1693,20 @@ export class Relay {
       const patient = Date.now() < Math.max(deadline, record.told ? record.at + window : 0);
       if (task && (await this.concludeImage(record, task, job.pushes, patient))) return;
       if (!patient) {
-        if (record.told) this.log('图片的扣费还没结算完：下一次发送前再核对');
+        if (record.told)
+          this.log(
+            tr(
+              '图片的扣费还没结算完：下一次发送前再核对',
+              "The image's charge is not settled yet: will check before the next send",
+            ),
+          );
         else {
-          this.log('图片还没生成好：服务端会继续，主人可用 /image resume 继续等待');
+          this.log(
+            tr(
+              '图片还没生成好：服务端会继续，主人可用 /image resume 继续等待',
+              'The image is not ready yet: the server keeps going, the owner can wait again with /image resume',
+            ),
+          );
           await this.say(this.texts.imageTimeout);
         }
         return;
@@ -1588,7 +1738,12 @@ export class Relay {
             ? this.texts.imageRejected(detail, note)
             : this.texts.imageFailed(detail, note),
         );
-        this.log(`图片没有生成成功（${task.failure?.code || '未知原因'}）`);
+        this.log(
+          tr(
+            `图片没有生成成功（${task.failure?.code || '未知原因'}）`,
+            `The image was not generated (${task.failure?.code || 'unknown reason'})`,
+          ),
+        );
       } else if (task.delivery === ImageDelivery.skippedConversationDeleted)
         await this.say(this.texts.imageSkipped);
       else await this.forwardImage(record, task, pushes);
@@ -1629,14 +1784,22 @@ export class Relay {
           : null;
     if (known === null) {
       if (!(await this.settlePending()))
-        this.log('暂时读不到余额：这张图片的花费会在下一条发送前核对');
+        this.log(
+          tr(
+            '暂时读不到余额：这张图片的花费会在下一条发送前核对',
+            "Can't read the balance right now: this image's cost will be checked before the next send",
+          ),
+        );
       return;
     }
     const now = await this.balance();
     this.state.update({ pending: null });
     if (now !== null && pending.before - now !== known)
       this.log(
-        `这张图片按任务记为 ${known} 钻石；同期余额变化 ${pending.before - now}（其他扣费或充值），按任务计入预算`,
+        tr(
+          `这张图片按任务记为 ${known} 钻石；同期余额变化 ${pending.before - now}（其他扣费或充值），按任务计入预算`,
+          `The task records this image at ${known} gems; the balance changed by ${pending.before - now} meanwhile (other charges or top-ups), counting the task's amount against the budget`,
+        ),
       );
     await this.book(known, pending.mode);
   }
@@ -1667,12 +1830,17 @@ export class Relay {
     }
     const owner = this.state.data.owner;
     if (!owner || owner.chatId !== record.chatId) {
-      this.log('配对的主人变了：这张图片没有转发');
+      this.log(
+        tr(
+          '配对的主人变了：这张图片没有转发',
+          'The paired owner changed: this image was not forwarded',
+        ),
+      );
       return;
     }
     const picture = await this.downloadImage(task, message);
     if (!picture) {
-      this.log('图片下载失败');
+      this.log(tr('图片下载失败', "Couldn't download the image"));
       return void (await this.say(this.texts.imageForwardFailed));
     }
     await this.bot.sendChatAction(owner.chatId, 'upload_photo').catch(() => undefined);
@@ -1684,10 +1852,15 @@ export class Relay {
       );
       const mid = task.resultMid || message?.mid || '';
       if (mid) this.state.rememberReply(sent.message_id, mid);
-      this.log(`已转发一张「${record.name}」的图片`);
+      this.log(
+        tr(`已转发一张「${record.name}」的图片`, `Forwarded an image from "${record.name}"`),
+      );
     } catch (error) {
       this.log(
-        `图片发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
+        tr(
+          `图片发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
+          `Couldn't send the image to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+        ),
       );
       await this.say(this.texts.imageForwardFailed);
     }
@@ -1739,7 +1912,7 @@ export class Relay {
     if (!job) return void (await this.say(this.texts.nothingToStop));
     job.stop.abort();
     await job.done;
-    this.log('主人停止了等待图片');
+    this.log(tr('主人停止了等待图片', 'The owner stopped waiting for the image'));
     await this.say(this.texts.imageStopped);
   }
 
@@ -1789,7 +1962,7 @@ export class Relay {
       },
       onState: (state) => {
         if (state === 'retrying' && connection.reconnects % 10 === 1)
-          this.log('Yomi 长连接断开，正在重连');
+          this.log(tr('Yomi 长连接断开，正在重连', 'Yomi connection dropped, reconnecting'));
       },
     });
     connection.on((event) => {
@@ -1825,7 +1998,12 @@ export class Relay {
 
   private async signedOut() {
     if (this.gate === 'signedOut') return;
-    this.log('Yomi 登录已失效，relay 暂停；在这台电脑上运行 yomi login 后自动恢复');
+    this.log(
+      tr(
+        'Yomi 登录已失效，relay 暂停；在这台电脑上运行 yomi login 后自动恢复',
+        'Yomi sign-in expired, relay paused; it resumes on its own after you run yomi login on this machine',
+      ),
+    );
     this.gate = 'signedOut';
     this.connection?.stop();
     const turn = this.turn;
@@ -1853,7 +2031,7 @@ export class Relay {
     if (this.resumeTimer) clearInterval(this.resumeTimer);
     this.resumeTimer = null;
     if (this.gate === 'signedOut') this.gate = '';
-    this.log('Yomi 登录已恢复');
+    this.log(tr('Yomi 登录已恢复', 'Yomi sign-in restored'));
     this.connect();
     await this.say(this.texts.resumed);
     const kept = this.keptImage();
@@ -1864,7 +2042,10 @@ export class Relay {
     if (this.stopReason) return;
     this.stopReason = new RelayStopped(
       'otherAccount',
-      '这台电脑上登录的 Yomi 账号变了，relay 已停止。',
+      tr(
+        '这台电脑上登录的 Yomi 账号变了，relay 已停止。',
+        'The Yomi account signed in on this machine changed, relay stopped.',
+      ),
     );
     void this.say(this.texts.otherAccount);
     this.abort.abort();
@@ -1874,7 +2055,10 @@ export class Relay {
     if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
       return this.signedOut();
     this.log(
-      `处理消息出错：${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
+      tr(
+        `处理消息出错：${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
+        `Error handling a message: ${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
+      ),
     );
   }
 
@@ -1895,9 +2079,17 @@ export class Relay {
     try {
       return await this.bot.sendMessage(owner.chatId, html, extra);
     } catch (error) {
-      if (error instanceof TelegramError && error.blocked) this.log('主人屏蔽了 bot，消息发不出去');
+      if (error instanceof TelegramError && error.blocked)
+        this.log(
+          tr('主人屏蔽了 bot，消息发不出去', "The owner blocked the bot, messages can't be sent"),
+        );
       else
-        this.log(`发给 Telegram 失败${error instanceof TelegramError ? `（${error.code}）` : ''}`);
+        this.log(
+          tr(
+            `发给 Telegram 失败${error instanceof TelegramError ? `（${error.code}）` : ''}`,
+            `Couldn't send to Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
+          ),
+        );
       return null;
     }
   }

@@ -9,6 +9,7 @@ import {
 import { ApiError, type Gateway, NotSignedIn, refreshLockPath } from '../core/api.js';
 import { type Credential, storeDescription } from '../core/credentials.js';
 import { describeEnvironment } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import { withFileLock } from '../core/lock.js';
 import { askYesOrNo, paint, say, terminalText, warn } from '../core/ui.js';
 import { type Context, requireSignIn } from './context.js';
@@ -22,11 +23,30 @@ export type LoginOptions = { browser: boolean; timeoutSeconds: number };
 export async function login(context: Context, options: LoginOptions) {
   const { io, env } = context;
   const previous = context.gateway.credential;
-  say(io, `登录 Yomi（${describeEnvironment(env)}）`);
+  say(
+    io,
+    tr(`登录 Yomi（${describeEnvironment(env)}）`, `Sign in to Yomi (${describeEnvironment(env)})`),
+  );
   if (previous)
-    say(io, paint(io, 'dim', `本机已登录账号 ${previous.userId}，完成授权后会替换它。`));
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          `本机已登录账号 ${previous.userId}，完成授权后会替换它。`,
+          `Account ${previous.userId} is already signed in on this machine; it will be replaced once you authorize.`,
+        ),
+      ),
+    );
   const request = await beginBrowserAuthorization(env, options.timeoutSeconds * 1000, (reason) =>
-    warn(io, `拒绝了一次授权回调（${reason}），继续等待。`),
+    warn(
+      io,
+      tr(
+        `拒绝了一次授权回调（${reason}），继续等待。`,
+        `Refused an authorization callback (${reason}); still waiting.`,
+      ),
+    ),
   );
   // Ctrl+C cancels the login at any step until the new sign-in is saved (a session made
   // meanwhile is revoked first, a question is closed); a second one ends the process at once.
@@ -35,7 +55,14 @@ export async function login(context: Context, options: LoginOptions) {
   let saved = false;
   const onSignal = () => {
     if (cancelled.signal.aborted) {
-      if (saved) warn(io, '已登录；被替换的旧 CLI 会话可能没有撤销（见 docs/security.md 5.1）。');
+      if (saved)
+        warn(
+          io,
+          tr(
+            '已登录；被替换的旧 CLI 会话可能没有撤销（见 docs/security.md 5.1）。',
+            'Signed in; the replaced CLI session may not have been revoked (see docs/security.md 5.1).',
+          ),
+        );
       process.exit(130);
     }
     cancelled.abort();
@@ -43,8 +70,14 @@ export async function login(context: Context, options: LoginOptions) {
     warn(
       io,
       saved
-        ? '已登录，正在撤销被替换的旧会话；再按一次 Ctrl+C 立即退出。'
-        : '正在取消登录…（再按一次 Ctrl+C 立即退出）',
+        ? tr(
+            '已登录，正在撤销被替换的旧会话；再按一次 Ctrl+C 立即退出。',
+            'Signed in, revoking the replaced session; press Ctrl+C again to exit now.',
+          )
+        : tr(
+            '正在取消登录…（再按一次 Ctrl+C 立即退出）',
+            'Cancelling sign-in… (press Ctrl+C again to exit now)',
+          ),
     );
   };
   process.on('SIGINT', onSignal);
@@ -56,21 +89,55 @@ export async function login(context: Context, options: LoginOptions) {
         paint(
           io,
           'dim',
-          '非交互运行（输入或输出不是终端）：第一个有效的网页回答直接生效，不会询问。需要确认账号请直接在终端里运行。',
+          tr(
+            '非交互运行（输入或输出不是终端）：第一个有效的网页回答直接生效，不会询问。需要确认账号请直接在终端里运行。',
+            'Running non-interactively (input or output is not a terminal): the first valid answer from the web takes effect without asking. To confirm the account, run this directly in a terminal.',
+          ),
         ),
       );
     say(io);
-    say(io, `确认码：${paint(io, 'bold', request.code)}`);
-    say(io, paint(io, 'dim', '网页上显示的确认码应与此一致；不一致请不要授权。'));
+    say(
+      io,
+      tr(
+        `确认码：${paint(io, 'bold', request.code)}`,
+        `Confirmation code: ${paint(io, 'bold', request.code)}`,
+      ),
+    );
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '网页上显示的确认码应与此一致；不一致请不要授权。',
+          'The confirmation code on the web page should match this one; if it does not, do not authorize.',
+        ),
+      ),
+    );
     say(io);
     const opened = options.browser && (await openBrowser(request.url));
     say(
       io,
-      opened ? '已在浏览器中打开授权页；如果没有打开，请手动访问：' : '请在浏览器中打开授权页：',
+      opened
+        ? tr(
+            '已在浏览器中打开授权页；如果没有打开，请手动访问：',
+            'Opened the authorization page in your browser; if it did not open, visit:',
+          )
+        : tr('请在浏览器中打开授权页：', 'Open the authorization page in your browser:'),
     );
     say(io, `  ${request.url}`);
     say(io);
-    say(io, paint(io, 'dim', `等待网页授权（${options.timeoutSeconds} 秒内有效，Ctrl+C 取消）…`));
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          `等待网页授权（${options.timeoutSeconds} 秒内有效，Ctrl+C 取消）…`,
+          `Waiting for authorization on the web (valid for ${options.timeoutSeconds} seconds, Ctrl+C to cancel)…`,
+        ),
+      ),
+    );
     const accepted = await acceptedSession(context, request, {
       timeoutSeconds: options.timeoutSeconds,
       ask,
@@ -89,7 +156,13 @@ export async function login(context: Context, options: LoginOptions) {
       });
     } catch (error) {
       if (!(await signOut(accepted.gateway)))
-        warn(io, '新建立的会话没能在服务端撤销，它可能仍然有效（见 docs/security.md 5.1）。');
+        warn(
+          io,
+          tr(
+            '新建立的会话没能在服务端撤销，它可能仍然有效（见 docs/security.md 5.1）。',
+            'The new session could not be revoked on the server; it may still be valid (see docs/security.md 5.1).',
+          ),
+        );
       throw error;
     }
     saved = true;
@@ -101,13 +174,42 @@ export async function login(context: Context, options: LoginOptions) {
       if (!revoked)
         warn(
           io,
-          '被替换的旧 CLI 会话没能在服务端撤销（网络问题，或已被别的进程刷新），它可能仍然有效（见 docs/security.md 5.1）。',
+          tr(
+            '被替换的旧 CLI 会话没能在服务端撤销（网络问题，或已被别的进程刷新），它可能仍然有效（见 docs/security.md 5.1）。',
+            'The replaced CLI session could not be revoked on the server (a network problem, or another process refreshed it); it may still be valid (see docs/security.md 5.1).',
+          ),
         );
     }
-    say(io, paint(io, 'green', `✓ 已登录${describeAccount(credential)}`));
-    say(io, paint(io, 'dim', `凭证保存在${storeDescription(context.store.kind)}`));
+    say(
+      io,
+      paint(
+        io,
+        'green',
+        tr(
+          `✓ 已登录${describeAccount(credential)}`,
+          `✓ Signed in with ${describeAccount(credential)}`,
+        ),
+      ),
+    );
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          `凭证保存在${storeDescription(context.store.kind)}`,
+          `Credentials saved in the ${storeDescription(context.store.kind)}`,
+        ),
+      ),
+    );
     if (context.store.kind === 'file' && process.env.YOMI_CREDENTIAL_STORE !== 'file')
-      warn(io, '没有可用的系统钥匙串，凭证存于本地文件（仅当前用户可读）。');
+      warn(
+        io,
+        tr(
+          '没有可用的系统钥匙串，凭证存于本地文件（仅当前用户可读）。',
+          'No system keychain available; credentials are stored in a local file (readable only by the current user).',
+        ),
+      );
   } finally {
     process.removeListener('SIGINT', onSignal);
     request.cancel();
@@ -116,9 +218,19 @@ export async function login(context: Context, options: LoginOptions) {
 
 /** The account as the server names it: name, user ID and email (never what the page posted). */
 function describeAccount(credential: Credential): string {
-  const name = credential.displayName ? `「${terminalText(credential.displayName)}」` : '';
-  const email = credential.email ? `，${terminalText(credential.email)}` : '';
-  return `账号${name}（user_id ${credential.userId}${email}）`;
+  const name = credential.displayName
+    ? tr(
+        `「${terminalText(credential.displayName)}」`,
+        ` "${terminalText(credential.displayName)}"`,
+      )
+    : '';
+  const email = credential.email
+    ? tr(`，${terminalText(credential.email)}`, `, ${terminalText(credential.email)}`)
+    : '';
+  return tr(
+    `账号${name}（user_id ${credential.userId}${email}）`,
+    `account${name} (user_id ${credential.userId}${email})`,
+  );
 }
 
 /** A server message fit for the terminal: short, without control characters. */
@@ -128,10 +240,16 @@ function cleanReason(message: string): string {
 
 function refusalOf(error: unknown): string {
   if (error instanceof DeactivationPending)
-    return '这个账号正在注销冷静期（如果是你的账号，请先在 App 或网页处理）';
+    return tr(
+      '这个账号正在注销冷静期（如果是你的账号，请先在 App 或网页处理）',
+      'this account is in its deletion cool-down period (if it is yours, deal with it in the app or on the web first)',
+    );
   const failure = error as ApiError;
   return failure.message && failure.message !== String(failure.code)
-    ? `${failure.code}：${cleanReason(failure.message)}`
+    ? tr(
+        `${failure.code}：${cleanReason(failure.message)}`,
+        `${failure.code}: ${cleanReason(failure.message)}`,
+      )
     : String(failure.code);
 }
 
@@ -160,7 +278,7 @@ async function acceptedSession(
   const { ask, signal } = options;
   let refusals = 0;
   let lastRefusal = '';
-  const cancelledError = () => new Error('已取消登录');
+  const cancelledError = () => new Error(tr('已取消登录', 'Sign-in cancelled'));
   /** After Ctrl+C: the session being tried out is revoked and the login ends. */
   const stopIfCancelled = async (candidate: Gateway) => {
     if (!signal.aborted) return;
@@ -169,7 +287,17 @@ async function acceptedSession(
   };
   const waitAgain = () => {
     request.resume();
-    say(io, paint(io, 'dim', '继续等待网页授权（Ctrl+C 取消）…'));
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '继续等待网页授权（Ctrl+C 取消）…',
+          'Still waiting for authorization on the web (Ctrl+C to cancel)…',
+        ),
+      ),
+    );
   };
   for (;;) {
     let result;
@@ -179,29 +307,56 @@ async function acceptedSession(
       if (signal.aborted) throw cancelledError();
       if (error instanceof CallbackTimeout)
         throw new Error(
-          `${options.timeoutSeconds} 秒内没有完成授权，请重新运行 yomi login` +
-            (lastRefusal ? `（服务端最后一次拒绝：${lastRefusal}）` : ''),
+          tr(
+            `${options.timeoutSeconds} 秒内没有完成授权，请重新运行 yomi login`,
+            `Authorization was not completed within ${options.timeoutSeconds} seconds; run yomi login again`,
+          ) +
+            (lastRefusal
+              ? tr(
+                  `（服务端最后一次拒绝：${lastRefusal}）`,
+                  ` (the server's last refusal: ${lastRefusal})`,
+                )
+              : ''),
         );
       throw error;
     }
     if (result.kind === 'denied') {
       if (!io.interactive) {
-        warn(io, '如果不是你在网页上点的取消，不要再在网页上授权，重新运行 yomi login。');
-        throw new Error('已在网页上取消授权');
+        warn(
+          io,
+          tr(
+            '如果不是你在网页上点的取消，不要再在网页上授权，重新运行 yomi login。',
+            'If it was not you who clicked cancel on the web page, do not authorize there again; run yomi login again.',
+          ),
+        );
+        throw new Error(tr('已在网页上取消授权', 'Authorization was cancelled on the web'));
       }
       const end = await ask(
-        '网页上取消了这次授权。输入 y 结束登录；如果不是你点的，输入 n 继续等待：',
+        tr(
+          '网页上取消了这次授权。输入 y 结束登录；如果不是你点的，输入 n 继续等待：',
+          'Authorization was cancelled on the web page. Type y to end the sign-in; if it was not you, type n to keep waiting: ',
+        ),
       );
       if (signal.aborted) throw cancelledError();
-      if (end !== false) throw new Error('已在网页上取消授权');
+      if (end !== false)
+        throw new Error(tr('已在网页上取消授权', 'Authorization was cancelled on the web'));
       warn(
         io,
-        '没有结束登录。不是你点的取消，说明有别的程序在冒充网页回调：请核对确认码后再在网页上点授权。',
+        tr(
+          '没有结束登录。不是你点的取消，说明有别的程序在冒充网页回调：请核对确认码后再在网页上点授权。',
+          'Sign-in not ended. Since you did not click cancel, another program is posing as the web callback: check the confirmation code, then click authorize on the web page.',
+        ),
       );
       waitAgain();
       continue;
     }
-    say(io, '已收到网页授权，正在建立 CLI 会话…');
+    say(
+      io,
+      tr(
+        '已收到网页授权，正在建立 CLI 会话…',
+        'Received authorization from the web, setting up the CLI session…',
+      ),
+    );
     const candidate = context.gateway.detached(null);
     try {
       await exchangeFirebaseToken(candidate, result.idToken, context.idfv, signal);
@@ -214,9 +369,22 @@ async function acceptedSession(
       if (!refused) throw error;
       refusals += 1;
       lastRefusal = refusalOf(error);
-      if (refusals <= REFUSALS_REPORTED) warn(io, `网页交来的凭证没能换出会话（${lastRefusal}）。`);
+      if (refusals <= REFUSALS_REPORTED)
+        warn(
+          io,
+          tr(
+            `网页交来的凭证没能换出会话（${lastRefusal}）。`,
+            `The credentials from the web could not be exchanged for a session (${lastRefusal}).`,
+          ),
+        );
       else if (refusals === REFUSALS_REPORTED + 1)
-        warn(io, '还有更多换不出会话的回调，之后不再逐条提示。');
+        warn(
+          io,
+          tr(
+            '还有更多换不出会话的回调，之后不再逐条提示。',
+            'More callbacks could not be exchanged for a session; they will no longer be reported one by one.',
+          ),
+        );
       waitAgain();
       continue;
     }
@@ -235,30 +403,62 @@ async function acceptedSession(
     const current = candidate.credential;
     if (!current)
       throw new NotSignedIn(
-        '刚建立的 CLI 会话已经失效（可能在别处重新登录了网页），没有登录；请重新运行 yomi login',
+        tr(
+          '刚建立的 CLI 会话已经失效（可能在别处重新登录了网页），没有登录；请重新运行 yomi login',
+          'The CLI session just set up is no longer valid (perhaps someone signed in to the web again elsewhere); not signed in. Run yomi login again',
+        ),
       );
     const credential: Credential = { ...current, displayName: terminalText(name) };
     candidate.useCredential(credential);
-    say(io, `网页授权的是${describeAccount(credential)}。`);
+    say(
+      io,
+      tr(
+        `网页授权的是${describeAccount(credential)}。`,
+        `The web authorized ${describeAccount(credential)}.`,
+      ),
+    );
     if (!io.interactive) {
       warn(
         io,
-        '没有人确认这个账号（非交互运行）。如果你还没在网页上点授权，就不要再点；如果这不是你的账号，运行 yomi logout，再直接在终端里运行 yomi login。',
+        tr(
+          '没有人确认这个账号（非交互运行）。如果你还没在网页上点授权，就不要再点；如果这不是你的账号，运行 yomi logout，再直接在终端里运行 yomi login。',
+          'Nobody confirmed this account (running non-interactively). If you have not clicked authorize on the web page yet, do not; if this is not your account, run yomi logout, then run yomi login directly in a terminal.',
+        ),
       );
       return { credential, gateway: candidate };
     }
-    const yes = await ask('以这个账号登录 Yomi CLI？输入 y 确认，n 拒绝并继续等待：');
+    const yes = await ask(
+      tr(
+        '以这个账号登录 Yomi CLI？输入 y 确认，n 拒绝并继续等待：',
+        'Sign in to Yomi CLI with this account? Type y to confirm, or n to refuse and keep waiting: ',
+      ),
+    );
     // Ctrl+C at the question: the session is revoked and the login ends.
     await stopIfCancelled(candidate);
     if (yes === true) return { credential: candidate.credential ?? credential, gateway: candidate };
     const revoked = await signOut(candidate);
-    if (yes === null) throw new Error('输入已结束，没有登录（刚建立的会话已撤销）');
+    if (yes === null)
+      throw new Error(
+        tr(
+          '输入已结束，没有登录（刚建立的会话已撤销）',
+          'Input ended; not signed in (the session just set up was revoked)',
+        ),
+      );
     warn(
       io,
       (revoked
-        ? '已拒绝这个账号，刚建立的会话已撤销。'
-        : '已拒绝这个账号，但撤销刚建立的会话没有成功（网络或会话问题），它在服务端可能仍然有效。') +
-        '如果你没有在网页上点过授权，说明有别的程序抢先回调了：请核对确认码后再在网页上点一次授权。',
+        ? tr(
+            '已拒绝这个账号，刚建立的会话已撤销。',
+            'Refused this account; the session just set up was revoked. ',
+          )
+        : tr(
+            '已拒绝这个账号，但撤销刚建立的会话没有成功（网络或会话问题），它在服务端可能仍然有效。',
+            'Refused this account, but revoking the session just set up failed (a network or session problem); it may still be valid on the server. ',
+          )) +
+        tr(
+          '如果你没有在网页上点过授权，说明有别的程序抢先回调了：请核对确认码后再在网页上点一次授权。',
+          'If you never clicked authorize on the web page, another program called back first: check the confirmation code, then click authorize on the web page once more.',
+        ),
     );
     waitAgain();
   }
@@ -268,18 +468,33 @@ export async function logout(context: Context) {
   const { io } = context;
   const credential = context.gateway.credential;
   if (!credential) {
-    say(io, `本机没有${describeEnvironment(context.env)}的登录。`);
+    say(
+      io,
+      tr(
+        `本机没有${describeEnvironment(context.env)}的登录。`,
+        `Not signed in on this machine (${describeEnvironment(context.env)}).`,
+      ),
+    );
     relayTokenHint(context);
     return;
   }
   const revoked = await signOut(context.gateway);
   context.store.delete(context.account);
   context.gateway.useCredential(null);
-  say(io, `已退出账号 ${credential.userId}，本机凭证已删除。`);
+  say(
+    io,
+    tr(
+      `已退出账号 ${credential.userId}，本机凭证已删除。`,
+      `Signed out of account ${credential.userId}; local credentials deleted.`,
+    ),
+  );
   if (!revoked)
     warn(
       io,
-      '服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，请在浏览器重新登录一次 Yomi 网页，让其他网页平台的会话（包括 CLI）失效。',
+      tr(
+        '服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，请在浏览器重新登录一次 Yomi 网页，让其他网页平台的会话（包括 CLI）失效。',
+        'The sign-out request to the server failed (network problem, or the session had already expired); local credentials were deleted anyway. If you suspect the credentials leaked, sign in to the Yomi web page again in your browser so that other web-platform sessions (including the CLI) end.',
+      ),
     );
   relayTokenHint(context);
 }
@@ -298,7 +513,10 @@ function relayTokenHint(context: Context) {
       paint(
         context.io,
         'dim',
-        '本机还保存着 relay 的 Telegram bot token，yomi logout 不会删除它：需要时运行 yomi relay --telegram --forget；怀疑外泄就在 @BotFather 对这个 bot 发 /revoke。',
+        tr(
+          '本机还保存着 relay 的 Telegram bot token，yomi logout 不会删除它：需要时运行 yomi relay --telegram --forget；怀疑外泄就在 @BotFather 对这个 bot 发 /revoke。',
+          "This machine still holds the relay's Telegram bot token, and yomi logout does not delete it: run yomi relay --telegram --forget when needed; if you suspect it leaked, send /revoke for this bot to @BotFather.",
+        ),
       ),
     );
 }
@@ -307,12 +525,31 @@ export async function whoami(context: Context) {
   const { io } = context;
   const credential = requireSignIn(context);
   const profile = await readProfile(context.gateway);
-  say(io, `环境：${describeEnvironment(context.env)}`);
   say(
     io,
-    `账号：${profile.name ? `${terminalText(profile.name)} ` : ''}（user_id ${profile.userId}${profile.displayId !== profile.userId ? `，UID ${profile.displayId}` : ''}）`,
+    tr(
+      `环境：${describeEnvironment(context.env)}`,
+      `Environment: ${describeEnvironment(context.env)}`,
+    ),
   );
-  if (credential.email) say(io, `邮箱：${terminalText(credential.email)}`);
-  if (profile.gems !== null) say(io, `钻石：${profile.gems}`);
-  say(io, `凭证：${storeDescription(context.store.kind)}`);
+  say(
+    io,
+    tr(
+      `账号：${profile.name ? `${terminalText(profile.name)} ` : ''}（user_id ${profile.userId}${profile.displayId !== profile.userId ? `，UID ${profile.displayId}` : ''}）`,
+      `Account: ${profile.name ? `${terminalText(profile.name)} ` : ''}(user_id ${profile.userId}${profile.displayId !== profile.userId ? `, UID ${profile.displayId}` : ''})`,
+    ),
+  );
+  if (credential.email)
+    say(
+      io,
+      tr(`邮箱：${terminalText(credential.email)}`, `Email: ${terminalText(credential.email)}`),
+    );
+  if (profile.gems !== null) say(io, tr(`钻石：${profile.gems}`, `Gems: ${profile.gems}`));
+  say(
+    io,
+    tr(
+      `凭证：${storeDescription(context.store.kind)}`,
+      `Credentials: ${storeDescription(context.store.kind)}`,
+    ),
+  );
 }

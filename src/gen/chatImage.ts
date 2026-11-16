@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { ApiError, type Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import {
   count,
   encodeBody,
@@ -147,7 +148,12 @@ function assetOf(value: unknown): ChatImageAsset {
 export function parseChatImageTask(value: unknown): ChatImageTask {
   const raw = optionalObject(value);
   const taskId = optionalId(raw.task_id);
-  if (!taskId) throw new ApiError(ApiError.transport, '生图回包缺少 task_id', null);
+  if (!taskId)
+    throw new ApiError(
+      ApiError.transport,
+      tr('生图回包缺少 task_id', 'The image generation response has no task_id'),
+      null,
+    );
   const source = optionalObject(raw.source);
   return {
     taskId,
@@ -246,7 +252,12 @@ export async function createChatImageTask(
     const dialog = optionalObject(result.model_unavailable_dialog);
     const content = text(dialog.content) || text(dialog.title);
     if (content) throw new GenRefusal('rejected', 'NO_TASK', content);
-    throw new ApiError(ApiError.transport, '生图回包缺少 task', result, path);
+    throw new ApiError(
+      ApiError.transport,
+      tr('生图回包缺少 task', 'The image generation response has no task'),
+      result,
+      path,
+    );
   }
   return { task: parseChatImageTask(result.task), replay: flag(result.idempotent_replay) };
 }

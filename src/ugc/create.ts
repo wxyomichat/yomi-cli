@@ -1,4 +1,5 @@
 import type { Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import { encodeBody, type Json, idOf, RawBody } from '../core/json.js';
 import { type LocalState, sha256 } from '../core/state.js';
 import { markVideosBound } from '../gen/ugcVideo.js';
@@ -14,7 +15,17 @@ import { contentForSubmission, type ResolvedCharacter } from './character.js';
  * review synchronously: 42201 refused, 50301 unavailable.
  */
 
-export const ReviewState: Record<number, string> = { 1: '审核中', 2: '已通过', 3: '未通过' };
+export const ReviewState: Record<number, string> = {
+  get 1() {
+    return tr('审核中', 'in review');
+  },
+  get 2() {
+    return tr('已通过', 'approved');
+  },
+  get 3() {
+    return tr('未通过', 'not approved');
+  },
+};
 
 export type CreateOutcome = {
   npcId: string;
@@ -27,7 +38,12 @@ export type CreateOutcome = {
 
 export class AlreadyCreated extends Error {
   constructor(public readonly npcId: string) {
-    super(`这个文件的当前内容已经创建过角色 ${npcId}`);
+    super(
+      tr(
+        `这个文件的当前内容已经创建过角色 ${npcId}`,
+        `A character was already created from this file's current content: ${npcId}`,
+      ),
+    );
     this.name = 'AlreadyCreated';
   }
 }
@@ -37,14 +53,32 @@ const REFUSED = new Set(['400', '403', '409', '422', '42201', '50301']);
 export function failureMessage(code: string, recovering: boolean): string {
   if (code === '42201')
     return recovering
-      ? '之前未确认的提交被文本审核拒绝；文件内容未改动，请修改后重新提交'
-      : '角色文本没有通过审核，请修改后重试';
-  if (code === '50301') return '文本审核暂时不可用，请稍后重试';
-  if (code === '409') return '角色已被修改，请重新读取后再提交';
-  if (code === '402' || code === '40201' || code === '1503021061') return '钻石不足';
+      ? tr(
+          '之前未确认的提交被文本审核拒绝；文件内容未改动，请修改后重新提交',
+          "The earlier unconfirmed submission was rejected by text review; your file wasn't changed. Edit it and submit again",
+        )
+      : tr(
+          '角色文本没有通过审核，请修改后重试',
+          "The character's text didn't pass review; edit it and try again",
+        );
+  if (code === '50301')
+    return tr(
+      '文本审核暂时不可用，请稍后重试',
+      'Text review is unavailable right now; try again later',
+    );
+  if (code === '409')
+    return tr(
+      '角色已被修改，请重新读取后再提交',
+      'The character has changed; reload it and submit again',
+    );
+  if (code === '402' || code === '40201' || code === '1503021061')
+    return tr('钻石不足', 'Not enough gems');
   if (code === 'NETWORK')
-    return '网络错误，提交结果未知；再次运行同一命令会用原请求重试，不会重复创建';
-  return `提交失败（${code}）`;
+    return tr(
+      '网络错误，提交结果未知；再次运行同一命令会用原请求重试，不会重复创建',
+      "Network error; the outcome is unknown. Running the same command again resends the original request and won't create a second character",
+    );
+  return tr(`提交失败（${code}）`, `Submission failed (${code})`);
 }
 
 export function readCharacter(result: Json) {
@@ -52,7 +86,11 @@ export function readCharacter(result: Json) {
     (result.data as Json | undefined)?.character ??
     {}) as Json;
   const npcId = idOf(character.npc_id);
-  if (!npcId || npcId === '0') throw new UgcFailure('PROTOCOL', '创建回包没有角色 ID');
+  if (!npcId || npcId === '0')
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('创建回包没有角色 ID', 'The create response has no character ID'),
+    );
   return {
     npcId,
     version: idOf(character.version) || '0',

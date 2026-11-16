@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
 import { loopbackHttpAllowed } from '../core/env.js';
+import { tr } from '../core/i18n.js';
 import { ask, type Io, paint, say, warn } from '../core/ui.js';
 import { UgcFailure, walletBalance } from '../ugc/api.js';
 
@@ -121,42 +122,80 @@ export async function confirmSpend(
   options: SpendOptions,
 ): Promise<boolean> {
   if (options.total <= 0) {
-    say(io, `${options.action}：免费。`);
+    say(io, tr(`${options.action}：免费。`, `${options.action}: free.`));
     return true;
   }
   const balance = await readBalance(gateway);
   const detail = options.unit
-    ? `（${options.unit.price} 钻石/${options.unit.label} × ${options.unit.count}）`
+    ? tr(
+        `（${options.unit.price} 钻石/${options.unit.label} × ${options.unit.count}）`,
+        ` (${options.unit.price} gems/${options.unit.label} × ${options.unit.count})`,
+      )
     : '';
-  say(io, paint(io, 'yellow', `${options.action}：共 ${options.total} 钻石${detail}。`));
+  say(
+    io,
+    paint(
+      io,
+      'yellow',
+      tr(
+        `${options.action}：共 ${options.total} 钻石${detail}。`,
+        `${options.action}: ${options.total} gems in total${detail}.`,
+      ),
+    ),
+  );
   for (const note of options.notes ?? []) say(io, paint(io, 'dim', note));
   if (balance === null) {
-    warn(io, '暂时读不到钻石余额，为避免扣费出错没有继续。请稍后再试。');
+    warn(
+      io,
+      tr(
+        '暂时读不到钻石余额，为避免扣费出错没有继续。请稍后再试。',
+        'Could not read your gem balance right now; stopped to avoid a wrong charge. Please try again later.',
+      ),
+    );
     return false;
   }
-  say(io, `当前余额 ${balance} 钻石。`);
+  say(io, tr(`当前余额 ${balance} 钻石。`, `Current balance: ${balance} gems.`));
   if (balance < options.total && options.replay)
     say(
       io,
       paint(
         io,
         'dim',
-        '余额低于这个价格：如果上次已经受理，重发不会再扣；如果没有受理，服务端会因余额不足拒绝。',
+        tr(
+          '余额低于这个价格：如果上次已经受理，重发不会再扣；如果没有受理，服务端会因余额不足拒绝。',
+          'Your balance is below this price: if the last request was accepted, the resend is not charged again; if not, the server will refuse it because there are not enough gems.',
+        ),
       ),
     );
   else if (balance < options.total) {
     warn(
       io,
-      `钻石不足（还差 ${options.total - balance}），请先在 Yomi App 或网页充值。没有发出请求。`,
+      tr(
+        `钻石不足（还差 ${options.total - balance}），请先在 Yomi App 或网页充值。没有发出请求。`,
+        `Not enough gems (${options.total - balance} short). Top up in the Yomi app or on the web first. No request was sent.`,
+      ),
     );
     return false;
   }
   if (options.acceptPrice) return true;
   if (!io.interactive) {
-    warn(io, '非交互运行时，花钻石需要加 --accept-price 明确同意上面的价格。');
+    warn(
+      io,
+      tr(
+        '非交互运行时，花钻石需要加 --accept-price 明确同意上面的价格。',
+        'When running non-interactively, add --accept-price to explicitly accept the price above before spending gems.',
+      ),
+    );
     return false;
   }
-  const answer = (await ask(io, '确认按这个价格扣除钻石？输入 yes 继续：')) ?? '';
+  const answer =
+    (await ask(
+      io,
+      tr(
+        '确认按这个价格扣除钻石？输入 yes 继续：',
+        'Charge gems at this price? Type yes to continue: ',
+      ),
+    )) ?? '';
   return answer.trim().toLowerCase() === 'yes';
 }
 
@@ -165,18 +204,39 @@ export function explainRefusal(io: Io, error: unknown): boolean {
   if (!(error instanceof GenRefusal)) return false;
   switch (error.kind) {
     case 'gems':
-      warn(io, '钻石不足，请先在 Yomi App 或网页充值。这次没有扣费。');
+      warn(
+        io,
+        tr(
+          '钻石不足，请先在 Yomi App 或网页充值。这次没有扣费。',
+          'Not enough gems. Top up in the Yomi app or on the web first. Nothing was charged.',
+        ),
+      );
       break;
     case 'rateLimited':
-      warn(io, `生成太频繁或同时进行的任务太多，请稍后再试（${error.code}）。`);
+      warn(
+        io,
+        tr(
+          `生成太频繁或同时进行的任务太多，请稍后再试（${error.code}）。`,
+          `Too many generations, or too many tasks running at once. Please try again later (${error.code}).`,
+        ),
+      );
       break;
     case 'unavailable':
-      warn(io, `这项生成功能暂时不可用（${error.code}）。`);
+      warn(
+        io,
+        tr(
+          `这项生成功能暂时不可用（${error.code}）。`,
+          `This generation feature is unavailable right now (${error.code}).`,
+        ),
+      );
       break;
     default:
       warn(
         io,
-        `服务端拒绝了这次生成（${error.code}${error.message && error.message !== error.code ? `：${error.message}` : ''}）。这次没有扣费。`,
+        tr(
+          `服务端拒绝了这次生成（${error.code}${error.message && error.message !== error.code ? `：${error.message}` : ''}）。这次没有扣费。`,
+          `The server refused this generation (${error.code}${error.message && error.message !== error.code ? `: ${error.message}` : ''}). Nothing was charged.`,
+        ),
       );
   }
   return true;
@@ -233,19 +293,24 @@ export async function download(
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error('结果地址不合法');
+    throw new Error(tr('结果地址不合法', 'The result address is invalid'));
   }
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new Error('结果地址不是 https');
+    throw new Error(tr('结果地址不是 https', 'The result address is not https'));
   const response = await (options.fetcher ?? fetch)(url, { redirect: 'error' });
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error(`下载结果失败（HTTP ${response.status}）`);
+    throw new Error(
+      tr(
+        `下载结果失败（HTTP ${response.status}）`,
+        `Downloading the result failed (HTTP ${response.status})`,
+      ),
+    );
   }
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > options.maxBytes) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error('结果文件太大');
+    throw new Error(tr('结果文件太大', 'The result file is too large'));
   }
   // Counted as it arrives: a compressed or chunked answer cannot grow past the cap in memory.
   const chunks: Buffer[] = [];
@@ -258,7 +323,7 @@ export async function download(
       total += value.byteLength;
       if (total > options.maxBytes) {
         await reader.cancel().catch(() => undefined);
-        throw new Error('结果文件太大');
+        throw new Error(tr('结果文件太大', 'The result file is too large'));
       }
       chunks.push(Buffer.from(value));
     }

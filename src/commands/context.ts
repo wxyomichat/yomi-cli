@@ -7,6 +7,7 @@ import {
 } from '../core/credentials.js';
 import { type Environment, resolveEnvironment } from '../core/env.js';
 import { deviceKey } from '../core/files.js';
+import { tr } from '../core/i18n.js';
 import { LocalState } from '../core/state.js';
 import { type Io, paint } from '../core/ui.js';
 
@@ -63,7 +64,10 @@ export function requireSignIn(context: Context): Credential {
   const credential = context.gateway.credential;
   if (!credential)
     throw new NotSignedIn(
-      `还没有登录${context.env.name === 'prod' ? '' : '测试环境'}，先运行 yomi login${context.env.name === 'test' ? ' --env test' : ''}`,
+      tr(
+        `还没有登录${context.env.name === 'prod' ? '' : '测试环境'}，先运行 yomi login${context.env.name === 'test' ? ' --env test' : ''}`,
+        `Not signed in${context.env.name === 'prod' ? '' : ' to the test environment'} yet; run yomi login${context.env.name === 'test' ? ' --env test' : ''} first`,
+      ),
     );
   return credential;
 }

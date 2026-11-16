@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Gateway } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import { type Json, object } from '../core/json.js';
 import { type LocalState, sha256 } from '../core/state.js';
 import { call, putObject, UgcFailure } from '../ugc/api.js';
@@ -38,8 +39,12 @@ export type VideoUse = 'dynamic-cover' | 'intro-video';
 
 /** What a use is called in the CLI's output. */
 export const VIDEO_USE_LABEL: Record<VideoUse, string> = {
-  'dynamic-cover': '动态封面',
-  'intro-video': '介绍视频',
+  get 'dynamic-cover'() {
+    return tr('动态封面', 'dynamic cover');
+  },
+  get 'intro-video'() {
+    return tr('介绍视频', 'intro video');
+  },
 };
 
 /** `--as`: the use of a new video (default: the dynamic cover). */
@@ -47,7 +52,12 @@ export function parseVideoUse(value: string): VideoUse {
   const use = value.trim().toLowerCase();
   if (!use || use === 'dynamic-cover') return 'dynamic-cover';
   if (use === 'intro-video') return 'intro-video';
-  throw new Error('--as 只能是 dynamic-cover（动态封面）或 intro-video（介绍视频）');
+  throw new Error(
+    tr(
+      '--as 只能是 dynamic-cover（动态封面）或 intro-video（介绍视频）',
+      '--as must be dynamic-cover (dynamic cover) or intro-video (intro video)',
+    ),
+  );
 }
 
 /** How often and how long a task is watched, as the app does (a test may shorten it). */
@@ -83,13 +93,14 @@ function str(value: unknown): string {
 function whole(value: unknown, label: string): number {
   const parsed = typeof value === 'string' && /^-?\d+$/.test(value) ? Number(value) : value;
   if (typeof parsed !== 'number' || !Number.isSafeInteger(parsed))
-    throw protocol(`回包的 ${label} 不是整数`);
+    throw protocol(tr(`回包的 ${label} 不是整数`, `${label} in the response is not an integer`));
   return parsed;
 }
 
 function listOf(value: unknown, label: string): unknown[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw protocol(`回包的 ${label} 不是列表`);
+  if (!Array.isArray(value))
+    throw protocol(tr(`回包的 ${label} 不是列表`, `${label} in the response is not a list`));
   return value;
 }
 
@@ -97,7 +108,7 @@ function objectOf(value: unknown, label: string): Json {
   try {
     return object(value);
   } catch {
-    throw protocol(`回包缺少 ${label}`);
+    throw protocol(tr(`回包缺少 ${label}`, `The response is missing ${label}`));
   }
 }
 
@@ -125,7 +136,7 @@ export type VideoConfig = {
 function durationsOf(value: unknown, label: string): number[] {
   const durations = listOf(value, label).map((item) => whole(item, label));
   if (!durations.length || durations.some((seconds) => seconds <= 0))
-    throw protocol(`配置的 ${label} 不合法`);
+    throw protocol(tr(`配置的 ${label} 不合法`, `${label} in the config is invalid`));
   return durations;
 }
 
@@ -135,7 +146,10 @@ function pricesOf(value: unknown, label: string): Map<number, number> | null {
   for (const item of listOf(value, label)) {
     const entry = objectOf(item, label);
     const amount = whole(entry.diamond_amount, `${label}.diamond_amount`);
-    if (amount < 0) throw protocol(`配置的 ${label} 有负数价格`);
+    if (amount < 0)
+      throw protocol(
+        tr(`配置的 ${label} 有负数价格`, `${label} in the config has a negative price`),
+      );
     prices.set(whole(entry.duration_seconds, `${label}.duration_seconds`), amount);
   }
   return prices;
@@ -145,14 +159,20 @@ function pricesOf(value: unknown, label: string): Map<number, number> | null {
 export function readVideoConfig(result: Json): VideoConfig {
   const configVersion = str(result.config_version);
   const customVersion = str(result.custom_version);
-  if (!configVersion || !customVersion) throw protocol('视频配置缺少版本');
+  if (!configVersion || !customVersion)
+    throw protocol(tr('视频配置缺少版本', 'The video config is missing its version'));
   const customDurations = durationsOf(result.custom_duration_seconds, 'custom_duration_seconds');
   const customDefaultDuration = whole(
     result.custom_default_duration_seconds,
     'custom_default_duration_seconds',
   );
   if (!customDurations.includes(customDefaultDuration))
-    throw protocol('视频配置的自定义默认时长不在可选时长里');
+    throw protocol(
+      tr(
+        '视频配置的自定义默认时长不在可选时长里',
+        "The video config's default custom duration is not one of its durations",
+      ),
+    );
   const templates = listOf(result.templates, 'templates').map((item): VideoTemplate => {
     const entry = objectOf(item, 'templates');
     const template: VideoTemplate = {
@@ -165,9 +185,16 @@ export function readVideoConfig(result: Json): VideoConfig {
       prices: pricesOf(entry.duration_prices, 'duration_prices'),
     };
     if (!template.id || !template.version || !template.name)
-      throw protocol('视频模板缺少 ID、版本或名称');
+      throw protocol(
+        tr('视频模板缺少 ID、版本或名称', 'A video template is missing its ID, version or name'),
+      );
     if (!template.durations.includes(template.defaultDuration))
-      throw protocol(`模板 ${template.id} 的默认时长不在可选时长里`);
+      throw protocol(
+        tr(
+          `模板 ${template.id} 的默认时长不在可选时长里`,
+          `The default duration of template ${template.id} is not one of its durations`,
+        ),
+      );
     return template;
   });
   return {
@@ -226,7 +253,10 @@ export async function uploadFrame(
   fetcher?: typeof fetch,
 ): Promise<string> {
   if (jpeg.length < 1 || jpeg.length > FRAME_MAX_BYTES)
-    throw new UgcFailure('INVALID_ARGUMENT', '首帧 JPEG 超过 10 MiB');
+    throw new UgcFailure(
+      'INVALID_ARGUMENT',
+      tr('首帧 JPEG 超过 10 MiB', 'The first-frame JPEG is over 10 MiB'),
+    );
   const prepared = await call(gateway, 'ugc/video/frame/prepare', {
     request_id: frameRequestId(draftId, jpeg),
     draft_id: draftId,
@@ -235,11 +265,20 @@ export async function uploadFrame(
   });
   const uploadId = str(prepared.upload_id);
   const url = str(prepared.upload_url);
-  if (!uploadId || !url) throw protocol('首帧上传登记回包不完整');
+  if (!uploadId || !url)
+    throw protocol(
+      tr('首帧上传登记回包不完整', 'The first-frame upload registration response is incomplete'),
+    );
   await putObject(url, jpeg, 'image/jpeg', fetcher, { 'x-oss-object-acl': 'private' });
   const completed = await call(gateway, 'ugc/video/frame/complete', { upload_id: uploadId });
   const assetId = str(completed.asset_id);
-  if (!assetId) throw protocol('首帧上传完成回包没有 asset_id');
+  if (!assetId)
+    throw protocol(
+      tr(
+        '首帧上传完成回包没有 asset_id',
+        'The first-frame upload completion response has no asset_id',
+      ),
+    );
   return assetId;
 }
 
@@ -308,10 +347,16 @@ export async function quoteVideo(
   const amount = whole(quote.diamond_amount, 'diamond_amount');
   const expiresAt = whole(quote.expires_at_ms, 'expires_at_ms');
   const serverTime = whole(quote.server_time_ms, 'server_time_ms');
-  if (!quoteId || amount < 0) throw protocol('报价回包不完整');
-  if (expiresAt <= serverTime) throw protocol('报价已过期');
+  if (!quoteId || amount < 0)
+    throw protocol(tr('报价回包不完整', 'The quote response is incomplete'));
+  if (expiresAt <= serverTime) throw protocol(tr('报价已过期', 'The quote has expired'));
   if (!sameInput(readInput(quote.input), input))
-    throw protocol('报价对应的参数与发送的不一致，无法确认价格');
+    throw protocol(
+      tr(
+        '报价对应的参数与发送的不一致，无法确认价格',
+        "The quote's parameters do not match what was sent; the price cannot be confirmed",
+      ),
+    );
   return { quoteId, amount, input, deadline: received + (expiresAt - serverTime) };
 }
 
@@ -353,15 +398,19 @@ export function readVideoTask(value: unknown): VideoTask {
   const task = objectOf(value, 'task');
   const status = str(task.status);
   const billing = str(task.billing_status);
-  if (!STATUSES.has(status) || !BILLING.has(billing)) throw protocol('视频任务的状态不认识');
+  if (!STATUSES.has(status) || !BILLING.has(billing))
+    throw protocol(tr('视频任务的状态不认识', 'Unknown video task status'));
   const resultAssetId = str(task.result_asset_id);
   if ((status === 'SUCCEEDED') !== Boolean(resultAssetId))
-    throw protocol('视频任务的结果与状态不一致');
+    throw protocol(
+      tr('视频任务的结果与状态不一致', "The video task's result does not match its status"),
+    );
   const progress =
     task.progress_percent === undefined || task.progress_percent === null
       ? null
       : whole(task.progress_percent, 'progress_percent');
-  if (progress !== null && (progress < 0 || progress > 99)) throw protocol('视频任务的进度不合法');
+  if (progress !== null && (progress < 0 || progress > 99))
+    throw protocol(tr('视频任务的进度不合法', "The video task's progress is invalid"));
   const parsed: VideoTask = {
     requestId: str(task.request_id),
     taskId: str(task.task_id),
@@ -375,7 +424,8 @@ export function readVideoTask(value: unknown): VideoTask {
     progress,
     createdAtMs: whole(task.created_at_ms ?? 0, 'created_at_ms'),
   };
-  if (!parsed.requestId || !parsed.taskId) throw protocol('视频任务缺少 ID');
+  if (!parsed.requestId || !parsed.taskId)
+    throw protocol(tr('视频任务缺少 ID', 'The video task is missing its ID'));
   return parsed;
 }
 
@@ -434,7 +484,10 @@ export function taskOfFailure(error: unknown): VideoTask | null {
 export async function createVideo(gateway: Gateway, body: CreateVideoBody): Promise<VideoTask> {
   const result = await call(gateway, 'ugc/video/create', { ...body, wait_timeout_ms: 0 });
   const task = readVideoTask(result.task);
-  if (task.requestId !== body.request_id) throw protocol('创建回包的 request_id 不一致');
+  if (task.requestId !== body.request_id)
+    throw protocol(
+      tr('创建回包的 request_id 不一致', "The create response's request_id does not match"),
+    );
   return task;
 }
 
@@ -450,7 +503,10 @@ export async function readTask(
     wait_timeout_ms: 0,
   });
   const task = readVideoTask(result.task);
-  if (task.requestId !== requestId) throw protocol('任务回包的 request_id 不一致');
+  if (task.requestId !== requestId)
+    throw protocol(
+      tr('任务回包的 request_id 不一致', "The task response's request_id does not match"),
+    );
   return task;
 }
 
@@ -520,7 +576,8 @@ export async function resolveVideoMedia(
 ): Promise<VideoMedia> {
   const result = await call(gateway, 'ugc/video/media', { asset_id: assetId, purpose });
   const url = str(result.url);
-  if (!url || str(result.asset_id) !== assetId) throw protocol('视频地址回包不完整');
+  if (!url || str(result.asset_id) !== assetId)
+    throw protocol(tr('视频地址回包不完整', 'The video address response is incomplete'));
   return {
     url,
     mime: str(result.mime_type),
@@ -547,9 +604,16 @@ export async function saveVideoPreview(
     try {
       const file = await download(media.url, { maxBytes: MEDIA_MAX_BYTES, fetcher });
       if (media.byteSize && file.bytes.length !== media.byteSize)
-        throw new Error('下载的视频大小与服务端不一致');
+        throw new Error(
+          tr(
+            '下载的视频大小与服务端不一致',
+            "The downloaded video's size does not match the server's",
+          ),
+        );
       if (media.sha256 && sha256(file.bytes) !== media.sha256)
-        throw new Error('下载的视频校验不一致');
+        throw new Error(
+          tr('下载的视频校验不一致', "The downloaded video's checksum does not match"),
+        );
       return saveFile(dir, `${name}.${extensionOf(media.mime || file.mime)}`, file.bytes);
     } catch (error) {
       lastError = error;
@@ -677,8 +741,17 @@ export function describeVideoFeatures(features: Json | null | undefined): string
     ((features[key] as Json | undefined)?.dynamic_video_asset_ids as unknown[] | undefined)
       ?.length ?? 0;
   const parts = [
-    count('dynamic_cover') ? `动态封面 ${count('dynamic_cover')} 条` : '',
-    count('intro_video') ? `介绍视频 ${count('intro_video')} 条` : '',
+    count('dynamic_cover')
+      ? tr(`动态封面 ${count('dynamic_cover')} 条`, `${count('dynamic_cover')} dynamic cover(s)`)
+      : '',
+    count('intro_video')
+      ? tr(`介绍视频 ${count('intro_video')} 条`, `${count('intro_video')} intro video(s)`)
+      : '',
   ].filter(Boolean);
-  return parts.length ? `AI 视频：${parts.join('、')}（选用最新一条）` : '';
+  return parts.length
+    ? tr(
+        `AI 视频：${parts.join('、')}（选用最新一条）`,
+        `AI video: ${parts.join(', ')} (the newest is used)`,
+      )
+    : '';
 }

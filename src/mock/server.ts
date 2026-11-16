@@ -275,11 +275,50 @@ const line = (text: string, speaker: { npcId: string; name: string }): ImParagra
   npcName: speaker.name,
 });
 
+/**
+ * The language the CLI asked for on its latest request (`sys_language`). The mock's own text (its
+ * characters, their openings and replies) answers in it, as the server does; Chinese by default.
+ */
+let english = false;
+
 const LIN_XIA = { npcId: MOCK_NPCS.single, name: '林夏' };
 const MEMBERS = [
   { npcId: '7300000000000009101', name: '阿青' },
   { npcId: '7300000000000009102', name: '小白' },
 ];
+const NOVA = { npcId: MOCK_NPCS.single, name: 'Nova' };
+const MEMBERS_EN = [
+  { npcId: '7300000000000009101', name: 'Ash' },
+  { npcId: '7300000000000009102', name: 'Wren' },
+];
+
+/** The published characters in English. */
+const NPCS_EN = new Map<string, MockNpc>([
+  [
+    MOCK_NPCS.single,
+    {
+      ...NOVA,
+      opening: [
+        narration('The rain has stopped. The bell over the bookshop door rings.'),
+        line('You came.', NOVA),
+      ],
+      members: [],
+    },
+  ],
+  [
+    MOCK_NPCS.group,
+    {
+      npcId: MOCK_NPCS.group,
+      name: 'Fog Harbour',
+      opening: [
+        narration('Along the harbour, the lamps come on one by one.'),
+        line('New here?', MEMBERS_EN[0]),
+      ],
+      members: MEMBERS_EN,
+    },
+  ],
+]);
+const npcs = () => (english ? NPCS_EN : NPCS);
 
 /** The published characters; the removed one is not here, so it answers 41001 everywhere. */
 const NPCS = new Map<string, MockNpc>([
@@ -327,6 +366,14 @@ function profileJson(npc: MockNpc): Json {
 function replyParagraphs(npc: MockNpc, userText: string): ImParagraph[] {
   const echo = [...userText].slice(0, 40).join('');
   const [first, second] = npc.members;
+  if (english) {
+    if (first && second)
+      return [line(`${echo}? Let me start.`, first), line('I’m listening too.', second)];
+    return [
+      narration('She closes the book and looks at you.'),
+      line(`${echo}? I’ve been thinking about that for a long time.`, npc),
+    ];
+  }
   if (first && second) return [line(`${echo}？我先说两句。`, first), line('我也在听。', second)];
   return [narration('她合上书，看着你。'), line(`${echo}？这个问题，我想了很久。`, npc)];
 }
@@ -586,7 +633,9 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     assistantMid: string,
     streamId: string,
   ) => {
-    const reply = `她合上书，看着你。"${userText.slice(0, 40)}？这个问题，我想了很久。" 窗外的雨停了。`;
+    const reply = english
+      ? `She closes the book and looks at you. "${userText.slice(0, 40)}? I’ve been thinking about that for a long time." The rain outside has stopped.`
+      : `她合上书，看着你。"${userText.slice(0, 40)}？这个问题，我想了很久。" 窗外的雨停了。`;
     const paragraphs = openingParagraphs(reply, preview.npcId, preview.name);
     const steps = [8, 20, reply.length];
     let seq = 0;
@@ -651,7 +700,7 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
   };
 
   /** The published character `value` names, or null (unknown or taken down). */
-  const npcOf = (value: unknown) => NPCS.get(String(value ?? '')) ?? null;
+  const npcOf = (value: unknown) => npcs().get(String(value ?? '')) ?? null;
   const removed = () => fail(CHARACTER_REMOVED, 'character removed');
 
   const chatOf = (npcId: string): MockChat => {
@@ -671,7 +720,7 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
    * 300 ms), FAIL fails after one chunk, SLOW takes 12 chunks 120 ms apart.
    */
   const startTurn = (chat: MockChat, text: string) => {
-    const npc = NPCS.get(chat.npcId)!;
+    const npc = npcs().get(chat.npcId)!;
     const user = userMessage(nextId(), text);
     const assistantMid = nextId();
     const streamId = 'st_' + randomBytes(6).toString('hex');
@@ -1238,6 +1287,7 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       if (url.searchParams.get('app_id') !== '50010')
         return respond(response, 400, fail(400, 'valid app_id required'));
       const path = url.pathname.slice('/ember/api/v1/'.length);
+      english = url.searchParams.get('sys_language') === 'en';
       const body = (raw ? parseGatewayJson(raw) : {}) as Json;
       state.requests.push({ path, body, headers: request.headers });
       const handler = present(path) ? routes[path] : undefined;

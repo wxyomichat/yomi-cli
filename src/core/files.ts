@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { tr } from './i18n.js';
+
 /**
  * The CLI's directory: `$YOMI_CONFIG_DIR`, else `$XDG_CONFIG_HOME/yomi-cli`, else
  * `~/.config/yomi-cli` (as gh's `~/.config/gh`). Created 0700; every file in it is written 0600.
@@ -38,7 +40,12 @@ export function readJsonFile<T>(path: string): T | null {
   try {
     return JSON.parse(raw) as T;
   } catch {
-    throw new Error(`无法读取 ${path}：内容不是 JSON。确认后可删除该文件重试。`);
+    throw new Error(
+      tr(
+        `无法读取 ${path}：内容不是 JSON。确认后可删除该文件重试。`,
+        `Cannot read ${path}: it is not JSON. Once you have checked it, you can delete the file and try again.`,
+      ),
+    );
   }
 }
 

@@ -1,4 +1,5 @@
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
+import { tr } from '../core/i18n.js';
 import {
   count,
   flag,
@@ -179,7 +180,7 @@ export async function sendMessage(gateway: Gateway, request: SendRequest): Promi
   if (!mid || !streamId)
     throw new ApiError(
       ApiError.transport,
-      '发送回包缺少 mid 或 stream_id',
+      tr('发送回包缺少 mid 或 stream_id', 'The send response has no mid or stream_id'),
       result,
       'conversation/send_message',
     );
@@ -300,7 +301,7 @@ export async function characterProfile(gateway: Gateway, npcId: string): Promise
   const name = text(data.name).trim();
   return {
     npcId: optionalId(data.npc_id) || npcId,
-    name: name || '角色',
+    name: name || tr('角色', 'Character'),
     group: data.worldview_info !== undefined && data.worldview_info !== null,
     openingStatus: count(data.opening_status),
     openingParagraphs: list(data.opening_paragraphs).map(parseParagraph),

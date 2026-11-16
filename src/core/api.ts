@@ -5,6 +5,7 @@ import type { Credential, CredentialStore } from './credentials.js';
 import { APP_ID, currentLanguage, deviceMetadata } from './device.js';
 import type { Environment } from './env.js';
 import { configDir } from './files.js';
+import { tr } from './i18n.js';
 import { encodeBody, type Json, object, parseGatewayJson } from './json.js';
 import { withFileLock } from './lock.js';
 import { redact } from './redact.js';
@@ -54,7 +55,9 @@ export function sessionEnded(error: unknown): boolean {
 }
 
 export class NotSignedIn extends Error {
-  constructor(message = '还没有登录，先运行 yomi login') {
+  constructor(
+    message = tr('还没有登录，先运行 yomi login', 'Not signed in yet; run yomi login first'),
+  ) {
     super(message);
     this.name = 'NotSignedIn';
   }
@@ -204,7 +207,12 @@ export class Gateway {
     } catch (error) {
       if (options.signal?.aborted) throw error;
       this.debug(`${init.method} ${path} → transport error ${String(error)}`);
-      throw new ApiError(ApiError.transport, '网络请求失败', null, path);
+      throw new ApiError(
+        ApiError.transport,
+        tr('网络请求失败', 'Network request failed'),
+        null,
+        path,
+      );
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', abort);
@@ -228,7 +236,13 @@ export class Gateway {
         response.status,
       );
     }
-    if (!result) throw new ApiError(ApiError.transport, '回包不是 JSON', null, path);
+    if (!result)
+      throw new ApiError(
+        ApiError.transport,
+        tr('回包不是 JSON', 'The response is not JSON'),
+        null,
+        path,
+      );
     readBase(result, options.requiresBaseResponse ?? true, path);
     return result;
   }
@@ -302,7 +316,9 @@ export class Gateway {
       const stored = store && account ? store.get(account) : null;
       if (store && account && (!stored || stored.refreshToken === current.refreshToken))
         store.delete(account);
-      throw new NotSignedIn('登录已失效，请重新运行 yomi login');
+      throw new NotSignedIn(
+        tr('登录已失效，请重新运行 yomi login', 'Your sign-in has expired; run yomi login again'),
+      );
     }
     const data = object(result.data ?? result);
     const authToken = data.auth_token;
@@ -310,7 +326,7 @@ export class Gateway {
     if (typeof authToken !== 'string' || typeof refreshToken !== 'string' || !authToken)
       throw new ApiError(
         ApiError.transport,
-        '刷新会话的回包缺少令牌',
+        tr('刷新会话的回包缺少令牌', 'The session refresh response has no tokens'),
         null,
         'account/refresh_auth_token',
       );
@@ -321,7 +337,9 @@ export class Gateway {
     if (!stored) {
       // `yomi logout` emptied the store while this refresh was out: stay signed out.
       this.credentialValue = null;
-      throw new NotSignedIn('已退出登录，请重新运行 yomi login');
+      throw new NotSignedIn(
+        tr('已退出登录，请重新运行 yomi login', 'Signed out; run yomi login again'),
+      );
     }
     // Written back only over the pair this refresh started from: never over another account's
     // or a newer `yomi login`.
@@ -330,7 +348,12 @@ export class Gateway {
       store.set(account, next);
     } catch (error) {
       // The new pair still works in this process; the store keeps the one it had.
-      this.debug(`保存刷新后的会话失败：${error instanceof Error ? error.message : 'error'}`);
+      this.debug(
+        tr(
+          `保存刷新后的会话失败：${error instanceof Error ? error.message : 'error'}`,
+          `Could not save the refreshed session: ${error instanceof Error ? error.message : 'error'}`,
+        ),
+      );
     }
   }
 

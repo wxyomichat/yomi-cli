@@ -1,12 +1,18 @@
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
 import type { Credential } from '../core/credentials.js';
 import { OS_WEB } from '../core/device.js';
+import { tr } from '../core/i18n.js';
 import { flag, id, object, optionalId, optionalObject, text } from '../core/json.js';
 
 /** The account asked to be deleted and is in its cool-down: the CLI does not cancel that. */
 export class DeactivationPending extends Error {
   constructor() {
-    super('这个账号正在注销冷静期，请先在 App 或网页登录处理后再试');
+    super(
+      tr(
+        '这个账号正在注销冷静期，请先在 App 或网页登录处理后再试',
+        'This account is in its deletion cool-down period; sign in on the app or the web to deal with it first, then try again',
+      ),
+    );
     this.name = 'DeactivationPending';
   }
 }
@@ -64,7 +70,7 @@ export async function exchangeFirebaseToken(
   };
   if (signal?.aborted) {
     if (issued) await abandon(gateway, credential);
-    throw signal.reason instanceof Error ? signal.reason : new Error('已取消');
+    throw signal.reason instanceof Error ? signal.reason : new Error(tr('已取消', 'Cancelled'));
   }
   if (flag(data.is_deactivate_calmdown)) {
     // A session the server issued anyway is revoked, not left behind.
@@ -72,13 +78,23 @@ export async function exchangeFirebaseToken(
     throw new DeactivationPending();
   }
   if (!issued)
-    throw new ApiError(ApiError.transport, '登录回包缺少会话信息', null, 'account/login');
+    throw new ApiError(
+      ApiError.transport,
+      tr('登录回包缺少会话信息', 'The sign-in response is missing session details'),
+      null,
+      'account/login',
+    );
   gateway.useCredential(credential);
   try {
     const account = await gateway.request('account/get_account', {}, { signal });
     const confirmed = object(account.data ?? account);
     if (optionalId(confirmed.user_id) !== credential.userId)
-      throw new ApiError(ApiError.transport, '登录后读回的账号不一致', null, 'account/get_account');
+      throw new ApiError(
+        ApiError.transport,
+        tr('登录后读回的账号不一致', 'The account read back after sign-in does not match'),
+        null,
+        'account/get_account',
+      );
   } catch (error) {
     // The session exists on the server now: whatever went wrong, it is revoked, not leaked.
     await abandon(gateway, gateway.credential ?? credential);

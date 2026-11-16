@@ -1,3 +1,4 @@
+import { tr } from './i18n.js';
 import type { Io } from './ui.js';
 
 /**
@@ -7,7 +8,7 @@ import type { Io } from './ui.js';
  */
 export class SecretInputCancelled extends Error {
   constructor() {
-    super('已取消输入');
+    super(tr('已取消输入', 'Input cancelled'));
     this.name = 'SecretInputCancelled';
   }
 }
@@ -31,7 +32,14 @@ export function readSecret(
     return readHidden(io, input);
   }
   if (!options.fromStdin && !io.interactive)
-    return Promise.reject(new Error('没有终端可输入：用 --token-stdin 从标准输入传入'));
+    return Promise.reject(
+      new Error(
+        tr(
+          '没有终端可输入：用 --token-stdin 从标准输入传入',
+          'No terminal to type into: pass it on standard input with --token-stdin',
+        ),
+      ),
+    );
   return readFirstLine(input);
 }
 
@@ -76,7 +84,7 @@ function readFirstLine(input: NodeJS.ReadableStream): Promise<string> {
     };
     const onData = (chunk: Buffer | string) => {
       buffered += chunk.toString();
-      if (buffered.length > MAX_LENGTH) done(new Error('输入过长'));
+      if (buffered.length > MAX_LENGTH) done(new Error(tr('输入过长', 'Input too long')));
       else if (/\r?\n/.test(buffered)) done(null);
     };
     const onEnd = () => done(null);

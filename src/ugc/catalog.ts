@@ -1,5 +1,6 @@
 import type { Gateway } from '../core/api.js';
 import { currentLanguage } from '../core/device.js';
+import { tr } from '../core/i18n.js';
 import { type Json, idOf, object } from '../core/json.js';
 import { call, UgcFailure, wireIds } from './api.js';
 
@@ -16,7 +17,10 @@ export async function loadVoiceCatalog(gateway: Gateway): Promise<VoiceCatalog> 
   const version = typeof result.catalog_version === 'string' ? result.catalog_version : '';
   const items = Array.isArray(result.voices) ? result.voices : null;
   if (!version || !items || items.length > 500)
-    throw new UgcFailure('PROTOCOL', '声音目录回包不完整');
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr('声音目录回包不完整', 'The voice catalog response is incomplete'),
+    );
   const voices: Voice[] = [];
   const seen = new Set<string>();
   for (const value of items) {
@@ -24,7 +28,10 @@ export async function loadVoiceCatalog(gateway: Gateway): Promise<VoiceCatalog> 
     const id = typeof item.voice_id === 'string' ? item.voice_id : '';
     const name = typeof item.display_name === 'string' ? item.display_name : '';
     if (!id || seen.has(id) || !name || name.length > 100)
-      throw new UgcFailure('PROTOCOL', '声音目录里有不合法的条目');
+      throw new UgcFailure(
+        'PROTOCOL',
+        tr('声音目录里有不合法的条目', 'The voice catalog has an invalid entry'),
+      );
     seen.add(id);
     voices.push({
       id,

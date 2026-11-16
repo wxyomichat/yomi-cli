@@ -1,6 +1,8 @@
 import jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
 
+import { tr } from '../core/i18n.js';
+
 /**
  * Just enough raster work for generated media, in plain JavaScript (no native modules): read a
  * JPEG or PNG, crop it around the centre to an aspect ratio, scale it, and write a JPEG. The app
@@ -46,11 +48,12 @@ export function sniffMime(bytes: Uint8Array): string {
  */
 function checkPngHeader(bytes: Uint8Array) {
   if (bytes.length < 33 || String.fromCharCode(...bytes.subarray(12, 16)) !== 'IHDR')
-    throw new RasterError('不是 JPEG 或 PNG 图片');
+    throw new RasterError(tr('不是 JPEG 或 PNG 图片', 'Not a JPEG or PNG image'));
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = view.getUint32(16);
   const height = view.getUint32(20);
-  if (width === 0 || height === 0 || width * height > MAX_PIXELS) throw new RasterError('图片太大');
+  if (width === 0 || height === 0 || width * height > MAX_PIXELS)
+    throw new RasterError(tr('图片太大', 'The image is too large'));
 }
 
 /** RGBA pixels of a JPEG or PNG. */
@@ -68,11 +71,17 @@ export function decode(bytes: Uint8Array): Raster {
   if (mime === 'image/png') {
     checkPngHeader(bytes);
     const image = PNG.sync.read(Buffer.from(bytes));
-    if (image.width * image.height > MAX_PIXELS) throw new RasterError('图片太大');
+    if (image.width * image.height > MAX_PIXELS)
+      throw new RasterError(tr('图片太大', 'The image is too large'));
     return { width: image.width, height: image.height, data: new Uint8Array(image.data) };
   }
   throw new RasterError(
-    mime === 'image/webp' ? '暂不能处理 WebP 图片，请换成 JPEG 或 PNG' : '不是 JPEG 或 PNG 图片',
+    mime === 'image/webp'
+      ? tr(
+          '暂不能处理 WebP 图片，请换成 JPEG 或 PNG',
+          "WebP images can't be processed yet, please use JPEG or PNG",
+        )
+      : tr('不是 JPEG 或 PNG 图片', 'Not a JPEG or PNG image'),
   );
 }
 
