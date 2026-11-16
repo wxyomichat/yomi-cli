@@ -1,5 +1,6 @@
 import { describeEnvironment } from '../core/env.js';
 import { paint, say, warn } from '../core/ui.js';
+import { describeVideoFeatures } from '../gen/ugcVideo.js';
 import { UgcFailure } from '../ugc/api.js';
 import { checkSpec, resolveCharacter } from '../ugc/character.js';
 import { AlreadyCreated, failureMessage, ReviewState, submitCharacter } from '../ugc/create.js';
@@ -53,6 +54,8 @@ export async function create(context: Context, spec: CharacterSpec, options: Cre
   say(io, `声音：${character.voiceNames.join(' + ')}`);
   if (character.tagNames.length) say(io, `标签：${character.tagNames.join('、')}`);
   say(io, '图片：形象图与头像均已审核通过');
+  const videos = describeVideoFeatures(character.video);
+  if (videos) say(io, videos);
   if (options.dryRun) {
     await submitCharacter(context.gateway, state, character, {
       fresh: options.fresh,

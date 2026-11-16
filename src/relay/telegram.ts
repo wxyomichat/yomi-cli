@@ -1,8 +1,9 @@
 /**
  * The Telegram Bot API (https://core.telegram.org/bots/api), the few methods the relay uses,
- * over `fetch` with JSON bodies. The bot token is part of every URL path, so no URL, request or
- * response is ever logged or put in an error; errors carry the method, Telegram's `error_code`
- * and `description` only. Long polling only (`getUpdates`): the relay opens no port.
+ * over `fetch` with JSON bodies (a photo goes up as multipart/form-data). The bot token is part of
+ * every URL path, so no URL, request or response is ever logged or put in an error; errors carry
+ * the method, Telegram's `error_code` and `description` only. Long polling only (`getUpdates`):
+ * the relay opens no port.
  */
 
 export const TELEGRAM_API = 'https://api.telegram.org';
@@ -57,6 +58,9 @@ export type TelegramMessage = {
   text?: string;
   reply_to_message?: { message_id: number };
   entities?: { type: string; offset: number; length: number }[];
+  /** A photo message's sizes, smallest first. */
+  photo?: TelegramPhotoSize[];
+  caption?: string;
 };
 
 export type TelegramCallbackQuery = {
@@ -77,6 +81,21 @@ export type TelegramUpdate = {
 };
 
 export type InlineKeyboard = { inline_keyboard: { text: string; callback_data: string }[][] };
+
+/** A file to upload: its bytes, media type and file name. */
+export type TelegramFile = { bytes: Buffer; mime: string; name: string };
+
+/** `PhotoSize`: one of the sizes Telegram keeps of a photo. */
+export type TelegramPhotoSize = {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+};
+
+/** Photos uploaded with multipart/form-data may be 10 MB at most. */
+export const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 
 export type BotOptions = {
   /** `https://api.telegram.org`; a test may point at a loopback mock. */
@@ -113,10 +132,43 @@ export class TelegramBot {
     return this.token.split(':')[0];
   }
 
-  async call<T>(
+  call<T>(
     method: string,
     params: Record<string, unknown> = {},
     options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<T> {
+    return this.post<T>(
+      method,
+      { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) },
+      options,
+    );
+  }
+
+  /**
+   * A method with files: `multipart/form-data`, plain fields as text (objects as JSON, as the Bot
+   * API reads them) and each file as a part of its own. The token stays in the URL path only.
+   */
+  callWithFiles<T>(
+    method: string,
+    params: Record<string, unknown>,
+    files: Record<string, TelegramFile>,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<T> {
+    const form = new FormData();
+    for (const [name, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      form.append(name, typeof value === 'object' ? JSON.stringify(value) : String(value));
+    }
+    for (const [name, file] of Object.entries(files))
+      form.append(name, new Blob([new Uint8Array(file.bytes)], { type: file.mime }), file.name);
+    // fetch writes the boundary into Content-Type itself.
+    return this.post<T>(method, { body: form }, { timeoutMs: 60_000, ...options });
+  }
+
+  private async post<T>(
+    method: string,
+    request: { headers?: Record<string, string>; body: string | FormData },
+    options: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<T> {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -133,8 +185,8 @@ export class TelegramBot {
     try {
       response = await this.fetcher(`${this.origin}/bot${this.token}/${method}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        headers: request.headers,
+        body: request.body,
         redirect: 'error',
         signal: controller.signal,
       });
@@ -229,6 +281,27 @@ export class TelegramBot {
       text: html,
       parse_mode: 'HTML',
     });
+  }
+
+  /**
+   * Uploads a photo (JPEG, PNG or WebP, at most 10 MB, as the Bot API allows for uploads) with an
+   * optional HTML caption (1024 characters at most). The bytes go up as a file part, never as a
+   * link Telegram would fetch.
+   */
+  sendPhoto(
+    chatId: number,
+    photo: TelegramFile,
+    captionHtml = '',
+    extra: Record<string, unknown> = {},
+  ) {
+    if (photo.bytes.length > MAX_PHOTO_BYTES)
+      return Promise.reject(new TelegramError('sendPhoto', 400, '图片超过 10 MB'));
+    const params: Record<string, unknown> = { chat_id: chatId, ...extra };
+    if (captionHtml) {
+      params.caption = captionHtml;
+      params.parse_mode = 'HTML';
+    }
+    return this.callWithFiles<TelegramMessage>('sendPhoto', params, { photo });
   }
 
   sendChatAction(chatId: number, action = 'typing') {

@@ -10,8 +10,11 @@ import { login, logout, whoami } from './commands/auth.js';
 import { check, init, tags, voices } from './commands/catalog.js';
 import { createContext, type GlobalOptions } from './commands/context.js';
 import { create } from './commands/create.js';
+import { image } from './commands/image.js';
+import { persona } from './commands/persona.js';
 import { preview } from './commands/preview.js';
 import { relay } from './commands/relay.js';
+import { video } from './commands/video.js';
 import { UgcFailure } from './ugc/api.js';
 import { ImageError } from './ugc/imageFile.js';
 import {
@@ -36,6 +39,10 @@ const HELP = `yomi ${VERSION} — Yomi 命令行工具
   tags               列出可选标签
   create -f <文件>   创建角色
   preview -f <文件>  在终端里和草稿角色试聊（不创建角色）
+  image -p <描述>    AI 生成角色图片（封面 / 头像），按张扣钻石
+  video -f <文件>    AI 生成角色视频（动态封面 / 介绍视频），按报价扣钻石
+  persona list       你的聊天人设（主控）
+  persona avatar     AI 生成人设头像
   relay --telegram   把你自己的 Telegram bot 私聊转给已发布的 Yomi 角色（实验）
 
 全局选项：
@@ -73,6 +80,49 @@ ${'  '}字段选项（覆盖文件里的值）：--name --gender --description -
   --allow-paid          非交互时允许免费条数用完后继续付费发送
   --reply-timeout       等待一条回复的秒数，默认 90，超时后改为读取消息记录
   --accept-declaration  非交互运行时明确确认声明`,
+  image: `yomi image -p <描述> [--count N] [--model ID] [--style ID] [--reference 图片] [选项]
+  用 AI 生成角色图片，下载原图并裁好封面（1:2）和头像（1:1）。先显示单价、张数、总价和余额，
+  输入 yes（或 --accept-price）才扣钻石；生成失败的那张自动退款。
+  --options            列出可用模型、风格、比例和价格（不扣费）
+  --count N            张数（1–4，默认 4）
+  --model / --style    模型、风格（默认第一个模型、不选风格）
+  --ratio R            比例（默认 9:16，没有就用第一个）
+  --reference 图片      参考图（先上传审核）
+  --out 目录           保存位置，默认 ./yomi-media
+  --pick N --into 文件 --as cover|avatar|both
+                       把第 N 张裁好的图写进角色文件的 cover/avatar（保留注释）
+  --resume 批次|请求    继续之前的一次：已受理的只查看和下载，不再扣费；答复未知的请求
+                       会原样重发（同一请求 ID，最多扣一次）
+  --resume ID --forget 放弃本机对这个请求或批次的跟踪（不取消、不退款；同样的命令会重新扣费）
+  --accept-price       非交互时同意显示的价格
+  --json               输出 JSON`,
+  video: `yomi video -f <角色文件> [--template ID | --prompt 描述] [--duration 秒] [选项]
+  用 AI 为角色生成视频。首帧默认取角色封面（裁成 9:16），先上传首帧、拿到报价，显示价格和余额，
+  输入 yes（或 --accept-price）才创建任务扣钻石；失败自动退款。结果记在本机，下次 yomi create
+  这个角色文件时一起提交（yomi preview 试聊不带视频）。
+  --options            列出模板、时长和展示价（不扣费）
+  --template ID        模板；不写则为自定义（--prompt 描述）
+  --duration 秒        时长（默认用模板或自定义的默认值）
+  --frame 图片         自己指定首帧（JPEG/PNG，会裁成 9:16）
+  --as dynamic-cover|intro-video   用作动态封面（默认）或介绍视频
+  --list               列出这个角色文件生成过的视频任务
+  --resume 请求ID       继续之前的任务：已受理的只查看，不再扣费；答复未知的请求会原样重发
+                       （同一请求 ID，最多扣一次）
+  --out 目录           保存预览视频，默认 ./yomi-media
+  --accept-price / --confirm-prod / --json`,
+  persona: `yomi persona list
+yomi persona avatar -p <描述> [--persona ID | --new --name 名字 --gender male|female|other --age N] [选项]
+  AI 生成聊天人设（主控）头像，选一张写进人设。先显示单价、张数、总价和余额，输入 yes 才扣钻石；
+  失败或未通过内容检查的那张不扣费。
+  --options            列出可用模型和风格（不扣费）
+  --count N            张数（默认按服务端上限）
+  --reference 图片      参考图
+  --pick N             直接用第 N 张；不写时交互选择，非交互只下载不写入
+  --out 目录           保存位置，默认 ./yomi-media
+  --resume 请求ID       继续之前的一次生成：已受理的只查看，不再扣费；答复未知的请求会原样
+                       重发（同一请求 ID，最多扣一次）
+  --create-again       新建人设的结果未知、persona list 里确认没有它时，非交互地再建一次
+  --accept-price / --confirm-prod / --json`,
   relay: `yomi relay --telegram [--character ID] [--max-spend 钻石] [选项]
   用你在 @BotFather 建的 bot，把你本人在 Telegram 私聊里发的消息转给 Yomi 角色，流式回复。
   只服务配对过的本人。默认不花钻石：付费要先在 Telegram 里用 /budget 设预算并点按钮确认，
@@ -152,6 +202,58 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
     'confirm-prod': { type: 'boolean' },
     'reset-spend': { type: 'boolean' },
   },
+  image: {
+    prompt: { type: 'string', short: 'p' },
+    model: { type: 'string' },
+    style: { type: 'string' },
+    count: { type: 'string' },
+    ratio: { type: 'string' },
+    reference: { type: 'string' },
+    out: { type: 'string' },
+    pick: { type: 'string' },
+    into: { type: 'string' },
+    as: { type: 'string' },
+    resume: { type: 'string' },
+    forget: { type: 'boolean' },
+    options: { type: 'boolean' },
+    'accept-price': { type: 'boolean' },
+    'confirm-prod': { type: 'boolean' },
+    json: { type: 'boolean' },
+  },
+  video: {
+    ...SPEC,
+    template: { type: 'string' },
+    prompt: { type: 'string', short: 'p' },
+    duration: { type: 'string' },
+    frame: { type: 'string' },
+    as: { type: 'string' },
+    out: { type: 'string' },
+    list: { type: 'boolean' },
+    resume: { type: 'string' },
+    options: { type: 'boolean' },
+    'accept-price': { type: 'boolean' },
+    json: { type: 'boolean' },
+  },
+  persona: {
+    prompt: { type: 'string', short: 'p' },
+    persona: { type: 'string' },
+    new: { type: 'boolean' },
+    name: { type: 'string' },
+    gender: { type: 'string' },
+    age: { type: 'string' },
+    model: { type: 'string' },
+    style: { type: 'string' },
+    count: { type: 'string' },
+    reference: { type: 'string' },
+    pick: { type: 'string' },
+    out: { type: 'string' },
+    resume: { type: 'string' },
+    'create-again': { type: 'boolean' },
+    options: { type: 'boolean' },
+    'accept-price': { type: 'boolean' },
+    'confirm-prod': { type: 'boolean' },
+    json: { type: 'boolean' },
+  },
   preview: {
     ...SPEC,
     message: { type: 'string', short: 'm', multiple: true },
@@ -202,6 +304,15 @@ function seconds(value: unknown, fallback: number, label: string): number {
   return parsed;
 }
 
+/** A whole number option within [min, max], or null when it is not given. */
+function whole(value: unknown, label: string, min: number, max: number): number | null {
+  if (value === undefined) return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max)
+    throw new UsageError(`${label} 必须是 ${min}–${max} 的整数`);
+  return parsed;
+}
+
 function gems(value: unknown): number {
   if (value === undefined) return 0;
   const parsed = Number(value);
@@ -233,7 +344,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
     parsed = parseArgs({
       args: rest,
       options: { ...GLOBAL, ...own },
-      allowPositionals: command === 'init',
+      allowPositionals: command === 'init' || command === 'persona',
       strict: true,
     });
   } catch (error) {
@@ -299,6 +410,66 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
           messages: (values.message as string[] | undefined) ?? [],
           allowPaid: Boolean(values['allow-paid']),
           replyTimeoutMs: seconds(values['reply-timeout'], 90, '--reply-timeout') * 1000,
+        });
+        break;
+      case 'image':
+        await image(context, {
+          prompt: (values.prompt as string | undefined) ?? '',
+          model: (values.model as string | undefined) ?? '',
+          style: (values.style as string | undefined) ?? '',
+          count: whole(values.count, '--count', 1, 4),
+          ratio: (values.ratio as string | undefined) ?? '',
+          reference: (values.reference as string | undefined) ?? '',
+          out: (values.out as string | undefined) ?? '',
+          pick: whole(values.pick, '--pick', 1, 4),
+          into: (values.into as string | undefined) ?? '',
+          as: (values.as as string | undefined) ?? '',
+          resume: (values.resume as string | undefined) ?? '',
+          forget: Boolean(values.forget),
+          listOptions: Boolean(values.options),
+          acceptPrice: Boolean(values['accept-price']),
+          confirmProd: Boolean(values['confirm-prod']),
+          json: Boolean(values.json),
+        });
+        break;
+      case 'video': {
+        const needsFile = !values.options;
+        await video(context, needsFile ? specFrom(values) : null, {
+          template: (values.template as string | undefined) ?? '',
+          prompt: (values.prompt as string | undefined) ?? '',
+          duration: whole(values.duration, '--duration', 1, 600),
+          frame: (values.frame as string | undefined) ?? '',
+          as: (values.as as string | undefined) ?? '',
+          out: (values.out as string | undefined) ?? '',
+          list: Boolean(values.list),
+          resume: (values.resume as string | undefined) ?? '',
+          listOptions: Boolean(values.options),
+          acceptPrice: Boolean(values['accept-price']),
+          confirmProd: Boolean(values['confirm-prod']),
+          json: Boolean(values.json),
+        });
+        break;
+      }
+      case 'persona':
+        await persona(context, parsed.positionals[0] ?? '', {
+          prompt: (values.prompt as string | undefined) ?? '',
+          persona: (values.persona as string | undefined) ?? '',
+          create: Boolean(values.new),
+          name: (values.name as string | undefined) ?? '',
+          gender: (values.gender as string | undefined) ?? '',
+          age: whole(values.age, '--age', 18, 150),
+          model: (values.model as string | undefined) ?? '',
+          style: (values.style as string | undefined) ?? '',
+          count: whole(values.count, '--count', 1, 16),
+          reference: (values.reference as string | undefined) ?? '',
+          pick: whole(values.pick, '--pick', 1, 16),
+          out: (values.out as string | undefined) ?? '',
+          resume: (values.resume as string | undefined) ?? '',
+          createAgain: Boolean(values['create-again']),
+          listOptions: Boolean(values.options),
+          acceptPrice: Boolean(values['accept-price']),
+          confirmProd: Boolean(values['confirm-prod']),
+          json: Boolean(values.json),
         });
         break;
       case 'relay':

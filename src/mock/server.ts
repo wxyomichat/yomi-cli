@@ -5,6 +5,11 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import { encodeBody, type Json, parseGatewayJson } from '../core/json.js';
+import { chatImageRoutes } from './gen/chatImage.js';
+import type { MockBlob, MockGenContext } from './gen/context.js';
+import { imageRoutes } from './gen/image.js';
+import { personaRoutes } from './gen/persona.js';
+import { videoRoutes } from './gen/video.js';
 import {
   compareMid,
   emptyContent,
@@ -164,6 +169,10 @@ export type MockServer = {
   ): string;
   /** Every session gets a new auth token: old X-Tokens answer 401, refresh tokens still work. */
   expireAuthTokens(): void;
+  /** The generation modules' own state (`src/mock/gen/*`), by module name. */
+  gen: Record<string, unknown>;
+  /** Uploads received at `/blob/<key>` (presigned PUTs and form POSTs of the generation flows). */
+  blobs: Map<string, MockBlob>;
   close(): Promise<void>;
 };
 
@@ -1104,6 +1113,48 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
   /** Routes the mock has only while a test sets them up. */
   const present = (path: string) => path !== 'relay/get_policy' || state.relayPolicy !== null;
 
+  // Generation flows, one module each (src/mock/gen/*).
+  const genStore: Record<string, unknown> = {};
+  const blobs = new Map<string, MockBlob>();
+  const media = new Map<string, { bytes: Buffer; mime: string }>();
+  const genContext: MockGenContext = {
+    gems: () => state.gems,
+    setGems: (value) => {
+      state.gems = value;
+    },
+    ok: (data = {}) => ok(data),
+    fail: (code, message, extra = {}) => fail(code, message, extra),
+    nextId,
+    origin: () => origin,
+    blobUrl: (key) => `${origin}/blob/${encodeURIComponent(key)}`,
+    blobs,
+    serveMedia: (key, bytes, mime) => {
+      media.set(key, { bytes, mime });
+      return `${origin}/media/${encodeURIComponent(key)}`;
+    },
+    character: (npcId) => {
+      const npc = npcOf(npcId);
+      return npc ? { npcId: npc.npcId, name: npc.name } : null;
+    },
+    chat: (npcId) => chatOf(npcId),
+    pushChat,
+    later: (ms, run) => {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        run();
+      }, ms);
+      timers.add(timer);
+    },
+    store: genStore,
+  };
+  Object.assign(
+    routes,
+    imageRoutes(genContext),
+    videoRoutes(genContext),
+    chatImageRoutes(genContext),
+    personaRoutes(genContext),
+  );
+
   const PUBLIC = new Set(['account/login', 'account/refresh_auth_token']);
 
   const server: Server = createServer(async (request, response) => {
@@ -1118,6 +1169,44 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
           return respond(response, 400, 'credentials on a presigned PUT', 'text/plain');
         upload.bytes = await readBody(request);
         return respond(response, 200, '', 'text/plain');
+      }
+      if (
+        url.pathname.startsWith('/blob/') &&
+        (request.method === 'PUT' || request.method === 'POST')
+      ) {
+        if (request.headers['x-token'])
+          return respond(response, 400, 'credentials on a presigned upload', 'text/plain');
+        const key = decodeURIComponent(url.pathname.slice('/blob/'.length));
+        const raw = await readBody(request);
+        const contentType = String(request.headers['content-type'] ?? '');
+        const blob: MockBlob = {
+          method: request.method,
+          headers: request.headers,
+          contentType,
+          bytes: raw,
+          fields: {},
+        };
+        if (request.method === 'POST' && contentType.startsWith('multipart/form-data')) {
+          const form = await new Response(new Uint8Array(raw), {
+            headers: { 'content-type': contentType },
+          }).formData();
+          for (const [name, value] of form.entries()) {
+            if (typeof value === 'string') blob.fields[name] = value;
+            else blob.bytes = Buffer.from(await value.arrayBuffer());
+          }
+        }
+        blobs.set(key, blob);
+        return respond(response, 200, '', 'text/plain');
+      }
+      if (request.method === 'GET' && url.pathname.startsWith('/media/')) {
+        const item = media.get(decodeURIComponent(url.pathname.slice('/media/'.length)));
+        if (!item) return respond(response, 404, 'no media', 'text/plain');
+        response.writeHead(200, {
+          'Content-Type': item.mime,
+          'Content-Length': String(item.bytes.length),
+        });
+        response.end(item.bytes);
+        return;
       }
       if (request.method !== 'POST' || !url.pathname.startsWith('/ember/api/v1/'))
         return respond(response, 404, fail(404, 'not found'));
@@ -1244,6 +1333,8 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     expireAuthTokens: () => {
       for (const item of state.sessions) item.authToken = 'at_' + randomBytes(12).toString('hex');
     },
+    gen: genStore,
+    blobs,
     close: () =>
       new Promise<void>((resolve) => {
         for (const timer of timers) clearTimeout(timer);

@@ -1,4 +1,5 @@
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
+import { loopbackHttpAllowed } from '../core/env.js';
 import { i64, type Json, object, optionalObject } from '../core/json.js';
 
 /**
@@ -107,19 +108,47 @@ export async function putObject(
   data: Buffer,
   mime: string,
   fetcher: typeof fetch = fetch,
+  /** Headers the signature binds too (a private object: `x-oss-object-acl: private`). */
+  extraHeaders: Record<string, string> = {},
 ) {
   const parsed = new URL(url);
-  const loopback = parsed.hostname === '127.0.0.1';
-  if (parsed.protocol !== 'https:' && !(loopback && parsed.protocol === 'http:'))
+  if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
     throw new UgcFailure('PROTOCOL', '上传地址不是 https');
   let response: Response;
   try {
     response = await fetcher(url, {
       method: 'PUT',
-      headers: { 'Content-Type': mime },
+      headers: { ...extraHeaders, 'Content-Type': mime },
       body: data,
       redirect: 'error',
     });
+  } catch {
+    throw new UgcFailure('UPLOAD_FAILED', '图片上传失败');
+  }
+  if (response.status < 200 || response.status >= 300)
+    throw new UgcFailure('UPLOAD_FAILED', `图片上传失败（HTTP ${response.status}）`);
+}
+
+/**
+ * A presigned upload ticket that wants a form POST (`form_fields`): the fields sorted by name,
+ * then the file last as `file`. No Gateway credentials, no redirects.
+ */
+export async function postForm(
+  url: string,
+  fields: Record<string, string>,
+  data: Buffer,
+  mime: string,
+  fetcher: typeof fetch = fetch,
+) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
+    throw new UgcFailure('PROTOCOL', '上传地址不是 https');
+  const form = new FormData();
+  for (const key of Object.keys(fields).sort()) form.append(key, fields[key]);
+  form.append('file', new Blob([new Uint8Array(data)], { type: mime }), 'image');
+  let response: Response;
+  try {
+    response = await fetcher(url, { method: 'POST', body: form, redirect: 'error' });
   } catch {
     throw new UgcFailure('UPLOAD_FAILED', '图片上传失败');
   }

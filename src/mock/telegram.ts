@@ -10,8 +10,10 @@ import { setTimeout as delay } from 'node:timers/promises';
  * parameters}` with the HTTP status equal to `error_code`) and refuses what Telegram refuses that
  * matters to the relay: a second long poller or a webhook (409), a wrong or revoked token (401),
  * HTML that does not parse, text over 4096 code points, an edit that changes nothing, drafts
- * outside private chats, per-chat flood (429). Error strings follow the Bot API server source.
- * It listens on 127.0.0.1 only; nothing here reaches the network.
+ * outside private chats, per-chat flood (429). `sendPhoto` takes a multipart/form-data upload (a
+ * JPEG, PNG or WebP of 10 MB at most, a caption of 1024 characters at most) and keeps the bytes.
+ * Error strings follow the Bot API server source. It listens on 127.0.0.1 only; nothing here
+ * reaches the network.
  */
 
 /** A Telegram user as a test describes one; `is_bot` defaults to false. */
@@ -32,6 +34,22 @@ export type MockBotCall = {
   ok: boolean;
   /** Telegram's `description` when it failed. */
   error?: string;
+  /** Files of a multipart/form-data call, by field name (their bytes are in `photos`). */
+  files?: Record<string, { name: string; type: string; size: number }>;
+};
+
+/** A photo the bot sent (`sendPhoto`), as uploaded. */
+export type MockBotPhoto = {
+  message_id: number;
+  /** The caption as sent (raw HTML when `parse_mode` is HTML), '' when none. */
+  caption: string;
+  parse_mode?: string;
+  bytes: Buffer;
+  /** The upload's media type and file name. */
+  mime: string;
+  name: string;
+  width: number;
+  height: number;
 };
 
 export type MockTelegram = {
@@ -50,6 +68,8 @@ export type MockTelegram = {
     parse_mode?: string;
     reply_markup?: unknown;
   }[];
+  /** The photos the bot sent in that chat, oldest first, with the uploaded bytes. */
+  photos(chatId: number): MockBotPhoto[];
   /** The latest draft in that chat; a message from the bot there clears it. */
   draft(chatId: number): { draft_id: number; text: string } | null;
   /** Queues a text message (private chat `from.id` unless `chatId`); returns its `message_id`. */
@@ -104,10 +124,14 @@ type BotMessage = Content & {
   editDate?: number;
   markup: unknown;
 };
+type BotPhoto = MockBotPhoto & { date: number; parsed: Parsed; sizes: Json[] };
+/** A file part of a multipart/form-data call. */
+type Upload = { name: string; type: string; bytes: Buffer };
 type ChatState = {
   chat: Json & { id: number; type: string };
   users: Map<number, Json>;
   bot: Map<number, BotMessage>;
+  photos: Map<number, BotPhoto>;
   draft: { draft_id: number; text: string; keepOnStop: boolean } | null;
   left: boolean;
 };
@@ -118,13 +142,22 @@ type Poll = {
   timer: NodeJS.Timeout;
   answer(outcome: Outcome): void;
 };
-type Handler = (params: Json, response: ServerResponse) => unknown;
+type Handler = (params: Json, response: ServerResponse, files: Map<string, Upload>) => unknown;
 type Outcome = Update[] | BotApiError;
 
 const NOT_MODIFIED =
   'message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message';
 const FLOOD_METHODS = ['sendmessagedraft', 'sendchataction', 'sendmessage', 'editmessagetext'];
 const FLOOD_WINDOW_MS = 5000;
+/** Fields a multipart/form-data call sends as JSON-serialized text. */
+const JSON_FIELDS = new Set([
+  'reply_markup',
+  'reply_parameters',
+  'caption_entities',
+  'link_preview_options',
+]);
+/** Photos uploaded with multipart/form-data: 10 MB at most. */
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 /** Update types left out when `allowed_updates` was never given or was empty. */
 const NOT_BY_DEFAULT = ['chat_member', 'message_reaction', 'message_reaction_count'];
 const CONFLICT =
@@ -250,15 +283,68 @@ function inlineKeyboard(markup: unknown): unknown {
     : undefined;
 }
 
-async function readParams(request: IncomingMessage): Promise<Json | undefined> {
+/**
+ * The call's parameters: a JSON body, or multipart/form-data (text fields, the JSON-serialized
+ * ones parsed as the Bot API does, and files apart).
+ */
+async function readParams(
+  request: IncomingMessage,
+): Promise<{ params: Json; files: Map<string, Upload> } | undefined> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(chunk as Buffer);
+  const raw = Buffer.concat(chunks);
+  const files = new Map<string, Upload>();
+  const type = String(request.headers['content-type'] ?? '');
   try {
-    const value = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Json | null;
-    return value?.constructor === Object ? value : undefined;
+    if (type.startsWith('multipart/form-data')) {
+      const form = await new Response(new Uint8Array(raw), {
+        headers: { 'content-type': type },
+      }).formData();
+      const params: Json = {};
+      for (const [name, value] of form.entries()) {
+        if (typeof value !== 'string') {
+          const bytes = Buffer.from(await value.arrayBuffer());
+          files.set(name, { name: value.name, type: value.type, bytes });
+        } else params[name] = JSON_FIELDS.has(name) ? (JSON.parse(value) as unknown) : value;
+      }
+      return { params, files };
+    }
+    const value = JSON.parse(raw.toString('utf8') || '{}') as Json | null;
+    return value?.constructor === Object ? { params: value, files } : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The pixel size of a JPEG or PNG (0×0 for anything else), read from its header. */
+function pictureSize(bytes: Buffer): { width: number; height: number } {
+  if (bytes.length > 24 && bytes.readUInt32BE(0) === 0x89504e47)
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  if (bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let at = 2;
+    while (at + 9 < bytes.length && bytes[at] === 0xff) {
+      const marker = bytes[at + 1];
+      const length = bytes.readUInt16BE(at + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker))
+        return { width: bytes.readUInt16BE(at + 7), height: bytes.readUInt16BE(at + 5) };
+      at += 2 + length;
+    }
+  }
+  return { width: 0, height: 0 };
+}
+
+/** JPEG, PNG or WebP, as Telegram turns them into photos. */
+function pictureType(bytes: Buffer): string {
+  if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return 'image/jpeg';
+  if (bytes.length > 8 && bytes.readUInt32BE(0) === 0x89504e47) return 'image/png';
+  if (
+    bytes.length > 12 &&
+    bytes.toString('latin1', 0, 4) === 'RIFF' &&
+    bytes.toString('latin1', 8, 12) === 'WEBP'
+  )
+    return 'image/webp';
+  return '';
 }
 
 function reply(response: ServerResponse, status: number, body: Json): void {
@@ -298,6 +384,7 @@ export async function startMockTelegram(
   const flood = new Map<string, { times: number[]; until: number }>();
   let nextUpdateId = 100_000 + Math.floor(Math.random() * 900_000);
   let nextMessageId = 100;
+  let nextFileId = 1;
   let callbackCount = 0;
   let allowed: string[] | undefined;
   let webhook = '';
@@ -317,9 +404,35 @@ export async function startMockTelegram(
     ...(message.markup ? { reply_markup: message.markup } : {}),
   });
 
+  const photoJson = (state: ChatState, photo: BotPhoto) => ({
+    message_id: photo.message_id,
+    from: botUser,
+    chat: state.chat,
+    date: photo.date,
+    photo: photo.sizes,
+    ...(photo.parsed.text ? { caption: photo.parsed.text } : {}),
+    ...(photo.parsed.entities.length ? { caption_entities: photo.parsed.entities } : {}),
+  });
+
   function find(state: ChatState, messageId: number): Json | undefined {
     const mine = state.bot.get(messageId);
-    return mine ? messageJson(state, mine) : state.users.get(messageId);
+    if (mine) return messageJson(state, mine);
+    const photo = state.photos.get(messageId);
+    return photo ? photoJson(state, photo) : state.users.get(messageId);
+  }
+
+  /** Telegram keeps a photo in a few sizes: a thumbnail and the original here. */
+  function photoSizes(width: number, height: number, size: number): Json[] {
+    const id = () => `mock-photo-${nextFileId++}`;
+    const scale = Math.min(1, 90 / Math.max(width, height, 1));
+    const small = {
+      file_id: id(),
+      file_unique_id: `mock-u-${nextFileId}`,
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale)),
+    };
+    const original = { file_id: id(), file_unique_id: `mock-u-${nextFileId}`, width, height };
+    return [small, { ...original, file_size: size }];
   }
 
   function ensureChat(id: number, type: string, from?: MockTelegramUser): ChatState {
@@ -333,6 +446,7 @@ export async function startMockTelegram(
       chat: { id, type, ...names },
       users: new Map(),
       bot: new Map(),
+      photos: new Map(),
       draft: null,
       left: false,
     };
@@ -457,6 +571,40 @@ export async function startMockTelegram(
       state.draft = null;
       return messageJson(state, message);
     },
+    sendPhoto: (params, _response, files) => {
+      const state = chatOf(params);
+      const named = typeof params.photo === 'string' ? params.photo : '';
+      const upload = named.startsWith('attach://')
+        ? files.get(named.slice('attach://'.length))
+        : files.get('photo');
+      // A file id or a link: this mock keeps uploads only.
+      if (!upload)
+        throw bad(
+          named ? 'wrong file identifier/HTTP URL specified' : 'there is no photo in the request',
+        );
+      if (upload.bytes.length > MAX_PHOTO_BYTES)
+        throw new BotApiError(413, 'Request Entity Too Large');
+      if (!pictureType(upload.bytes)) throw bad('IMAGE_PROCESS_FAILED');
+      const caption = readText({ text: params.caption ?? '', parse_mode: params.parse_mode }, true);
+      if ([...caption.parsed.text].length > 1024) throw bad('message caption is too long');
+      const { width, height } = pictureSize(upload.bytes);
+      const photo: BotPhoto = {
+        message_id: nextMessageId++,
+        date: now(),
+        caption: caption.text,
+        ...(caption.parseMode ? { parse_mode: caption.parseMode } : {}),
+        bytes: upload.bytes,
+        mime: upload.type,
+        name: upload.name,
+        width,
+        height,
+        parsed: caption.parsed,
+        sizes: photoSizes(width, height, upload.bytes.length),
+      };
+      state.photos.set(photo.message_id, photo);
+      state.draft = null;
+      return photoJson(state, photo);
+    },
     editMessageText: (params) => {
       const state = chatOf(params);
       const message = botMessage(state, params);
@@ -499,8 +647,17 @@ export async function startMockTelegram(
     const route = /^\/bot([^/]+)\/([A-Za-z]+)$/.exec(path);
     if (!route) return replyError(response, new BotApiError(404, 'Not Found'));
     const [, given, method] = route;
-    const params = await readParams(request).catch(() => undefined);
+    const read = await readParams(request).catch(() => undefined);
+    const params = read?.params;
+    const files = read?.files ?? new Map<string, Upload>();
     const record: MockBotCall = { method, params: params ?? {}, at: Date.now(), ok: true };
+    if (files.size)
+      record.files = Object.fromEntries(
+        [...files].map(([name, file]) => [
+          name,
+          { name: file.name, type: file.type, size: file.bytes.length },
+        ]),
+      );
     calls.push(record);
     try {
       if (revoked || given !== token) throw new BotApiError(401, 'Unauthorized');
@@ -512,7 +669,7 @@ export async function startMockTelegram(
       if (failure)
         throw new BotApiError(failure.error_code, failure.description, failure.retry_after);
       checkFlood(name, params);
-      reply(response, 200, { ok: true, result: await handler(params, response) });
+      reply(response, 200, { ok: true, result: await handler(params, response, files) });
     } catch (error) {
       const failure =
         error instanceof BotApiError
@@ -556,6 +713,10 @@ export async function startMockTelegram(
         ...(message.parseMode ? { parse_mode: message.parseMode } : {}),
         ...(message.markup ? { reply_markup: message.markup } : {}),
       })),
+    photos: (chatId) =>
+      [...(chats.get(chatId)?.photos.values() ?? [])].map(
+        ({ date: _date, parsed: _parsed, sizes: _sizes, ...photo }) => photo,
+      ),
     draft: (chatId) => {
       const draft = chats.get(chatId)?.draft;
       return draft ? { draft_id: draft.draft_id, text: draft.text } : null;

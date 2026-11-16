@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import {
+  CHARACTER_REMOVED,
   ChatRefusal,
   characterProfile,
   characterReportReasons,
@@ -18,9 +19,36 @@ import {
   submitFeedback,
 } from '../chat/api.js';
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
+import { LocalState } from '../core/state.js';
 import { VERSION } from '../core/version.js';
+import {
+  CHAT_IMAGE_POLL_MS,
+  CHAT_IMAGE_TIMEOUT_MS,
+  type ChatImageTask,
+  chatImageAspectRatio,
+  chatImageBillingSettled,
+  chatImageDone,
+  chatImageRefusal,
+  chatImageRequest,
+  chatImageRequestId,
+  contentRejected,
+  createChatImageTask,
+  getChatImageConfig,
+  getChatImageTask,
+  ImageBilling,
+  ImageDelivery,
+  ImageGeneration,
+} from '../gen/chatImage.js';
+import { download, extensionOf, type GenRefusal } from '../gen/common.js';
+import { sniffMime } from '../gen/raster.js';
 import { ImConnection, type SocketFactory } from '../im/connection.js';
-import { asidePlainText, type ImParagraph, SenderType } from '../im/models.js';
+import {
+  asidePlainText,
+  type ImMessage,
+  type ImParagraph,
+  Semantic,
+  SenderType,
+} from '../im/models.js';
 import { BusinessType, Command } from '../im/packet.js';
 import {
   type AsideEvent,
@@ -36,13 +64,15 @@ import { escapeHtml, renderReply } from './render.js';
 import { type RelayCharacter, type RelayState } from './state.js';
 import {
   type InlineKeyboard,
+  MAX_PHOTO_BYTES,
   type TelegramBot,
   type TelegramCallbackQuery,
   TelegramError,
+  type TelegramFile,
   type TelegramMessage,
   type TelegramUpdate,
 } from './telegram.js';
-import { COMMANDS, relayTexts, type RelayTexts } from './texts.js';
+import { COMMANDS, type ImageBillingNote, relayTexts, type RelayTexts } from './texts.js';
 
 /**
  * `yomi relay --telegram`: the owner's private chat with their own bot ⇄ a published Yomi
@@ -59,6 +89,12 @@ import { COMMANDS, relayTexts, type RelayTexts } from './texts.js';
  *   charge that could not be measured yet stays pending (across restarts) and is settled before the
  *   next send; when the balance cannot be read, nothing is sent. A spent budget pauses the relay,
  *   and so does a "free" reply that was charged. A send is never repeated.
+ * - `/image` asks for a picture of a reply (one at a time, like a reply): free ones go without a
+ *   budget, a priced one needs the budget and is measured like a reply. The request is kept before
+ *   it is sent and resent only as the same request (`/image resume`); only a request whose outcome
+ *   is unknown may be dropped (`/image forget`). Its charge lands on delivery, so it is measured
+ *   once the task has ended (or its 180 s window has passed), never earlier. The picture is
+ *   forwarded only when it is the result of this relay's own task, never another device's.
  * - The long connection never gives up, reconnects after sleep, and reads `poll_message` on every
  *   connect; a reply that still did not arrive is read back from history.
  * - What the server promises lives in `relay/get_policy`; until it
@@ -88,6 +124,11 @@ export type RelayOptions = {
   createSocket?: SocketFactory;
   /** How often a paused (signed out) relay looks for a new sign-in. */
   resumeCheckMs?: number;
+  /** How often a requested image's task is read (2 s, as the app does) and for how long (180 s). */
+  imagePollMs?: number;
+  imageTimeoutMs?: number;
+  /** Where a requested image is kept until its cost is settled; this account's state by default. */
+  records?: LocalState;
 };
 
 export class RelayStopped extends Error {
@@ -116,6 +157,53 @@ type Turn = {
   finished: Promise<void> | null;
   watchdog: ReturnType<typeof setTimeout> | null;
 };
+
+/**
+ * A requested image until its gems are settled, kept across restarts (one per bot). The request
+ * is frozen before it is sent: a resend is the same `client_request_id` and the same body.
+ */
+type ImageRecord = {
+  requestId: string;
+  /** The `create_task` body as sent. */
+  body: string;
+  npcId: string;
+  name: string;
+  /** The reply it is drawn from; '' for the opening. */
+  anchorMid: string;
+  cid: string;
+  /** '' while the server's answer is unknown. */
+  taskId: string;
+  /** The billing mode then and the price shown (0: free). */
+  mode: 'free' | 'paid';
+  price: number;
+  /** What it costs if charged (the full price; a free one is charged this once the quota is gone). */
+  worst: number;
+  /** The owner's chat it goes to. */
+  chatId: number;
+  /** The owner was told how it ended (the picture, or why there is none). */
+  told: boolean;
+  /** A refund was under way when the owner was told. */
+  refunding: boolean;
+  /**
+   * When the request was made, then when its task became known, then when the owner was told how
+   * it ended: the 180 s window runs from here (within it, a delivered picture's charge is waited
+   * for, so a picture delivered late still gets its full window).
+   */
+  at: number;
+};
+
+/** Following one image's task until it is delivered (or not) and settled. */
+type ImageJob = {
+  record: ImageRecord;
+  /** `MessagePersisted` pushes that may be its picture, by mid. */
+  pushes: Map<string, ImMessage>;
+  /** Reads the task now instead of after the pause. */
+  wake: () => void;
+  stop: AbortController;
+  done: Promise<void>;
+};
+
+const IMAGE_RECORDS = 'relay-chat-image';
 
 /** Pauses that come from the session or the server; worked out again on every start. */
 type Gate = '' | 'signedOut' | 'disabled' | 'tooOld';
@@ -159,6 +247,28 @@ export function unknownOutcome(error: unknown): boolean {
   return status === 0 || status === 408 || status >= 500;
 }
 
+/** A picture's download gives up after a minute: a stalled one must not hold the relay. */
+const timedFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, signal: AbortSignal.timeout(60_000) });
+
+/** What happened to an image's gems (`ImageBillingStatus`), for the owner. */
+function billingNote(status: number): ImageBillingNote {
+  switch (status) {
+    case ImageBilling.chargePending:
+      return 'pending';
+    case ImageBilling.charged:
+      return 'charged';
+    case ImageBilling.refundPending:
+      return 'refunding';
+    case ImageBilling.refunded:
+      return 'refunded';
+    case ImageBilling.manualReview:
+      return 'review';
+    default:
+      return 'none';
+  }
+}
+
 export class Relay {
   private turn: Turn | null = null;
   private early = new Map<string, StreamEvent[]>();
@@ -173,6 +283,13 @@ export class Relay {
   private ownMids = new Set<string>();
   /** Characters whose price the owner saw under the current budget. */
   private priceShown = new Set<string>();
+  /** Characters whose image price the owner saw under the current budget. */
+  private imagePriceShown = new Set<string>();
+  /** The image being followed, at most one (and never beside a reply). */
+  private job: ImageJob | null = null;
+  /** `(cid, mid)` of the `MessagePersisted` pushes seen. */
+  private persisted = new Set<string>();
+  private readonly records: LocalState;
   private gate: Gate = '';
   private strangers = 0;
   private resumeTimer: ReturnType<typeof setInterval> | null = null;
@@ -188,6 +305,9 @@ export class Relay {
   ) {
     this.texts = relayTexts(options.language);
     this.userId = gateway.requireCredential().userId;
+    // One file per bot: a relay of another bot of this account saves its own copy whole.
+    this.records =
+      options.records ?? new LocalState(`relay|${state.data.account}|${bot.id}`, this.userId);
   }
 
   private log(line: string) {
@@ -203,7 +323,10 @@ export class Relay {
       await this.poll();
     } finally {
       signal.removeEventListener('abort', onAbort);
+      const job = this.job;
       this.shutdown();
+      // Nothing reaches the chat after the relay stopped.
+      await job?.done;
     }
     if (this.stopReason) throw this.stopReason;
   }
@@ -225,8 +348,16 @@ export class Relay {
     this.policy = await relayPolicy(this.gateway);
     this.applyPolicy();
     if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
-    if (this.state.data.pending && !(await this.settlePending()))
+    const kept = this.keptImage();
+    // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
+    // next send) settles it, never a reading taken now.
+    if (this.state.data.pending && !kept && !(await this.settlePending()))
       this.log('上次有一条消息的花费还没核对：读不到余额，下一条发送前再核对');
+    // A picture asked for before the restart is still followed (and forwarded when it is ours).
+    if (kept?.taskId) {
+      this.log('上次请求的图片还没有结算，继续跟进');
+      this.startImageJob(kept);
+    } else if (kept) this.log('上次的生图请求结果未知：主人发送 /image resume 用同一个请求重发');
     const { billing, allowance } = this.state.data;
     if (billing.mode === 'paid')
       this.log(
@@ -296,6 +427,8 @@ export class Relay {
 
   private shutdown() {
     this.connection?.stop();
+    // The image's record stays: the next run follows it again.
+    this.job?.stop.abort();
     if (this.resumeTimer) clearInterval(this.resumeTimer);
     this.resumeTimer = null;
     const turn = this.turn;
@@ -410,12 +543,14 @@ export class Relay {
           ));
         }
         await this.afterBooking();
-        if (this.turn) return void (await this.say(this.texts.busy));
+        if (this.turn || this.job) return void (await this.say(this.texts.busy));
         return this.chooseCharacter(argument, true);
       case 'price':
         return this.showPrice();
       case 'budget':
         return this.budget(argument);
+      case 'image':
+        return this.imageCommand(message, argument);
       case 'report':
         return this.report(message);
       case 'stop':
@@ -522,7 +657,21 @@ export class Relay {
   }
 
   private async showPrice() {
-    await this.say((await this.priceAndBalance()) + '\n' + this.budgetLine());
+    const prices = (await this.priceAndBalance()) + (await this.imagePriceText());
+    await this.say(prices + '\n' + this.budgetLine());
+  }
+
+  /** The current character's image price for `/price`; '' when images are off or unknown. */
+  private async imagePriceText(): Promise<string> {
+    const character = this.state.data.character;
+    if (!character) return '';
+    try {
+      const config = await getChatImageConfig(this.gateway, character.npcId);
+      return config.enabled ? this.texts.imagePriceLine(config.cost) : '';
+    } catch (error) {
+      if (error instanceof NotSignedIn) throw error;
+      return '';
+    }
   }
 
   private async budget(argument: string) {
@@ -624,6 +773,7 @@ export class Relay {
       const character = this.state.data.character;
       const seen = character ? this.priceShown.has(character.npcId) : false;
       this.priceShown.clear();
+      this.imagePriceShown.clear();
       if (character && seen) this.priceShown.add(character.npcId);
       this.state.update({
         billing: { mode: 'paid', budget: button.amount, spent: 0, setAt: Date.now() },
@@ -701,10 +851,14 @@ export class Relay {
   private async chat(message: TelegramMessage, text: string) {
     await this.afterBooking();
     if (this.turn) return void (await this.say(this.texts.busy));
+    if (this.job) return void (await this.say(this.texts.imageBusy));
     const blocked = this.pausedText();
     if (blocked) return void (await this.say(blocked));
     const character = this.state.data.character;
     if (!character) return void (await this.say(this.texts.noCharacter));
+    // An image whose cost is still open is settled first: it is charged on delivery.
+    const open = await this.settleImage();
+    if (open) return void (await this.say(open));
     // What earlier sends cost is booked before anything more is spent.
     if (!(await this.settlePending())) return void (await this.say(this.texts.walletUnavailable));
     const afterSettling = this.pausedText();
@@ -852,6 +1006,7 @@ export class Relay {
   }
 
   private onStream(event: StreamEvent) {
+    if (event.type === StreamEventType.messagePersisted) return this.onPersisted(event);
     const turn = this.turn;
     // Nothing in flight, or another character: not ours.
     if (!turn || event.entityId !== turn.character.npcId) return;
@@ -993,6 +1148,7 @@ export class Relay {
   /** `/stop` or the draft's Stop button: stop showing it; the server still finishes (and charges). */
   private async stopTurn() {
     const turn = this.turn;
+    if (!turn && this.job) return this.stopImage();
     if (!turn || turn.settled || turn.presenter.isClosed)
       return void (await this.say(this.texts.nothingToStop));
     this.log('主人停止了这条回复的转发');
@@ -1041,6 +1197,571 @@ export class Relay {
       this.state.update({ billingPause: 'budget' });
       await this.say(this.texts.budgetExhausted(spent));
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Images
+
+  private keptImage(): ImageRecord | null {
+    return this.records.record<ImageRecord>(IMAGE_RECORDS, this.bot.id);
+  }
+
+  private keepImage(record: ImageRecord | null) {
+    this.records.setRecord(IMAGE_RECORDS, this.bot.id, record);
+  }
+
+  /** `/image`, `/image resume`, `/image forget`. */
+  private async imageCommand(message: TelegramMessage, argument: string) {
+    const action = argument.toLowerCase();
+    if (action && action !== 'resume' && action !== 'forget')
+      return void (await this.say(this.texts.imageUsage));
+    await this.afterBooking();
+    if (this.turn) return void (await this.say(this.texts.busy));
+    const kept = this.keptImage();
+    if (action === 'forget') {
+      if (!kept) return void (await this.say(this.texts.imageNothingToResume));
+      // An accepted task is charged when it is delivered: only its own end may settle it.
+      if (kept.taskId) return void (await this.say(this.texts.imageForgetAccepted));
+      // Only an unknown outcome goes; its pending charge is still settled before the next send.
+      this.keepImage(null);
+      this.log('主人放弃追踪上一次结果未知的生图请求');
+      return void (await this.say(this.texts.imageForgotten));
+    }
+    if (this.job) return void (await this.say(this.texts.imageBusy));
+    const blocked = this.pausedText();
+    if (blocked) return void (await this.say(blocked));
+    if (action === 'resume') {
+      if (!kept) return void (await this.say(this.texts.imageNothingToResume));
+      if (kept.taskId) {
+        await this.say(this.texts.imageResumed);
+        this.startImageJob(kept);
+        return;
+      }
+      // The answer never came: the same request again. If it was never accepted it is priced
+      // now, so the higher of then and now must fit today's budget.
+      let cost = kept.price;
+      let worst: number | null = kept.worst ?? kept.price;
+      try {
+        const config = await getChatImageConfig(this.gateway, kept.npcId);
+        cost = Math.max(cost, config.cost);
+        worst = config.worstCost === null ? null : Math.max(worst, config.worstCost);
+      } catch (error) {
+        if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
+          return this.signedOut();
+        return void (await this.say(this.texts.imageConfigUnavailable));
+      }
+      const money = await this.imageMoney(kept.npcId, cost, worst, true);
+      if (money.refusal) return void (await this.say(money.refusal));
+      return this.requestImage(
+        { ...kept, mode: this.state.data.billing.mode, price: cost, worst: worst ?? cost },
+        money.before,
+        true,
+      );
+    }
+    if (kept) {
+      const open = await this.settleImage();
+      if (open) return void (await this.say(open));
+    }
+    return this.newImage(message);
+  }
+
+  private async newImage(message: TelegramMessage) {
+    const character = this.state.data.character;
+    if (!character) return void (await this.say(this.texts.noCharacter));
+    let config;
+    try {
+      config = await getChatImageConfig(this.gateway, character.npcId);
+    } catch (error) {
+      if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
+        return this.signedOut();
+      if (error instanceof ApiError && error.code === CHARACTER_REMOVED)
+        return void (await this.say(this.texts.unavailable));
+      // An unknown price is "not free": nothing is asked for.
+      this.log('读不到生图配置');
+      return void (await this.say(this.texts.imageConfigUnavailable));
+    }
+    if (!config.enabled) return void (await this.say(this.texts.imageDisabled));
+    const anchor = await this.imageAnchor(message, character.npcId);
+    if (!anchor) return;
+    const money = await this.imageMoney(character.npcId, config.cost, config.worstCost);
+    if (money.refusal) return void (await this.say(money.refusal));
+    const requestId = chatImageRequestId(character.npcId, anchor.mid);
+    const record: ImageRecord = {
+      requestId,
+      body: chatImageRequest({
+        npcId: character.npcId,
+        anchorMid: anchor.mid,
+        requestId,
+        aspectRatio: chatImageAspectRatio(config.aspectRatios),
+      }),
+      npcId: character.npcId,
+      name: character.name,
+      anchorMid: anchor.mid,
+      cid: anchor.cid,
+      taskId: '',
+      mode: this.state.data.billing.mode,
+      price: config.cost,
+      worst: config.worstCost ?? config.cost,
+      chatId: message.chat.id,
+      told: false,
+      refunding: false,
+      at: Date.now(),
+    };
+    await this.requestImage(record, money.before);
+  }
+
+  /**
+   * The reply a picture is drawn from: the one the owner answered with `/image`, else the latest
+   * reply in this character's chat, else the opening ('' with `is_prologue`). Null when it cannot
+   * be (said why).
+   */
+  private async imageAnchor(
+    message: TelegramMessage,
+    npcId: string,
+  ): Promise<{ mid: string; cid: string } | null> {
+    let cid = '';
+    let recent: ImMessage[] = [];
+    try {
+      cid = await conversationId(this.gateway, npcId);
+      if (cid) recent = await listMessages(this.gateway, cid, 30);
+    } catch (error) {
+      if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn)) {
+        await this.signedOut();
+        return null;
+      }
+      const removed = error instanceof ChatRefusal && error.kind === 'unavailable';
+      await this.say(removed ? this.texts.unavailable : this.texts.imageHistoryUnavailable);
+      return null;
+    }
+    const isReply = (item: ImMessage) =>
+      item.senderType === SenderType.assistant && item.semantic === Semantic.dialogueTurn;
+    const replied = message.reply_to_message?.message_id;
+    if (replied) {
+      const mid = this.state.replyMid(replied);
+      const known = recent.find((item) => item.mid === mid);
+      if (!mid || (known && !isReply(known))) {
+        await this.say(this.texts.imageNotReply);
+        return null;
+      }
+      return { mid, cid };
+    }
+    return { mid: recent.find(isReply)?.mid ?? '', cid };
+  }
+
+  /**
+   * The money checks before an image is asked for, as for a reply: earlier costs booked first, a
+   * priced image only under a confirmed budget that covers it, and only with a balance that pays
+   * for it. One shown as free may still be charged its full price (`worst`: the free images are a
+   * snapshot), so that must fit what this relay may still spend; an unknown worst case refuses.
+   * `refusal` says why not ('' when it may go); `before` is the balance to measure from.
+   */
+  private async imageMoney(
+    npcId: string,
+    cost: number,
+    worst: number | null,
+    replay = false,
+  ): Promise<{ refusal: string; before: number | null }> {
+    const no = (refusal: string) => ({ refusal, before: null });
+    if (worst === null) return no(this.texts.imageConfigUnavailable);
+    // A resend keeps the first send's pending charge: it is the same image, booked once at its end.
+    if (!replay && !(await this.settlePending())) return no(this.texts.walletUnavailable);
+    const paused = this.pausedText();
+    if (paused) return no(paused);
+    if (cost <= 0 && worst > this.ceilingLeft())
+      return no(this.texts.imageFreeOverCeiling(worst, this.ceilingLeft()));
+    const billing = this.state.data.billing;
+    if (cost > 0) {
+      if (billing.mode !== 'paid') return no(this.texts.imageNeedsBudget(cost));
+      const left = this.left();
+      if (left <= 0) {
+        this.state.update({ billingPause: 'budget' });
+        return no(this.texts.budgetExhausted(billing.spent));
+      }
+      if (cost > left) return no(this.texts.imageBudgetShort(cost, left));
+    }
+    const before = await this.balance();
+    // Nothing on the server keeps an image free (no free-only mode as for replies): every image,
+    // free or not, needs a balance to measure its cost against.
+    if (before === null) return no(this.texts.walletUnavailable);
+    if (cost > 0) {
+      // A resend that was accepted the first time costs nothing more; one that was not is refused.
+      if (before < cost && !replay) return no(this.texts.imageGemsShort(cost, before));
+      if (!this.imagePriceShown.has(npcId)) {
+        await this.say(this.texts.imagePriceLine(cost) + this.texts.balanceLine(before));
+        this.imagePriceShown.add(npcId);
+      }
+    }
+    return { refusal: '', before };
+  }
+
+  /**
+   * Sends the frozen request (kept first, so an answer that never comes leaves it to resend as
+   * is). Only a known refusal (`chatImageRefusal`) of the first send charged nothing and forgets
+   * it; anything else, an unrecognised code included, is an unknown outcome and keeps it with its
+   * pending charge. A refused resend (`replay`) covers that resend only: the first send may have
+   * been accepted, so the request and its pending charge stay.
+   */
+  private async requestImage(record: ImageRecord, before: number | null, replay = false) {
+    this.keepImage(record);
+    // An image shown as free that is charged anyway pauses the relay, budget or not. A resend
+    // keeps the first send's pending charge (measured from before that send).
+    const kept = replay ? this.state.data.pending : null;
+    if (kept && record.price > 0 && kept.mode === 'free')
+      this.state.update({ pending: { ...kept, mode: record.mode, price: record.price } });
+    else if (!kept && before !== null)
+      this.state.update({
+        pending: {
+          before,
+          mode: record.price > 0 ? record.mode : 'free',
+          price: record.price,
+          at: Date.now(),
+        },
+      });
+    let answer;
+    try {
+      answer = await createChatImageTask(this.gateway, record.body);
+    } catch (error) {
+      const refusal = chatImageRefusal(error);
+      const signedOut =
+        error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn);
+      if (replay && (refusal || signedOut)) {
+        this.keepImage({ ...record, taskId: '' });
+        if (signedOut) return this.signedOut();
+        this.log(`重发的生图请求被拒绝：${refusal?.kind}（${refusal?.code}），保留请求`);
+        return void (await this.say(
+          this.texts.imageReplayRefused(
+            refusal && refusal.message !== refusal.code ? refusal.message : (refusal?.code ?? ''),
+          ),
+        ));
+      }
+      if (refusal || signedOut) {
+        this.keepImage(null);
+        this.state.update({ pending: null });
+        if (refusal) return this.imageRefused(refusal);
+        return this.signedOut();
+      }
+      const code = error instanceof ApiError ? `${error.code}/HTTP ${error.httpStatus}` : 'error';
+      this.log(`生图请求结果未知（${code}）：保留请求，等主人用 /image resume 重发同一个请求`);
+      return void (await this.say(this.texts.imageUnknown));
+    }
+    record.taskId = answer.task.taskId;
+    record.cid ||= answer.task.cid;
+    record.at = Date.now();
+    this.keepImage(record);
+    this.log(
+      answer.replay
+        ? '同一个生图请求已被受理过：继续跟进，不会重复扣费'
+        : `已为「${record.name}」请求一张图片（${record.price > 0 ? `${record.price} 钻石` : '免费'}）`,
+    );
+    await this.say(this.texts.imageStarted(record.price));
+    this.startImageJob(record);
+  }
+
+  private async imageRefused(refusal: GenRefusal) {
+    this.log(`生图被拒绝：${refusal.kind}（${refusal.code}）`);
+    switch (refusal.kind) {
+      case 'gems':
+        return void (await this.say(this.texts.imageGems));
+      case 'rateLimited':
+        return void (await this.say(this.texts.rateLimited(0)));
+      default:
+        return void (await this.say(
+          this.texts.imageRefused(refusal.message === refusal.code ? '' : refusal.message),
+        ));
+    }
+  }
+
+  /**
+   * A kept image is settled before anything else is sent: '' when nothing is open (any more),
+   * else why nothing is sent now. Its pending charge is booked only once the task has ended and,
+   * within its 180 s window, once a delivered priced picture's charge has landed (after /stop or
+   * a timeout too): until then the task is followed again and nothing is sent.
+   */
+  private async settleImage(): Promise<string> {
+    const record = this.keptImage();
+    if (!record) return '';
+    if (this.job) return this.texts.imageBusy;
+    if (!record.taskId) return this.texts.imageKeptUnknown;
+    let task: ChatImageTask;
+    try {
+      task = await getChatImageTask(this.gateway, record.taskId);
+    } catch (error) {
+      if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
+        throw error;
+      return this.texts.imageUnchecked;
+    }
+    const window = this.options.imageTimeoutMs ?? CHAT_IMAGE_TIMEOUT_MS;
+    const patient = Date.now() < record.at + window;
+    if (await this.concludeImage(record, task, new Map(), patient)) return '';
+    this.startImageJob(record);
+    return record.told ? this.texts.imageSettling : this.texts.imageBusy;
+  }
+
+  private startImageJob(record: ImageRecord): ImageJob {
+    const stop = new AbortController();
+    let wakeUp: (() => void) | null = null;
+    const job: ImageJob = {
+      record,
+      pushes: new Map(),
+      wake: () => wakeUp?.(),
+      stop,
+      done: Promise.resolve(),
+    };
+    const pause = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const end = () => {
+          clearTimeout(timer);
+          wakeUp = null;
+          stop.signal.removeEventListener('abort', end);
+          resolve();
+        };
+        const timer = setTimeout(end, ms);
+        wakeUp = end;
+        stop.signal.addEventListener('abort', end, { once: true });
+      });
+    this.job = job;
+    job.done = this.followImage(job, pause)
+      .catch((error) => this.unexpected(error))
+      .finally(() => {
+        if (this.job === job) this.job = null;
+      });
+    return job;
+  }
+
+  /**
+   * Reads the task every 2 s (sooner when a push may be its picture) for at most 180 s, as the
+   * app does. Stopping or running out of time cancels nothing: the server goes on and the record
+   * stays for `/image resume`.
+   */
+  private async followImage(job: ImageJob, pause: (ms: number) => Promise<void>) {
+    const { record } = job;
+    const window = this.options.imageTimeoutMs ?? CHAT_IMAGE_TIMEOUT_MS;
+    const deadline = Date.now() + window;
+    const every = this.options.imagePollMs ?? CHAT_IMAGE_POLL_MS;
+    let reported = false;
+    while (!job.stop.signal.aborted && !this.abort.signal.aborted) {
+      let task: ChatImageTask | null = null;
+      try {
+        task = await getChatImageTask(this.gateway, record.taskId);
+      } catch (error) {
+        if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
+          return this.signedOut();
+        if (!reported) this.log('读取生图进度失败，继续重试');
+        reported = true;
+      }
+      if (job.stop.signal.aborted) return;
+      // A picture delivered late still gets its full window for the charge to land.
+      const patient = Date.now() < Math.max(deadline, record.told ? record.at + window : 0);
+      if (task && (await this.concludeImage(record, task, job.pushes, patient))) return;
+      if (!patient) {
+        if (record.told) this.log('图片的扣费还没结算完：下一次发送前再核对');
+        else {
+          this.log('图片还没生成好：服务端会继续，主人可用 /image resume 继续等待');
+          await this.say(this.texts.imageTimeout);
+        }
+        return;
+      }
+      await pause(every);
+    }
+  }
+
+  /**
+   * Acts on what the task says once nothing more will change: the picture to the owner when it
+   * was delivered, or why there is none; then, once its gems are where they stay, books them like
+   * a reply's and forgets the request. True when it is settled. `patient`: a delivered priced
+   * picture that reads "not charged" is given time for its charge to land.
+   */
+  private async concludeImage(
+    record: ImageRecord,
+    task: ChatImageTask,
+    pushes: Map<string, ImMessage>,
+    patient: boolean,
+  ): Promise<boolean> {
+    if (!chatImageDone(task)) return false;
+    let waiting = patient;
+    if (!record.told) {
+      if (task.generation === ImageGeneration.failed) {
+        const note = this.texts.imageBilling(billingNote(task.billing));
+        const detail = task.failure?.message ?? '';
+        await this.say(
+          contentRejected(task.failure)
+            ? this.texts.imageRejected(detail, note)
+            : this.texts.imageFailed(detail, note),
+        );
+        this.log(`图片没有生成成功（${task.failure?.code || '未知原因'}）`);
+      } else if (task.delivery === ImageDelivery.skippedConversationDeleted)
+        await this.say(this.texts.imageSkipped);
+      else await this.forwardImage(record, task, pushes);
+      record.told = true;
+      record.refunding = task.billing === ImageBilling.refundPending;
+      // Its charge may still be on the way: the window starts again from now.
+      record.at = Date.now();
+      this.keepImage(record);
+      waiting = true;
+    }
+    if (!chatImageBillingSettled(task, waiting && record.price > 0)) return false;
+    if (record.refunding && task.billing === ImageBilling.refunded)
+      await this.say(this.texts.imageRefunded);
+    await this.settleImageCharge(record, task);
+    this.keepImage(null);
+    return true;
+  }
+
+  /**
+   * Books a settled image by what its task says, not by the balance: another `yomi` process
+   * spending or a top-up meanwhile would distort a drop. Charged: its price (a free one charged
+   * anyway: the full price, which pauses the relay). Not charged, refunded or failed: nothing. Any
+   * other state is measured from the balance as before. A drop that disagrees is logged.
+   */
+  private async settleImageCharge(record: ImageRecord, task: ChatImageTask) {
+    const pending = this.state.data.pending;
+    if (!pending) return;
+    const billing = task.billing;
+    const known =
+      billing === ImageBilling.charged
+        ? record.price > 0
+          ? record.price
+          : (record.worst ?? null)
+        : billing === ImageBilling.notCharged ||
+            billing === ImageBilling.refunded ||
+            billing === ImageBilling.chargeFailed
+          ? 0
+          : null;
+    if (known === null) {
+      if (!(await this.settlePending()))
+        this.log('暂时读不到余额：这张图片的花费会在下一条发送前核对');
+      return;
+    }
+    const now = await this.balance();
+    this.state.update({ pending: null });
+    if (now !== null && pending.before - now !== known)
+      this.log(
+        `这张图片按任务记为 ${known} 钻石；同期余额变化 ${pending.before - now}（其他扣费或充值），按任务计入预算`,
+      );
+    await this.book(known, pending.mode);
+  }
+
+  /**
+   * The delivered picture to the owner: downloaded here (fresh links from the task, else the
+   * message's) and uploaded to Telegram, never as a link. Only this task's own message counts.
+   */
+  private async forwardImage(
+    record: ImageRecord,
+    task: ChatImageTask,
+    pushes: Map<string, ImMessage>,
+  ) {
+    const assetIds = new Set(task.assets.map((asset) => asset.assetId).filter(Boolean));
+    const ours = (item: ImMessage) =>
+      task.resultMid
+        ? item.mid === task.resultMid
+        : item.content.images.some((image) => assetIds.has(image.assetId));
+    let message = [...pushes.values()].find(ours) ?? null;
+    if (!message) {
+      // The push may never come: the result is read back from history.
+      const cid = record.cid || task.cid;
+      try {
+        if (cid) message = (await listMessages(this.gateway, cid, 20)).find(ours) ?? null;
+      } catch (error) {
+        if (error instanceof NotSignedIn) throw error;
+      }
+    }
+    const owner = this.state.data.owner;
+    if (!owner || owner.chatId !== record.chatId) {
+      this.log('配对的主人变了：这张图片没有转发');
+      return;
+    }
+    const picture = await this.downloadImage(task, message);
+    if (!picture) {
+      this.log('图片下载失败');
+      return void (await this.say(this.texts.imageForwardFailed));
+    }
+    await this.bot.sendChatAction(owner.chatId, 'upload_photo').catch(() => undefined);
+    try {
+      const sent = await this.sendPhoto(
+        owner.chatId,
+        picture,
+        escapeHtml(this.texts.imageCaption(record.name)),
+      );
+      const mid = task.resultMid || message?.mid || '';
+      if (mid) this.state.rememberReply(sent.message_id, mid);
+      this.log(`已转发一张「${record.name}」的图片`);
+    } catch (error) {
+      this.log(
+        `图片发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
+      );
+      await this.say(this.texts.imageForwardFailed);
+    }
+  }
+
+  /** The first link that gives a picture Telegram takes (10 MB at most); expired ones skipped. */
+  private async downloadImage(
+    task: ChatImageTask,
+    message: ImMessage | null,
+  ): Promise<TelegramFile | null> {
+    const now = Date.now();
+    const fresh = (expires: number) => !expires || expires > now + 5000;
+    const links: string[] = [];
+    for (const asset of task.assets)
+      if (fresh(asset.accessExpiresAtMs) && asset.sizeBytes <= MAX_PHOTO_BYTES)
+        links.push(asset.url);
+    for (const image of message?.content.images ?? [])
+      if (fresh(image.accessExpiresAtMs)) links.push(image.url);
+    for (const asset of task.assets)
+      if (fresh(asset.accessExpiresAtMs)) links.push(asset.thumbnailUrl);
+    for (const image of message?.content.images ?? [])
+      if (fresh(image.accessExpiresAtMs)) links.push(image.thumbnailUrl);
+    for (const link of new Set(links.filter(Boolean))) {
+      try {
+        const { bytes } = await download(link, { maxBytes: MAX_PHOTO_BYTES, fetcher: timedFetch });
+        const mime = sniffMime(bytes);
+        if (mime) return { bytes, mime, name: `yomi-${task.taskId}.${extensionOf(mime)}` };
+      } catch {
+        // The next link.
+      }
+    }
+    return null;
+  }
+
+  /** `sendPhoto`, once more after Telegram's flood wait (a refused upload was not sent). */
+  private async sendPhoto(chatId: number, picture: TelegramFile, caption: string) {
+    try {
+      return await this.bot.sendPhoto(chatId, picture, caption);
+    } catch (error) {
+      if (!(error instanceof TelegramError) || error.code !== 429) throw error;
+      await sleep(Math.min(error.retryAfter || 1, 30) * 1000, this.abort.signal);
+      return this.bot.sendPhoto(chatId, picture, caption);
+    }
+  }
+
+  /** `/stop` while a picture is awaited: stop waiting; the server still makes (and charges) it. */
+  private async stopImage() {
+    const job = this.job;
+    if (!job) return void (await this.say(this.texts.nothingToStop));
+    job.stop.abort();
+    await job.done;
+    this.log('主人停止了等待图片');
+    await this.say(this.texts.imageStopped);
+  }
+
+  /**
+   * A message committed on its own (a generated picture). It is only a hint for the image this
+   * relay asked for: the task's own `result_mid` decides, so another device's picture is never
+   * forwarded. Deduplicated by `(cid, mid)`.
+   */
+  private onPersisted(event: StreamEvent) {
+    const message = event.message;
+    if (!message || !event.cid) return;
+    const key = `${event.cid}:${message.mid}`;
+    if (this.persisted.has(key)) return;
+    this.persisted.add(key);
+    if (this.persisted.size > 500) this.persisted = new Set([...this.persisted].slice(-200));
+    const job = this.job;
+    if (!job || event.entityId !== job.record.npcId) return;
+    if (job.record.cid && event.cid !== job.record.cid) return;
+    if (job.record.anchorMid && message.sourceMid && message.sourceMid !== job.record.anchorMid)
+      return;
+    if (job.pushes.size < 20) job.pushes.set(message.mid, message);
+    job.wake();
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1135,6 +1856,8 @@ export class Relay {
     this.log('Yomi 登录已恢复');
     this.connect();
     await this.say(this.texts.resumed);
+    const kept = this.keptImage();
+    if (kept?.taskId && !this.job) this.startImageJob(kept);
   }
 
   private otherAccount() {

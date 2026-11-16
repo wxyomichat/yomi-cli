@@ -15,6 +15,7 @@ const zh = {
     '/character [ID] 查看或切换角色',
     '/price 每条回复的价格、余额和预算',
     '/budget [数量|off] 设置可花的钻石上限（默认只用免费额度）',
+    '/image 根据最近一条回复生成一张图片（回复角色的某条消息再发，则根据那一条）',
     '/report 举报最近一条回复或角色',
     '/stop 停止转发当前回复（不退费）',
   ].join('\n'),
@@ -65,7 +66,7 @@ const zh = {
   budgetShort: (price: number, left: number) =>
     `剩余预算 ${left} 钻石，不够下一条回复（约 ${price} 钻石）。用 /budget 提高预算。`,
   freeCharged: (spent: number) =>
-    `只用免费额度时，这条回复仍被扣了 ${spent} 钻石，relay 已暂停。请用 /budget 设置预算后再继续。`,
+    `一条按免费发出的回复（或图片）仍被扣了 ${spent} 钻石，relay 已暂停。请用 /budget 设置预算后再继续。`,
   insufficientGems: '钻石不足，请在 Yomi App 或网页充值后再发。',
   membership: '这项功能需要会员，请在 Yomi App 或网页查看。',
   rateLimited: (seconds: number) =>
@@ -87,7 +88,72 @@ const zh = {
   reportDone: '已提交，谢谢反馈。',
   reportFailed: '提交失败，请稍后再试。',
   expired: '这个按钮已过期。',
+  // Images
+  imageUsage:
+    '用法：/image 根据最近一条回复生成图片；回复角色的某条消息再发 /image，则根据那一条。/image resume 继续上一次没有结果的生图；/image forget 放弃追踪一个结果未知的请求（已被受理的不能放弃）。',
+  imageDisabled: '当前对话暂不支持生图。',
+  imageConfigUnavailable:
+    '暂时读不到生图的价格（不代表免费），为了不超出预算，没有发起生图。请稍后再试。',
+  imageHistoryUnavailable: '暂时读不到聊天记录，没有发起生图。请稍后再试。',
+  imageNotReply:
+    '只能根据角色的文字回复生成图片：回复角色的一条回复再发 /image，或直接发 /image 用最近一条。',
+  imageNeedsBudget: (cost: number) =>
+    `生成一张图片需要 ${cost} 钻石（送达时扣费），现在只用免费额度。要继续，先用 /budget <数量> 设置预算。`,
+  imageBudgetShort: (cost: number, left: number) =>
+    `剩余预算 ${left} 钻石，不够生成一张图片（${cost} 钻石）。用 /budget 提高预算。`,
+  imageGemsShort: (cost: number, balance: number) =>
+    `钻石不足：生成一张图片需要 ${cost} 钻石，当前余额 ${balance}。请在 Yomi App 或网页充值。没有发起生图。`,
+  imagePriceLine: (cost: number) =>
+    cost > 0 ? `生成一张图片 ${cost} 钻石（图片送达时扣费）。` : '生成图片目前免费。',
+  imageStarted: (cost: number) =>
+    cost > 0
+      ? `正在生成图片（${cost} 钻石，送达时扣费），好了会发到这里。`
+      : '正在生成图片（免费），好了会发到这里。',
+  imageBusy: '上一张图片还在生成，请稍等；/stop 停止等待。',
+  imageSettling: '上一张图片已经送达，扣费还在结算，结算完才能发新的消息或生图。请稍等。',
+  imageUnknown:
+    '没能确认生图请求的结果（网络异常或服务端返回了无法识别的错误），不确定它是否已被受理（受理后，图片送达时才扣费）。为避免重复扣费，不会自动重发：发送 /image resume 用同一个请求号重发（不会重复扣费），或 /image forget 放弃追踪。',
+  imageReplayRefused: (why: string) =>
+    `这次重发被拒了${why ? `（${why}）` : ''}，这次重发没有扣费。但上一次的结果仍然未知，可能已经受理，送达时会扣费：请求仍然保留，在它有结果之前不会发出新的消息或生图。稍后再发 /image resume 重试（同一个请求号，不会重复扣费），或 /image forget 放弃追踪。`,
+  imageFreeOverCeiling: (worst: number, left: number) =>
+    `这张图片显示免费，但免费次数只是当前快照（在别处用掉后就按 ${worst} 钻石扣费），超出了本机还能花的 ${Math.max(0, left)} 钻石（relay 启动时的 --max-spend）。要生图，用更高的 --max-spend 重新启动 relay。`,
+  imageKeptUnknown:
+    '上一次生图请求的结果还不确定，在它有结果之前不会发出新的消息或生图。发送 /image resume 用同一个请求号重发（不会重复扣费），或 /image forget 放弃追踪。',
+  imageUnchecked: '暂时读不到上一张图片的进度，为了不重复计费，这条没有发送。请稍后再试。',
+  imageNothingToResume: '没有需要继续的生图。',
+  imageResumed: '继续等待上一次的图片。',
+  imageForgotten:
+    '已放弃追踪上一次的生图请求。如果它其实已被受理，图片会出现在 Yomi 对话里并在送达时扣费，这笔花费可能没有计入预算。',
+  imageForgetAccepted:
+    '上一张图片已经被服务端受理，送达时会扣费，所以不能放弃追踪（否则这笔花费无法计入预算）。发送 /image resume 继续等待并转发；它有结果、扣费结算完之后，就能继续聊天和生图。',
+  imageTimeout:
+    '图片还没生成好。服务端会继续生成，送达时才扣费；发送 /image resume 继续等待并转发。',
+  imageStopped:
+    '已停止等待这张图片。服务端仍会继续生成，送达时照常扣费；发送 /image resume 继续等待并转发。',
+  imageFailed: (detail: string, billing: string) =>
+    `图片没有生成成功${detail ? `：${detail}` : ''}。${billing}`,
+  imageRejected: (detail: string, billing: string) =>
+    `图片没有通过内容审核${detail ? `（${detail}）` : ''}，没有发出。${billing}`,
+  imageSkipped: '这段对话已被删除，图片没有送达。',
+  imageRefused: (detail: string) => `没有生成图片${detail ? `：${detail}` : ''}。这次没有扣费。`,
+  imageGems: '钻石不足，没有生成图片，也没有扣费。请在 Yomi App 或网页充值。',
+  imageForwardFailed:
+    '图片已经生成并保存在 Yomi 对话里，但没能转发到 Telegram：请在 Yomi App 或网页查看。',
+  imageCaption: (name: string) => `「${name}」的图片`,
+  imageRefunded: '上一张没有生成成功的图片，扣的钻石已经退回。',
+  imageBilling: (state: ImageBillingNote) =>
+    ({
+      none: '这张图片没有扣费。',
+      pending: '扣费还在处理中。',
+      charged: '已扣费。',
+      refunding: '扣的钻石正在退回（退款处理中）。',
+      refunded: '扣的钻石已经退回。',
+      review: '扣费结果待人工核对。',
+    })[state],
 };
+
+/** What happened to an image's gems, in words (`imageBilling`). */
+export type ImageBillingNote = 'none' | 'pending' | 'charged' | 'refunding' | 'refunded' | 'review';
 
 export type RelayTexts = typeof zh;
 
@@ -102,6 +168,7 @@ const en: RelayTexts = {
     '/character [ID] show or switch the character',
     '/price price per reply, balance and budget',
     '/budget [amount|off] gems the relay may spend (default: free replies only)',
+    '/image make a picture of the last reply (or of the reply you answer with it)',
     '/report report the last reply or the character',
     '/stop stop relaying the current reply (no refund)',
   ].join('\n'),
@@ -158,7 +225,7 @@ const en: RelayTexts = {
   budgetShort: (price, left) =>
     `${left} gems left, not enough for the next reply (about ${price}). Raise the budget with /budget.`,
   freeCharged: (spent) =>
-    `This reply was charged ${spent} gems although only free replies were allowed; the relay is paused. Set a budget with /budget to continue.`,
+    `A reply (or picture) sent as free was charged ${spent} gems anyway; the relay is paused. Set a budget with /budget to continue.`,
   insufficientGems: 'Not enough gems. Top up in the Yomi app or on the web, then send again.',
   membership: 'This needs a membership; see the Yomi app or the web.',
   rateLimited: (seconds) =>
@@ -181,6 +248,73 @@ const en: RelayTexts = {
   reportDone: 'Sent. Thanks for the feedback.',
   reportFailed: "Couldn't send it; try again later.",
   expired: 'This button has expired.',
+  imageUsage:
+    "Usage: /image makes a picture of the last reply; answer one of the character's replies with /image to use that one. /image resume continues the last picture that has no result yet; /image forget stops tracking a request whose outcome is unknown (an accepted one can't be dropped).",
+  imageDisabled: "Images aren't available in this chat.",
+  imageConfigUnavailable:
+    "Can't read the price of an image right now (that does not mean free), so no image was requested. Try again shortly.",
+  imageHistoryUnavailable: "Can't read the chat history right now, so no image was requested.",
+  imageNotReply:
+    "Pictures are made from the character's text replies: answer one of its replies with /image, or send /image for the latest one.",
+  imageNeedsBudget: (cost) =>
+    `An image costs ${cost} gems (charged when it is delivered) and the relay is on free replies only. Set a budget with /budget <amount> first.`,
+  imageBudgetShort: (cost, left) =>
+    `${left} gems left in the budget, not enough for an image (${cost} gems). Raise the budget with /budget.`,
+  imageGemsShort: (cost, balance) =>
+    `Not enough gems: an image costs ${cost} and your balance is ${balance}. Top up in the Yomi app or on the web. No image was requested.`,
+  imagePriceLine: (cost) =>
+    cost > 0
+      ? `An image costs ${cost} gems (charged when it is delivered). `
+      : 'Images are free right now. ',
+  imageStarted: (cost) =>
+    cost > 0
+      ? `Making the picture (${cost} gems, charged on delivery); it comes here when it is ready.`
+      : 'Making the picture (free); it comes here when it is ready.',
+  imageBusy: 'The last picture is still being made. Please wait, or /stop waiting.',
+  imageSettling:
+    'The last picture was delivered and its charge is still being settled; nothing new is sent until it is. Please wait.',
+  imageUnknown:
+    "Couldn't confirm the image request's outcome (network trouble, or an error the relay doesn't recognise), so it may have been accepted (if it was, it is charged on delivery). It won't be resent automatically: /image resume sends the same request again (never charged twice), /image forget stops tracking it.",
+  imageReplayRefused: (why) =>
+    `The resend was refused${why ? ` (${why})` : ''} and charged nothing. The first request's outcome is still unknown: it may have been accepted and will be charged on delivery, so it is kept and nothing new is sent until it has an outcome. Send /image resume later (same request ID, never charged twice), or /image forget to stop tracking it.`,
+  imageFreeOverCeiling: (worst, left) =>
+    `This image shows as free, but the free images are only a snapshot (once used up elsewhere it costs ${worst} gems), more than the ${Math.max(0, left)} gems this relay may still spend (its --max-spend). Restart the relay with a higher --max-spend to make images.`,
+  imageKeptUnknown:
+    "The last image request's outcome is still unknown; nothing new is sent until it has one. /image resume sends the same request again (never charged twice), /image forget stops tracking it.",
+  imageUnchecked:
+    "Can't read the last picture's progress right now, so this was not sent (to avoid counting twice). Try again shortly.",
+  imageNothingToResume: 'No image request to continue.',
+  imageResumed: 'Waiting for the last picture again.',
+  imageForgotten:
+    'Stopped tracking the last image request. If it was accepted after all, the picture appears in the Yomi chat and is charged on delivery; that cost may not be counted against the budget.',
+  imageForgetAccepted:
+    "The last picture was accepted by the server and is charged when it is delivered, so it can't be dropped (its cost could not be counted against the budget). /image resume waits for it again and forwards it; once it has ended and its charge is settled, you can chat and ask for pictures again.",
+  imageTimeout:
+    "The picture isn't ready yet. The server keeps making it and charges on delivery; /image resume waits for it again and forwards it.",
+  imageStopped:
+    'Stopped waiting for this picture. The server keeps making it and charges on delivery as usual; /image resume waits for it again and forwards it.',
+  imageFailed: (detail, billing) =>
+    `The picture couldn't be made${detail ? `: ${detail}` : ''}. ${billing}`,
+  imageRejected: (detail, billing) =>
+    `The picture didn't pass the content checks${detail ? ` (${detail})` : ''} and was not sent. ${billing}`,
+  imageSkipped: 'This chat was deleted; the picture was not delivered.',
+  imageRefused: (detail) =>
+    `No picture was made${detail ? `: ${detail}` : ''}. Nothing was charged.`,
+  imageGems:
+    'Not enough gems: no picture was made and nothing was charged. Top up in the Yomi app or on the web.',
+  imageForwardFailed:
+    "The picture was made and is in the Yomi chat, but couldn't be forwarded to Telegram: see it in the Yomi app or on the web.",
+  imageCaption: (name) => `A picture from "${name}"`,
+  imageRefunded: 'The gems for the picture that failed are back in your balance.',
+  imageBilling: (state) =>
+    ({
+      none: 'Nothing was charged for it.',
+      pending: 'The charge is still being processed.',
+      charged: 'It was charged.',
+      refunding: 'The gems charged are being refunded.',
+      refunded: 'The gems charged were refunded.',
+      review: 'The charge is under manual review.',
+    })[state],
 };
 
 export function relayTexts(language: string): RelayTexts {
@@ -192,6 +326,7 @@ export const COMMANDS = {
     { command: 'character', description: '查看或切换角色' },
     { command: 'price', description: '价格、余额和预算' },
     { command: 'budget', description: '设置可花的钻石上限' },
+    { command: 'image', description: '根据回复生成图片' },
     { command: 'report', description: '举报回复或角色' },
     { command: 'stop', description: '停止转发当前回复（不退费）' },
     { command: 'help', description: '帮助' },
@@ -200,6 +335,7 @@ export const COMMANDS = {
     { command: 'character', description: 'Show or switch the character' },
     { command: 'price', description: 'Price, balance and budget' },
     { command: 'budget', description: 'Gems the relay may spend' },
+    { command: 'image', description: 'Make a picture of a reply' },
     { command: 'report', description: 'Report a reply or the character' },
     { command: 'stop', description: 'Stop relaying the reply (no refund)' },
     { command: 'help', description: 'Help' },

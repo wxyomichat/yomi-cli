@@ -84,6 +84,29 @@ export function resolveEnvironment(
   };
 }
 
+/**
+ * Whether plain http to this machine is acceptable: only while the CLI is pointed at a local test
+ * server (`YOMI_API_ORIGIN` on 127.0.0.1 / localhost). Against the real service, uploads and
+ * results are https.
+ */
+export function localTestServer(environ: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    const url = new URL(environ.YOMI_API_ORIGIN ?? '');
+    return ['127.0.0.1', 'localhost'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** True for http on this machine while testing against a local server. */
+export function loopbackHttpAllowed(url: URL): boolean {
+  return (
+    url.protocol === 'http:' &&
+    ['127.0.0.1', 'localhost'].includes(url.hostname) &&
+    localTestServer()
+  );
+}
+
 /** The real production service (not a mock or local build pointed at with an override). */
 export function isProduction(env: Environment): boolean {
   return env.name === 'prod' && !env.custom;

@@ -1,6 +1,7 @@
 import type { Gateway } from '../core/api.js';
 import type { Json } from '../core/json.js';
 import type { LocalState } from '../core/state.js';
+import { videoFeatures } from '../gen/ugcVideo.js';
 import { call, UgcFailure, wireIds } from './api.js';
 import { loadAllTags, loadVoiceCatalog, resolveTags } from './catalog.js';
 import { type ImageKind, loadImage } from './imageFile.js';
@@ -30,6 +31,11 @@ export type ResolvedCharacter = {
   avatar: ImageRef;
   coverUrl: string;
   avatarUrl: string;
+  /**
+   * The AI videos made for this character file (`yomi video`): `dynamic_cover` / `intro_video`
+   * and `draft_id` for `features`, null (nothing sent) while none has finished.
+   */
+  video?: Json | null;
 };
 
 export type Progress = (line: string) => void;
@@ -129,6 +135,7 @@ export async function resolveCharacter(
     avatar: avatar.ref,
     coverUrl: cover.url,
     avatarUrl: avatar.url,
+    video: videoFeatures(state, spec.source),
   };
 }
 
@@ -161,6 +168,16 @@ function baseContent(character: ResolvedCharacter): Json {
   };
 }
 
+/** `features`: HTML styling off, the voice, and the finished AI videos with their draft. */
+function featureContent(character: ResolvedCharacter): Json {
+  return {
+    format_version: 1,
+    html_styling: disabledHtml(),
+    voice_configuration: voiceContent(character.spec),
+    ...(character.video ?? {}),
+  };
+}
+
 /** `CharacterContent` for `npc/create_ugc_character` (`contentForSubmission`). */
 export function contentForSubmission(
   character: ResolvedCharacter,
@@ -169,11 +186,7 @@ export function contentForSubmission(
   if (!declarationAccepted) throw new UgcFailure('DECLARATION', '需要先确认 18+ 与版权声明');
   return {
     ...baseContent(character),
-    features: {
-      format_version: 1,
-      html_styling: disabledHtml(),
-      voice_configuration: voiceContent(character.spec),
-    },
+    features: featureContent(character),
     declaration_accepted: true,
     content_format: character.spec.descriptionFormat,
   };
@@ -184,6 +197,9 @@ export function contentForPreview(
   character: ResolvedCharacter,
   declarationAccepted: boolean,
 ): Json {
+  // As the web and the app: a preview sends the voice only. Video bindings belong to the created
+  // character (create records the draft → character link); binding them to a preview character
+  // could make the later create fail.
   return {
     features: {
       format_version: 1,

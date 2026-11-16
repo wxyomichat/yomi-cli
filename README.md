@@ -1,6 +1,6 @@
 # yomi-cli
 
-Yomi 的命令行工具：在终端里通过网页授权登录、按文件创建角色、和草稿角色试聊（流式显示回复），以及把自己的 Telegram bot 私聊转给已发布的角色（实验）。调用的接口、字段规则和审核流程与 App / 网页端相同。
+Yomi 的命令行工具：在终端里通过网页授权登录、按文件创建角色、和草稿角色试聊（流式显示回复），用 AI 生成角色图片、动态封面 / 介绍视频和聊天人设头像（花钻石，先显示价格），以及把自己的 Telegram bot 私聊转给已发布的角色（实验）。调用的接口、字段规则和审核流程与 App / 网页端相同。
 
 ```bash
 yomi login                                   # 打开网页授权（像 gh auth login）
@@ -8,13 +8,18 @@ yomi init lin-xia.yaml                       # 生成角色文件模板
 yomi voices                                  # 查可选声音 ID
 yomi check -f lin-xia.yaml                   # 按 App 规则检查（不联网）
 yomi preview -f lin-xia.yaml                 # 和草稿角色试聊，不创建角色
+yomi image -p "雨夜书店的店主" --pick 1 --into lin-xia.yaml --as both
+                                             # AI 生成角色图片，裁好封面和头像写进角色文件（扣钻石）
+yomi video -f lin-xia.yaml                   # AI 生成动态封面视频，create 时随角色提交（扣钻石）
 yomi create -f lin-xia.yaml                  # 创建角色（提交即进入审核）
+yomi persona list                            # 你的聊天人设（主控）
+yomi persona avatar -p "短发，戴眼镜"        # AI 生成人设头像，选一张写进人设（扣钻石）
 yomi relay --telegram --set-token            # 保存自己的 Telegram bot token（实验）
 yomi relay --telegram --character <角色ID>   # Telegram 私聊 ⇄ 角色，流式回复
 yomi whoami / yomi logout
 ```
 
-默认连**生产环境**（API `https://api.yomichat.io`，网页 `https://www.yomichat.io`），这也是唯一内置的环境。`create`、`preview`、`relay` 在生产环境开始前会要求输入 `prod` 确认（非交互时加 `--confirm-prod`）。
+默认连**生产环境**（API `https://api.yomichat.io`，网页 `https://www.yomichat.io`），这也是唯一内置的环境。`create`、`preview`、`relay` 以及花钻石的 `image`、`video`、`persona avatar` 在生产环境开始前会要求输入 `prod` 确认（非交互时加 `--confirm-prod`）。
 
 测试环境由运行它的人提供，CLI 不内置它的地址：加 `--env test`（或设 `YOMI_ENV=test`），并用 `YOMI_TEST_API_ORIGIN` / `YOMI_TEST_WEB_ORIGIN` 设好它的 API 与网页地址。测试环境如有泳道，用 `--lane <名称>` 指定（加 `Lane` 请求头）。
 
@@ -43,22 +48,29 @@ pnpm verify                # 格式检查 + 类型检查 + 单元测试 + 构建
   # 另开终端，按提示 export YOMI_API_ORIGIN / YOMI_WEB_ORIGIN / YOMI_CONFIG_DIR / YOMI_CREDENTIAL_STORE
   node dist/cli.js login     # 浏览器里会打开 mock 授权页，点「授权」
   node dist/cli.js preview -f examples/character.yaml
+  node dist/cli.js image --options   # mock 也回答生图、视频、人设头像接口，花的是 mock 账号里的钻石
   ```
+
+- `test/gen-*.test.ts`、`test/relay-image.test.ts` 用同一个 mock 跑生图、视频、人设头像和 relay 的 `/image`：价格与余额确认、余额不足、明确拒绝、结果未知后用同一个请求 ID 重发、按张退款与「退款中 / 已退回」，下载都写到临时目录。
 
 ## 命令
 
-| 命令                                  | 说明                                                                                                                                                                                                                    |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `login [--no-browser] [--timeout 秒]` | 网页授权登录。终端和网页显示同一个确认码，一致再点「授权」。CLI 建立自己的会话，不影响 App 和网页的登录                                                                                                                 |
-| `logout`                              | 撤销服务端会话并删除本机凭证                                                                                                                                                                                            |
-| `whoami`                              | 当前账号、邮箱、钻石、凭证存放位置                                                                                                                                                                                      |
-| `init [文件] [--force]`               | 写角色文件模板                                                                                                                                                                                                          |
-| `check -f 文件`                       | 本地检查（必填、长度、声音配比、标签数），不联网                                                                                                                                                                        |
-| `voices [--json]`                     | 声音目录（`ugc/voice/catalog`）                                                                                                                                                                                         |
-| `tags [--query 词] [--json]`          | 标签目录（`npc/list_ugc_tags`，自动翻页）                                                                                                                                                                               |
-| `create -f 文件`                      | 创建角色。`--dry-run` 只打印请求体；`--new` 同一内容再建一个；`--accept-declaration` 非交互确认声明                                                                                                                     |
-| `preview -f 文件`                     | 预演。`-m 消息`（可重复）非交互发送；`--allow-paid` 非交互允许付费；`--reply-timeout 秒`                                                                                                                                |
-| `relay --telegram`                    | 自己的 Telegram bot 私聊 ⇄ 已发布角色（实验）。配对码只给本人，默认不花钻石，付费需 `--max-spend`（本机累计上限）与 Telegram 里 `/budget` 两道确认；`--install-service` 装成后台服务。见 [docs/relay.md](docs/relay.md) |
+| 命令                                  | 说明                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `login [--no-browser] [--timeout 秒]` | 网页授权登录。终端和网页显示同一个确认码，一致再点「授权」。CLI 建立自己的会话，不影响 App 和网页的登录                                                                                                                                                                                                                     |
+| `logout`                              | 撤销服务端会话并删除本机凭证                                                                                                                                                                                                                                                                                                |
+| `whoami`                              | 当前账号、邮箱、钻石、凭证存放位置                                                                                                                                                                                                                                                                                          |
+| `init [文件] [--force]`               | 写角色文件模板                                                                                                                                                                                                                                                                                                              |
+| `check -f 文件`                       | 本地检查（必填、长度、声音配比、标签数），不联网                                                                                                                                                                                                                                                                            |
+| `voices [--json]`                     | 声音目录（`ugc/voice/catalog`）                                                                                                                                                                                                                                                                                             |
+| `tags [--query 词] [--json]`          | 标签目录（`npc/list_ugc_tags`，自动翻页）                                                                                                                                                                                                                                                                                   |
+| `create -f 文件`                      | 创建角色。`--dry-run` 只打印请求体；`--new` 同一内容再建一个；`--accept-declaration` 非交互确认声明                                                                                                                                                                                                                         |
+| `preview -f 文件`                     | 预演。`-m 消息`（可重复）非交互发送；`--allow-paid` 非交互允许付费；`--reply-timeout 秒`                                                                                                                                                                                                                                    |
+| `image -p 描述`                       | AI 生成角色图片，按张扣钻石。下载原图并裁好封面（1:2，720×1440）和头像（1:1，512×512）JPEG，默认存到 `./yomi-media`（`--out`）；`--pick N --into 文件 --as cover\|avatar\|both` 写进角色文件；`--options` 看模型和单价；`--resume` 继续或重发，`--resume ID --forget` 放弃跟踪。见 [docs/generation.md](docs/generation.md) |
+| `video -f 文件`                       | AI 生成动态封面或介绍视频（`--as`），按报价扣钻石。结果记在这个角色文件下，只随第一次 `create` 的角色提交（`preview` 不带）；`--options`、`--list`、`--resume`                                                                                                                                                              |
+| `persona list`                        | 聊天人设（主控）列表：ID、名字、头像、当前 / 默认                                                                                                                                                                                                                                                                           |
+| `persona avatar -p 描述`              | AI 生成人设头像，按成功的张数扣钻石。选一张写进人设：`--persona ID`、`--new --name --gender --age`，或默认当前使用的人设；`--pick N`、`--resume`、`--create-again`                                                                                                                                                          |
+| `relay --telegram`                    | 自己的 Telegram bot 私聊 ⇄ 已发布角色（实验）。配对码只给本人，默认不花钻石，付费需 `--max-spend`（本机累计上限）与 Telegram 里 `/budget` 两道确认；`--install-service` 装成后台服务。见 [docs/relay.md](docs/relay.md)                                                                                                     |
 
 全局：`--env prod|test`（默认 prod）、`--lane 名称`（仅测试环境）、`--debug`（请求日志，凭证脱敏）。环境变量：`YOMI_ENV`、`YOMI_LANE`、`YOMI_TEST_API_ORIGIN` / `YOMI_TEST_WEB_ORIGIN`（测试环境地址）、`YOMI_API_ORIGIN` / `YOMI_WEB_ORIGIN`（指向 mock 或本地网页构建；这样的运行不算生产）、`YOMI_CONFIG_DIR`、`YOMI_CREDENTIAL_STORE=auto|keychain|file`、`YOMI_LANG`、`NO_COLOR`。
 
@@ -83,7 +95,7 @@ YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)。规则�
 | `cover`                            | 必填，形象图 1:2（App 为 720×1440），JPEG / PNG / WebP ≤ 20 MB。也可写 `{ upload_id }`（已审核通过）或 `{ asset_id }`     |
 | `avatar`                           | 必填，头像 1:1（App 为 512×512）                                                                                          |
 
-CLI 不裁剪、不转码，按比例检查后原样上传（误差 2%），请先裁好。18+ 与版权声明不写在文件里，每次 `create` / `preview` 时确认。
+`create` / `preview` 不裁剪、不转码，按比例检查后原样上传（误差 2%），请先裁好；`yomi image` 生成的图会裁成符合这两项的 JPEG。18+ 与版权声明不写在文件里，每次 `create` / `preview` 时确认。
 
 ## 创建与预演的流程（与 App 相同）
 
@@ -92,12 +104,24 @@ CLI 不裁剪、不转码，按比例检查后原样上传（误差 2%），请�
 - 创建即生成审核中的版本，无需再提交；审核通过后才公开。
 - 服务端同步做文本审核：`42201` 未通过（改文本再试）、`50301` 暂不可用（稍后再试）。
 - 网络错误时结果未知，再次运行会重发**当时冻结的请求**（同一请求号，服务端去重，不会重复创建）。同一文件内容创建成功后再运行会提示已创建，`--new` 才会再建一个。
+- 这个角色文件用 `yomi video` 生成过视频时，一起提交（动态封面 / 介绍视频，选用最新一条）；预演不带视频。见 [docs/generation.md](docs/generation.md#视频怎样挂到角色上)。
 
 **preview**：同样先检查、确认声明、上传审核图片 → `ugc/begin_ugc_draft`（每个角色文件一次，本地草稿号 `draft_<32 hex>`）→ `ugc/prepare_ugc_preview`（递增的入口号 `pv2_…`，每次进入新 CID，免费额度属于草稿不重置）→ 显示免费条数和开场白 → `conversation/send_message`（`preview_cid`）发送，回复经长连接（业务类型 5、purpose UgcPreview）流式显示；长连接不可用时改读 `ugc/list_ugc_preview_messages` → 退出时 `ugc/close_ugc_preview`。预演不会出现在正式聊天里。
 
 交互命令：`/quota` 免费条数，`/history` 本次记录，`/quit` 退出（Ctrl+C / Ctrl+D 亦可）。
 
 免费条数用完后：CLI 显示提示和钻石余额，输入 `yes` 才按标准费率付费发送（同一会话只问一次，与 App 一致）；非交互需 `--allow-paid`。钻石不足会提示去 App 或网页充值。
+
+## AI 生成（花钻石）
+
+`yomi image`（角色封面和头像）、`yomi video`（动态封面、介绍视频）、`yomi persona avatar`（聊天人设头像）和 relay 的 `/image` 都可能花钻石，规则相同（relay 的 `/image` 用 relay 的预算代替输入 `yes`）：
+
+- 先显示价格和钻石余额；读不到余额或余额不够就不发请求。
+- 输入 `yes` 才扣费，非交互加 `--accept-price`；生产环境还要输入 `prod`（或 `--confirm-prod`）。
+- 每个命令只有一个请求扣费，发出前连同请求 ID 存到本机。按张（视频按条）计费，失败或没通过内容检查的那份单独退款（人设头像只按成功的张数计费）；只有退款完成才说「已退回」，处理中说「退款中」。
+- 结果未知（网络中断、超时、看不懂的回答）时不自动重发：用 `--resume <请求 ID>` 以同一个请求 ID 和请求体重发，服务端去重，最多扣一次。CLI 不会自己重试付费请求；停止查看也不会取消或退款。
+
+每个命令的流程、结果文件、视频怎样随角色提交，见 [docs/generation.md](docs/generation.md)。
 
 ## 登录与安全
 
@@ -111,23 +135,26 @@ CLI 不裁剪、不转码，按比例检查后原样上传（误差 2%），请�
 
 ## 代码结构
 
-| 路径            | 内容                                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `src/cli.ts`    | 参数解析、帮助、错误输出                                                                                      |
-| `src/commands/` | 各命令（login/logout/whoami、create、preview、voices/tags/init/check）                                        |
-| `src/core/`     | 环境、签名请求客户端 `api.ts`（签名方式与 Yomi 网页端相同）、i64 JSON、凭证存储、本地状态、脱敏、终端交互     |
-| `src/auth/`     | 回环回调、浏览器授权、Firebase token 换会话                                                                   |
-| `src/ugc/`      | 角色文件解析与规则、图片检查与上传审核、声音/标签目录、创建、预演                                             |
-| `src/im/`       | 长连接：packet / Thrift 编解码（与 Yomi 客户端的长连接编码一致），预演与 relay 共用的连接（重连、补偿、去重） |
-| `src/chat/`     | 正式聊天接口（发消息、历史、补偿拉取、角色资料、价格、举报）                                                  |
-| `src/relay/`    | Telegram relay：Bot API 客户端、配对、流式呈现、预算、策略、状态、后台服务                                    |
-| `src/mock/`     | mock 网关与授权页、mock Telegram Bot API                                                                      |
-| `test/`         | 单元测试与 mock 端到端测试                                                                                    |
+| 路径            | 内容                                                                                                                                                                                                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/cli.ts`    | 参数解析、帮助、错误输出                                                                                                                                                                                                                                             |
+| `src/commands/` | 各命令（login/logout/whoami、create、preview、voices/tags/init/check、image、video、persona、relay）                                                                                                                                                                 |
+| `src/core/`     | 环境、签名请求客户端 `api.ts`（签名方式与 Yomi 网页端相同）、i64 JSON、凭证存储、本地状态（多个进程共用，加锁写入）、脱敏、终端交互                                                                                                                                  |
+| `src/auth/`     | 回环回调、浏览器授权、Firebase token 换会话                                                                                                                                                                                                                          |
+| `src/ugc/`      | 角色文件解析与规则、图片检查与上传审核、声音/标签目录、创建、预演                                                                                                                                                                                                    |
+| `src/im/`       | 长连接：packet / Thrift 编解码（与 Yomi 客户端的长连接编码一致），预演与 relay 共用的连接（重连、补偿、去重）                                                                                                                                                        |
+| `src/chat/`     | 正式聊天接口（发消息、历史、补偿拉取、角色资料、价格、举报）                                                                                                                                                                                                         |
+| `src/gen/`      | AI 生成：共用的价格与余额确认、拒绝与结果未知的判断、轮询和下载（`common.ts`）；角色图片（`ugcImage.ts`）、角色视频（`ugcVideo.ts`）、人设头像（`persona.ts`）、对话配图（`chatImage.ts`，relay 的 `/image`）；纯 JavaScript 的 JPEG / PNG 裁剪与编码（`raster.ts`） |
+| `src/relay/`    | Telegram relay：Bot API 客户端、配对、流式呈现、预算、策略、状态、后台服务、`/image`                                                                                                                                                                                 |
+| `src/mock/`     | mock 网关与授权页、mock Telegram Bot API                                                                                                                                                                                                                             |
+| `src/mock/gen/` | 生成接口的 mock：角色图片、角色视频、对话配图、人设头像（价格、扣费与退款、请求 ID 去重、结果未知的情形）                                                                                                                                                            |
+| `test/`         | 单元测试与 mock 端到端测试                                                                                                                                                                                                                                           |
 
 照 Yomi 客户端协议实现的文件（请求签名、长连接编解码）在文件头注明；服务端协议变动时需要同步。
 
 ## 暂不支持
 
 - 群聊（Multi characters）创建与预演：第二步，接口为 `group_chat/*`。
-- AI 生图、动态封面、介绍视频、草稿箱、编辑已有角色（`update_ugc_character`）。
+- 草稿箱、编辑已有角色（`update_ugc_character`）：已创建的角色不能在 CLI 里换封面、头像或视频，`yomi video` 的结果只在创建时提交。
+- 上传自己的视频作为动态封面或介绍视频（只能用 `yomi video` 生成）。
 - 预演语音播放。

@@ -1,6 +1,7 @@
 import type { Gateway } from '../core/api.js';
 import { encodeBody, type Json, idOf, RawBody } from '../core/json.js';
 import { type LocalState, sha256 } from '../core/state.js';
+import { markVideosBound } from '../gen/ugcVideo.js';
 import { call, UgcFailure, wireIds } from './api.js';
 import { contentForSubmission, type ResolvedCharacter } from './character.js';
 
@@ -71,7 +72,9 @@ export async function submitCharacter(
   const record = state.submission(key);
   const pending = record?.pending ?? null;
   const content = contentForSubmission(character, true);
-  const digest = sha256(JSON.stringify(content));
+  // The file's own content: the videos go with the first character only (see markVideosBound), so
+  // they are not part of what tells an unchanged file from an edited one.
+  const digest = sha256(JSON.stringify(contentForSubmission({ ...character, video: null }, true)));
   if (!pending && record?.npcId && !options.fresh && record.version === digest)
     throw new AlreadyCreated(record.npcId);
   let requestId: string;
@@ -111,6 +114,8 @@ export async function submitCharacter(
     throw error;
   }
   const outcome = readCharacter(result);
+  // The sent body carried this draft's videos (features.draft_id): they now belong to this character.
+  if (body.includes(draft.draftId)) markVideosBound(state, draft.draftId, outcome.npcId);
   // `version` here keeps the content digest: the same file again is recognized as created.
   state.setSubmission(key, {
     npcId: outcome.npcId,

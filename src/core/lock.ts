@@ -168,6 +168,42 @@ export async function withFileLock<T>(
   }
 }
 
+/** Blocks this thread for `ms` (a synchronous wait between lock attempts). */
+function pause(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * `withFileLock` for short synchronous work (reading and rewriting a small state file): the same
+ * lock file rules, waiting with a blocking pause. `run` must not take the same lock again.
+ */
+export function withFileLockSync<T>(path: string, run: () => T, options: LockOptions = {}): T {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const staleMs = options.staleMs ?? 15_000;
+  const pollMs = options.pollMs ?? 10;
+  const token = randomBytes(12).toString('hex');
+  ensurePrivateDir(dirname(path));
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (tryCreate(path, token)) break;
+    const holder = readHolder(path);
+    const stale = holder
+      ? !processAlive(holder.pid) || Date.now() - holder.at > staleMs || fromBeforeBoot(holder.at)
+      : fileAge(path) > staleMs;
+    if (stale) {
+      takeOver(path, holder?.token ?? null);
+      continue;
+    }
+    if (Date.now() > deadline) throw new LockTimeout(path);
+    pause(pollMs + Math.floor(Math.random() * pollMs));
+  }
+  try {
+    return run();
+  } finally {
+    removeIfHeldBy(path, token);
+  }
+}
+
 /**
  * A lock held for a whole process (one `yomi relay` per bot): taken without waiting, kept until
  * `release()` or exit. Returns null with the holder's pid when another live process has it.
