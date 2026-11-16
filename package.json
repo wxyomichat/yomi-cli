@@ -1,0 +1,41 @@
+{
+  "name": "yomi-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yomi 命令行工具：网页授权登录、创建角色、终端里试聊草稿角色",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.4 <23"
+  },
+  "bin": {
+    "yomi": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs",
+    "examples"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "mock": "pnpm build && node dist/mock/main.js",
+    "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@types/ws": "8.18.1",
+    "prettier": "3.8.0",
+    "typescript": "5.4.5",
+    "vitest": "4.1.9",
+    "ws": "8.18.3"
+  }
+}
