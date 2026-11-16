@@ -180,7 +180,12 @@ export async function sendMessage(gateway: Gateway, request: SendRequest): Promi
   if (!mid || !streamId)
     throw new ApiError(
       ApiError.transport,
-      tr('发送回包缺少 mid 或 stream_id', 'The send response has no mid or stream_id'),
+      tr(
+        '发送回包缺少 mid 或 stream_id',
+        'The send response has no mid or stream_id',
+        'La respuesta del envío no tiene mid ni stream_id',
+        'A resposta do envio não tem mid nem stream_id',
+      ),
       result,
       'conversation/send_message',
     );
@@ -301,7 +306,7 @@ export async function characterProfile(gateway: Gateway, npcId: string): Promise
   const name = text(data.name).trim();
   return {
     npcId: optionalId(data.npc_id) || npcId,
-    name: name || tr('角色', 'Character'),
+    name: name || tr('角色', 'Character', 'Personaje', 'Personagem'),
     group: data.worldview_info !== undefined && data.worldview_info !== null,
     openingStatus: count(data.opening_status),
     openingParagraphs: list(data.opening_paragraphs).map(parseParagraph),

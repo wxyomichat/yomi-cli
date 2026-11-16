@@ -67,6 +67,8 @@ export function requireSignIn(context: Context): Credential {
       tr(
         `还没有登录${context.env.name === 'prod' ? '' : '测试环境'}，先运行 yomi login${context.env.name === 'test' ? ' --env test' : ''}`,
         `Not signed in${context.env.name === 'prod' ? '' : ' to the test environment'} yet; run yomi login${context.env.name === 'test' ? ' --env test' : ''} first`,
+        `Aún no has iniciado sesión${context.env.name === 'prod' ? '' : ' en el entorno de pruebas'}; primero ejecuta yomi login${context.env.name === 'test' ? ' --env test' : ''}`,
+        `Você ainda não entrou${context.env.name === 'prod' ? '' : ' no ambiente de teste'}; execute yomi login${context.env.name === 'test' ? ' --env test' : ''} primeiro`,
       ),
     );
   return credential;

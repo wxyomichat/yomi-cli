@@ -56,7 +56,12 @@ export function sessionEnded(error: unknown): boolean {
 
 export class NotSignedIn extends Error {
   constructor(
-    message = tr('还没有登录，先运行 yomi login', 'Not signed in yet; run yomi login first'),
+    message = tr(
+      '还没有登录，先运行 yomi login',
+      'Not signed in yet; run yomi login first',
+      'Aún no has iniciado sesión; primero ejecuta yomi login',
+      'Você ainda não entrou; execute yomi login primeiro',
+    ),
   ) {
     super(message);
     this.name = 'NotSignedIn';
@@ -209,7 +214,12 @@ export class Gateway {
       this.debug(`${init.method} ${path} → transport error ${String(error)}`);
       throw new ApiError(
         ApiError.transport,
-        tr('网络请求失败', 'Network request failed'),
+        tr(
+          '网络请求失败',
+          'Network request failed',
+          'Falló la solicitud de red',
+          'Falha na solicitação de rede',
+        ),
         null,
         path,
       );
@@ -239,7 +249,12 @@ export class Gateway {
     if (!result)
       throw new ApiError(
         ApiError.transport,
-        tr('回包不是 JSON', 'The response is not JSON'),
+        tr(
+          '回包不是 JSON',
+          'The response is not JSON',
+          'La respuesta no es JSON',
+          'A resposta não é JSON',
+        ),
         null,
         path,
       );
@@ -317,7 +332,12 @@ export class Gateway {
       if (store && account && (!stored || stored.refreshToken === current.refreshToken))
         store.delete(account);
       throw new NotSignedIn(
-        tr('登录已失效，请重新运行 yomi login', 'Your sign-in has expired; run yomi login again'),
+        tr(
+          '登录已失效，请重新运行 yomi login',
+          'Your sign-in has expired; run yomi login again',
+          'Tu sesión expiró; vuelve a ejecutar yomi login',
+          'Seu login expirou; execute yomi login novamente',
+        ),
       );
     }
     const data = object(result.data ?? result);
@@ -326,7 +346,12 @@ export class Gateway {
     if (typeof authToken !== 'string' || typeof refreshToken !== 'string' || !authToken)
       throw new ApiError(
         ApiError.transport,
-        tr('刷新会话的回包缺少令牌', 'The session refresh response has no tokens'),
+        tr(
+          '刷新会话的回包缺少令牌',
+          'The session refresh response has no tokens',
+          'La respuesta de renovación de la sesión no trae tokens',
+          'A resposta da renovação da sessão não tem tokens',
+        ),
         null,
         'account/refresh_auth_token',
       );
@@ -338,7 +363,12 @@ export class Gateway {
       // `yomi logout` emptied the store while this refresh was out: stay signed out.
       this.credentialValue = null;
       throw new NotSignedIn(
-        tr('已退出登录，请重新运行 yomi login', 'Signed out; run yomi login again'),
+        tr(
+          '已退出登录，请重新运行 yomi login',
+          'Signed out; run yomi login again',
+          'Sesión cerrada; vuelve a ejecutar yomi login',
+          'Você saiu; execute yomi login novamente',
+        ),
       );
     }
     // Written back only over the pair this refresh started from: never over another account's
@@ -352,6 +382,8 @@ export class Gateway {
         tr(
           `保存刷新后的会话失败：${error instanceof Error ? error.message : 'error'}`,
           `Could not save the refreshed session: ${error instanceof Error ? error.message : 'error'}`,
+          `No se pudo guardar la sesión renovada: ${error instanceof Error ? error.message : 'error'}`,
+          `Não foi possível salvar a sessão renovada: ${error instanceof Error ? error.message : 'error'}`,
         ),
       );
     }

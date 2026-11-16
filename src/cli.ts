@@ -52,7 +52,7 @@ function help(): string {
   --env <prod|test>  环境，默认 prod（生产，创建和花钻石前要再确认）；test 需自己配置地址
                      （YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN）
   --lane <名称>      测试环境的泳道，加 Lane 请求头
-  --lang zh|en       输出语言（默认按 YOMI_LANG 或系统语言：zh 开头为中文，其余英文）
+  --lang zh|en|es|pt 输出语言（默认按 YOMI_LANG 或系统语言：zh 开头为中文，es 开头为西班牙语，pt 开头为葡萄牙语，其余英文）
   --debug            打印请求日志（凭证已脱敏）
   -h, --help         帮助；yomi <命令> --help 查看命令选项
   -v, --version      版本
@@ -87,12 +87,82 @@ Global options:
   --env <prod|test>  Environment, default prod (production: asks again before creating or spending gems); test
                      needs its addresses set up (YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN)
   --lane <name>      Lane in the test environment; adds the Lane request header
-  --lang zh|en       Output language (default from YOMI_LANG or the system language: zh… is Chinese, anything else English)
+  --lang zh|en|es|pt Output language (default from YOMI_LANG or the system language: zh… is Chinese, es… Spanish, pt… Portuguese, anything else English)
   --debug            Print request logs (credentials redacted)
   -h, --help         Help; yomi <command> --help shows a command's options
   -v, --version      Version
 
 Examples:
+  yomi login
+  yomi init lin-xia.yaml && yomi check -f lin-xia.yaml
+  yomi preview -f lin-xia.yaml
+  yomi create -f lin-xia.yaml
+`,
+    `yomi ${VERSION} — herramienta de línea de comandos de Yomi
+
+Uso: yomi <comando> [opciones]
+
+Comandos:
+  login                 Inicia sesión a través de la web (abre un navegador; confirmas en la página web)
+  logout                Cierra sesión; revoca y elimina las credenciales de este equipo
+  whoami                Muestra la cuenta con la sesión iniciada
+  init [archivo]        Escribe una plantilla de archivo del personaje (por defecto character.yaml)
+  check -f <archivo>    Revisa un archivo del personaje según las reglas de la app (sin conexión)
+  voices                Lista las voces disponibles
+  tags                  Lista las etiquetas disponibles
+  create -f <archivo>   Crea un personaje
+  preview -f <archivo>  Abre en la terminal una vista previa del chat con el personaje en borrador (no crea nada)
+  image -p <prompt>     Genera imágenes del personaje con IA (portada / avatar); cobra gemas por imagen
+  video -f <archivo>    Genera videos del personaje con IA (portada animada / video de presentación); cobra gemas según la cotización
+  persona list          Tus personas de chat
+  persona avatar        Genera un avatar de persona con IA
+  relay --telegram      Reenvía los chats privados con tu propio bot de Telegram a un personaje de Yomi publicado (experimental)
+
+Opciones globales:
+  --env <prod|test>     Entorno, por defecto prod (producción: vuelve a preguntar antes de crear o gastar gemas); test
+                        necesita sus direcciones configuradas (YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN)
+  --lane <nombre>       Lane en el entorno de pruebas; agrega el encabezado de solicitud Lane
+  --lang zh|en|es|pt    Idioma de salida (por defecto según YOMI_LANG o el idioma del sistema: zh… es chino, es… español, pt… portugués, cualquier otro, inglés)
+  --debug               Imprime los registros de solicitudes (credenciales ocultas)
+  -h, --help            Ayuda; yomi <comando> --help muestra las opciones de un comando
+  -v, --version         Versión
+
+Ejemplos:
+  yomi login
+  yomi init lin-xia.yaml && yomi check -f lin-xia.yaml
+  yomi preview -f lin-xia.yaml
+  yomi create -f lin-xia.yaml
+`,
+    `yomi ${VERSION} — ferramenta de linha de comando do Yomi
+
+Uso: yomi <comando> [opções]
+
+Comandos:
+  login                 Entra na sua conta pela web (abre um navegador; você confirma na página web)
+  logout                Sai da conta; revoga e apaga as credenciais desta máquina
+  whoami                Mostra a conta conectada
+  init [arquivo]        Grava um template de arquivo do personagem (padrão character.yaml)
+  check -f <arquivo>    Verifica um arquivo do personagem com as regras do app (offline)
+  voices                Lista as vozes disponíveis
+  tags                  Lista as tags disponíveis
+  create -f <arquivo>   Cria um personagem
+  preview -f <arquivo>  Abre no terminal uma prévia do chat com o personagem em rascunho (não cria nada)
+  image -p <prompt>     Gera imagens do personagem com IA (capa / avatar); cobra gemas por imagem
+  video -f <arquivo>    Gera vídeos do personagem com IA (capa animada / vídeo de apresentação); cobra gemas conforme a cotação
+  persona list          Suas personas de chat
+  persona avatar        Gera um avatar de persona com IA
+  relay --telegram      Repassa os chats privados com o seu próprio bot do Telegram para um personagem do Yomi publicado (experimental)
+
+Opções globais:
+  --env <prod|test>     Ambiente, padrão prod (produção: pergunta novamente antes de criar ou gastar gemas); test
+                        precisa dos endereços configurados (YOMI_TEST_API_ORIGIN / YOMI_TEST_WEB_ORIGIN)
+  --lane <nome>         Lane no ambiente de teste; adiciona o cabeçalho de solicitação Lane
+  --lang zh|en|es|pt    Idioma de saída (padrão segundo YOMI_LANG ou o idioma do sistema: zh… é chinês, es… espanhol, pt… português, qualquer outro, inglês)
+  --debug               Imprime os logs das solicitações (credenciais ocultadas)
+  -h, --help            Ajuda; yomi <comando> --help mostra as opções de um comando
+  -v, --version         Versão
+
+Exemplos:
   yomi login
   yomi init lin-xia.yaml && yomi check -f lin-xia.yaml
   yomi preview -f lin-xia.yaml
@@ -114,6 +184,16 @@ function commandHelp(): Record<string, string> {
   gets its own session and does not affect your sign-in on the app or the web.
   --no-browser   Only print the authorization URL; do not open a browser
   --timeout      Seconds to wait for authorization, default 300`,
+      `yomi login [--no-browser] [--timeout segundos]
+  Abre la página de autorización en el sitio web de Yomi; cuando los códigos de confirmación coincidan, haz clic en
+  "Autorizar". La CLI obtiene su propia sesión y no afecta tu sesión iniciada en la app ni en la web.
+  --no-browser   Solo imprime la URL de autorización; no abre un navegador
+  --timeout      Segundos de espera para la autorización, por defecto 300`,
+      `yomi login [--no-browser] [--timeout segundos]
+  Abre a página de autorização no site do Yomi; quando os códigos de confirmação forem iguais, clique em
+  "Autorizar". A CLI cria a própria sessão e não afeta o seu login no app nem na web.
+  --no-browser   Só imprime a URL de autorização; não abre o navegador
+  --timeout      Segundos de espera pela autorização, padrão 300`,
     ),
     create: tr(
       `yomi create -f <文件> [字段选项] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
@@ -133,6 +213,24 @@ ${'  '}字段选项（覆盖文件里的值）：--name --gender --description -
   --confirm-prod        Confirm explicitly when running non-interactively in production
 ${'  '}Field options (override the values in the file): --name --gender --description --opening --background
   --visibility --voice --tag (repeatable) --cover --avatar`,
+      `yomi create -f <archivo> [opciones de campo] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
+  Crea un personaje a partir del archivo (mismas reglas de campos que la app). Primero confirma la declaración
+  de 18+ y derechos de autor; luego sube las imágenes para revisión y envía.
+  --accept-declaration  Acepta la declaración de forma explícita al ejecutar sin interacción
+  --dry-run             Solo imprime el cuerpo de la solicitud; no crea nada (las imágenes igual se suben para revisión)
+  --new                 Crea otro personaje nuevo cuando el contenido de este archivo ya se creó
+  --confirm-prod        Confirma de forma explícita al ejecutar sin interacción en producción
+${'  '}Opciones de campo (reemplazan los valores del archivo): --name --gender --description --opening --background
+  --visibility --voice --tag (repetible) --cover --avatar`,
+      `yomi create -f <arquivo> [opções de campo] [--accept-declaration] [--dry-run] [--new] [--confirm-prod]
+  Cria um personagem a partir do arquivo (mesmas regras de campos do app). Primeiro confirma a declaração
+  de 18+ e direitos autorais; depois envia as imagens para revisão e submete.
+  --accept-declaration  Aceita a declaração explicitamente ao executar de forma não interativa
+  --dry-run             Só imprime o corpo da solicitação; não cria nada (as imagens ainda são enviadas para revisão)
+  --new                 Cria outro personagem novo quando o conteúdo deste arquivo já foi criado
+  --confirm-prod        Confirma explicitamente ao executar de forma não interativa em produção
+${'  '}Opções de campo (substituem os valores do arquivo): --name --gender --description --opening --background
+  --visibility --voice --tag (repetível) --cover --avatar`,
     ),
     preview: tr(
       `yomi preview -f <文件> [字段选项] [-m 消息 ...] [--allow-paid] [--accept-declaration]
@@ -150,6 +248,24 @@ ${'  '}Field options (override the values in the file): --name --gender --descri
   --allow-paid          Non-interactive: keep sending, paid, after the free messages run out
   --reply-timeout       Seconds to wait for a reply, default 90; after that, read the message history instead
   --accept-declaration  Accept the declaration explicitly when running non-interactively`,
+      `yomi preview -f <archivo> [opciones de campo] [-m mensaje ...] [--allow-paid] [--accept-declaration]
+  Abre una sesión temporal de vista previa con el borrador del archivo (igual que "Vista previa" en la app) y
+  muestra las respuestas en tiempo real. Primero muestra los mensajes gratis que otorga el servidor; cuando se
+  acaban, se cobran gemas por cada mensaje con la tarifa estándar, y debes escribir yes para confirmar antes de
+  cualquier cobro.
+  -m, --message         Sin interacción: envía estos mensajes en orden y sale cuando llegan las respuestas
+  --allow-paid          Sin interacción: sigue enviando, con pago, cuando se acaban los mensajes gratis
+  --reply-timeout       Segundos de espera para una respuesta, por defecto 90; después, lee el historial de mensajes
+  --accept-declaration  Acepta la declaración de forma explícita al ejecutar sin interacción`,
+      `yomi preview -f <arquivo> [opções de campo] [-m mensagem ...] [--allow-paid] [--accept-declaration]
+  Abre uma sessão temporária de prévia com o rascunho do arquivo (o mesmo que "Prévia" no app) e mostra as
+  respostas em tempo real. Primeiro mostra as mensagens grátis que o servidor concede; quando elas acabam, cada
+  mensagem é cobrada em gemas pela tarifa padrão, e você precisa digitar yes para confirmar antes de qualquer
+  cobrança.
+  -m, --message         Sem interação: envia essas mensagens em ordem e sai quando as respostas chegarem
+  --allow-paid          Sem interação: continua enviando, pago, depois que as mensagens grátis acabarem
+  --reply-timeout       Segundos de espera por uma resposta, padrão 90; depois disso, lê o histórico de mensagens
+  --accept-declaration  Aceita a declaração explicitamente ao executar de forma não interativa`,
     ),
     image: tr(
       `yomi image -p <描述> [--count N] [--model ID] [--style ID] [--reference 图片] [选项]
@@ -188,6 +304,48 @@ ${'  '}Field options (override the values in the file): --name --gender --descri
                        command charges again)
   --accept-price       Accept the shown price when running non-interactively
   --json               Output JSON`,
+      `yomi image -p <prompt> [--count N] [--model ID] [--style ID] [--reference imagen] [opciones]
+  Genera imágenes del personaje con IA, descarga los originales y recorta una portada (1:2) y un avatar (1:1).
+  Primero muestra el precio unitario, la cantidad, el total y el saldo; las gemas se cobran solo después de que
+  escribas yes (o --accept-price). Una imagen que no se genera se reembolsa automáticamente.
+  --options            Lista los modelos, estilos, relaciones de aspecto y precios (sin cobro)
+  --count N            Cantidad de imágenes (1–4, por defecto 4)
+  --model / --style    Modelo y estilo (por defecto: el primer modelo, sin estilo)
+  --ratio R            Relación de aspecto (por defecto 9:16; si no existe, la primera)
+  --reference imagen   Imagen de referencia (primero se sube para revisión)
+  --out carpeta        Dónde guardar, por defecto ./yomi-media
+  --pick N --into archivo --as cover|avatar|both
+                       Escribe la imagen recortada número N en cover/avatar del archivo del personaje (conserva los
+                       comentarios)
+  --resume lote|solicitud
+                       Continúa una ejecución anterior: lo que ya se aceptó solo se consulta y descarga, sin volver
+                       a cobrar; una solicitud con resultado desconocido se reenvía tal cual (mismo ID de
+                       solicitud, se cobra una vez como máximo)
+  --resume ID --forget Deja de seguir esta solicitud o lote en este equipo (no cancela ni reembolsa; el
+                       mismo comando vuelve a cobrar)
+  --accept-price       Acepta el precio mostrado al ejecutar sin interacción
+  --json               Salida en JSON`,
+      `yomi image -p <prompt> [--count N] [--model ID] [--style ID] [--reference imagem] [opções]
+  Gera imagens do personagem com IA, baixa os originais e recorta uma capa (1:2) e um avatar (1:1).
+  Primeiro mostra o preço unitário, a quantidade, o total e o saldo; as gemas só são cobradas depois que você
+  digitar yes (ou --accept-price). Uma imagem que falha ao ser gerada é reembolsada automaticamente.
+  --options            Lista os modelos, estilos, proporções e preços (sem cobrança)
+  --count N            Número de imagens (1–4, padrão 4)
+  --model / --style    Modelo e estilo (padrão: o primeiro modelo, sem estilo)
+  --ratio R            Proporção (padrão 9:16; se não houver, a primeira)
+  --reference imagem   Imagem de referência (enviada para revisão primeiro)
+  --out pasta          Onde salvar, padrão ./yomi-media
+  --pick N --into arquivo --as cover|avatar|both
+                       Grava a imagem recortada número N em cover/avatar do arquivo do personagem (mantém os
+                       comentários)
+  --resume lote|solicitação
+                       Continua uma execução anterior: o que já foi aceito só é consultado e baixado, sem cobrar
+                       de novo; uma solicitação com resultado desconhecido é reenviada como está (mesmo ID da
+                       solicitação, cobrada no máximo uma vez)
+  --resume ID --forget Para de acompanhar esta solicitação ou lote nesta máquina (não cancela nem reembolsa;
+                       o mesmo comando cobra de novo)
+  --accept-price       Aceita o preço mostrado ao executar de forma não interativa
+  --json               Saída em JSON`,
     ),
     video: tr(
       `yomi video -f <角色文件> [--template ID | --prompt 描述] [--duration 秒] [选项]
@@ -220,6 +378,40 @@ ${'  '}Field options (override the values in the file): --name --gender --descri
                        request with an unknown outcome is resent as is (same request ID, charged once at most)
   --out dir            Where to save the preview video, default ./yomi-media
   --accept-price / --confirm-prod / --json`,
+      `yomi video -f <archivo del personaje> [--template ID | --prompt texto] [--duration segundos] [opciones]
+  Genera un video para el personaje con IA. Por defecto, el primer fotograma es la portada del personaje
+  (recortada a 9:16): la CLI lo sube, obtiene una cotización y muestra el precio y el saldo; la tarea se crea y
+  las gemas se cobran solo después de que escribas yes (o --accept-price); si falla, se reembolsa
+  automáticamente. El resultado se guarda en este equipo y se envía la próxima vez que ejecutes yomi create con
+  este archivo del personaje (yomi preview no incluye el video).
+  --options            Lista las plantillas, duraciones y precios de lista (sin cobro)
+  --template ID        Plantilla; sin ella, un video personalizado (--prompt texto)
+  --duration segundos  Duración (por defecto: la de la plantilla o la del video personalizado)
+  --frame imagen       Tu propio primer fotograma (JPEG/PNG, recortado a 9:16)
+  --as dynamic-cover|intro-video   Usar como portada animada (por defecto) o como video de presentación
+  --list               Lista las tareas de video generadas para este archivo del personaje
+  --resume ID          Continúa una tarea anterior: lo que ya se aceptó solo se consulta, sin volver a cobrar;
+                       una solicitud con resultado desconocido se reenvía tal cual (mismo ID de solicitud, se
+                       cobra una vez como máximo)
+  --out carpeta        Dónde guardar el video de vista previa, por defecto ./yomi-media
+  --accept-price / --confirm-prod / --json`,
+      `yomi video -f <arquivo do personagem> [--template ID | --prompt texto] [--duration segundos] [opções]
+  Gera um vídeo para o personagem com IA. Por padrão, o primeiro quadro é a capa do personagem (recortada para
+  9:16): a CLI a envia, obtém uma cotação e mostra o preço e o saldo; a tarefa só é criada e as gemas só são
+  cobradas depois que você digitar yes (ou --accept-price); uma falha é reembolsada automaticamente. O
+  resultado fica salvo nesta máquina e é enviado na próxima vez que você executar yomi create com este arquivo do
+  personagem (o yomi preview não inclui o vídeo).
+  --options            Lista os templates, durações e preços de tabela (sem cobrança)
+  --template ID        Template; sem ele, um vídeo personalizado (--prompt texto)
+  --duration segundos  Duração (padrão: a do template ou a do vídeo personalizado)
+  --frame imagem       Seu próprio primeiro quadro (JPEG/PNG, recortado para 9:16)
+  --as dynamic-cover|intro-video   Usar como capa animada (padrão) ou como vídeo de apresentação
+  --list               Lista as tarefas de vídeo geradas para este arquivo do personagem
+  --resume ID          Continua uma tarefa anterior: o que já foi aceito só é consultado, sem cobrar de novo;
+                       uma solicitação com resultado desconhecido é reenviada como está (mesmo ID da
+                       solicitação, cobrada no máximo uma vez)
+  --out pasta          Onde salvar a prévia do vídeo, padrão ./yomi-media
+  --accept-price / --confirm-prod / --json`,
     ),
     persona: tr(
       `yomi persona list
@@ -250,6 +442,40 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name name --gender male|
                        request with an unknown outcome is resent as is (same request ID, charged once at most)
   --create-again       When creating the new persona had an unknown outcome and persona list shows it is not
                        there, create it again non-interactively
+  --accept-price / --confirm-prod / --json`,
+      `yomi persona list
+yomi persona avatar -p <prompt> [--persona ID | --new --name nombre --gender male|female|other --age N] [opciones]
+  Genera avatares de persona de chat con IA; elige uno para escribirlo en la persona. Primero muestra el precio
+  unitario, la cantidad, el total y el saldo; las gemas se cobran solo después de que escribas yes. Una imagen
+  que falla o no pasa la verificación de contenido no se cobra.
+  --options            Lista los modelos y estilos disponibles (sin cobro)
+  --count N            Cantidad de imágenes (por defecto: el límite del servidor)
+  --reference imagen   Imagen de referencia
+  --pick N             Usa directamente la imagen N; sin esto, eliges de forma interactiva (sin interacción solo
+                       descarga, no escribe nada)
+  --out carpeta        Dónde guardar, por defecto ./yomi-media
+  --resume ID          Continúa una generación anterior: lo que ya se aceptó solo se consulta, sin volver a
+                       cobrar; una solicitud con resultado desconocido se reenvía tal cual (mismo ID de
+                       solicitud, se cobra una vez como máximo)
+  --create-again       Cuando crear la persona nueva tuvo un resultado desconocido y persona list muestra que no
+                       está, la crea de nuevo sin interacción
+  --accept-price / --confirm-prod / --json`,
+      `yomi persona list
+yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|female|other --age N] [opções]
+  Gera avatares de persona de chat com IA; escolha um para gravar na persona. Primeiro mostra o preço unitário,
+  a quantidade, o total e o saldo; as gemas só são cobradas depois que você digitar yes. Uma imagem que falha
+  ou não passa na verificação de conteúdo não é cobrada.
+  --options            Lista os modelos e estilos disponíveis (sem cobrança)
+  --count N            Número de imagens (padrão: o limite do servidor)
+  --reference imagem   Imagem de referência
+  --pick N             Usa a imagem N diretamente; sem isso, você escolhe de forma interativa (uma execução
+                       não interativa só baixa, não grava nada)
+  --out pasta          Onde salvar, padrão ./yomi-media
+  --resume ID          Continua uma geração anterior: o que já foi aceito só é consultado, sem cobrar de novo;
+                       uma solicitação com resultado desconhecido é reenviada como está (mesmo ID da
+                       solicitação, cobrada no máximo uma vez)
+  --create-again       Quando a criação da nova persona teve resultado desconhecido e persona list mostra que
+                       ela não está lá, cria novamente de forma não interativa
   --accept-price / --confirm-prod / --json`,
     ),
     relay: tr(
@@ -292,21 +518,74 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name name --gender male|
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
   --no-drafts           Edit messages instead of streaming drafts
   --confirm-prod        Confirm explicitly when running non-interactively in production`,
+      `yomi relay --telegram [--character ID] [--max-spend gemas] [opciones]
+  Con el bot que creaste con @BotFather, reenvía los mensajes que tú mismo le envías en un chat privado de
+  Telegram a un personaje de Yomi y muestra las respuestas en tiempo real. Solo atiende al dueño vinculado. Por
+  defecto no gasta gemas: para pagar hay que fijar un presupuesto con /budget en Telegram y confirmarlo con un
+  botón, y el total nunca supera el límite de gasto local (--max-spend). Hasta que el servidor admita "solo
+  mensajes gratis", no se envía nada sin presupuesto. Consulta docs/relay.md.
+  --set-token           Configura o reemplaza el token del bot (se escribe en la terminal, oculto; o con --token-stdin)
+  --token-stdin         Lee el token de la entrada estándar (nunca de argumentos ni de variables de entorno)
+  --pair                Vincula de nuevo (muestra un código de vinculación nuevo)
+  --character ID        El personaje con el que empezar
+  --max-spend cantidad  Límite de gasto local: las gemas que relay puede gastar en total en este equipo, por defecto 0 (sin gemas)
+  --reset-spend         Reinicia el total acumulado contra el límite de gasto local
+  --allow-file-store    Sin llavero del sistema, permite guardar el token y la sesión en un archivo 0600
+  --install-service     Instala como servicio en segundo plano (macOS launchd / Linux systemd --user); vincula primero
+  --uninstall-service   Detiene y elimina el servicio en segundo plano
+  --service-status      Muestra el estado del servicio en segundo plano
+  --forget              Elimina el token del bot y la vinculación guardados en este equipo
+  --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
+  --no-drafts           Edita los mensajes en lugar de transmitir borradores
+  --confirm-prod        Confirma de forma explícita al ejecutar sin interacción en producción`,
+      `yomi relay --telegram [--character ID] [--max-spend gemas] [opções]
+  Com o bot que você criou com o @BotFather, repassa as mensagens que você mesmo envia a ele em um chat privado
+  do Telegram para um personagem do Yomi e mostra as respostas em tempo real. Atende só o dono pareado. Por
+  padrão não gasta gemas: para pagar é preciso definir um orçamento com /budget no Telegram e confirmá-lo com
+  um botão, e o total nunca passa do limite de gastos local (--max-spend). Até o servidor oferecer suporte a
+  "só mensagens grátis", nada é enviado sem orçamento. Veja docs/relay.md.
+  --set-token           Define ou troca o token do bot (digitado no terminal, oculto; ou com --token-stdin)
+  --token-stdin         Lê o token da entrada padrão (nunca de argumentos nem de variáveis de ambiente)
+  --pair                Pareia novamente (mostra um novo código de pareamento)
+  --character ID        O personagem inicial
+  --max-spend quantia   Limite de gastos local: as gemas que o relay pode gastar no total nesta máquina, padrão 0 (sem gemas)
+  --reset-spend         Zera o total contado no limite de gastos local
+  --allow-file-store    Sem Keychain do sistema, permite guardar o token e a sessão em um arquivo 0600
+  --install-service     Instala como serviço em segundo plano (macOS launchd / Linux systemd --user); pareie antes
+  --uninstall-service   Para e remove o serviço em segundo plano
+  --service-status      Mostra o status do serviço em segundo plano
+  --forget              Apaga o token do bot e o pareamento salvos nesta máquina
+  --reply-timeout s     Quanto tempo esperar por uma resposta, padrão 120; depois disso, lê o histórico de mensagens
+  --no-drafts           Edita as mensagens em vez de transmitir rascunhos
+  --confirm-prod        Confirma explicitamente ao executar de forma não interativa em produção`,
     ),
     check: tr(
       `yomi check -f <文件> [字段选项]
   按 App 的必填项和长度限制检查角色文件，不联网。`,
       `yomi check -f <file> [field options]
   Checks a character file against the app's required fields and length limits, offline.`,
+      `yomi check -f <archivo> [opciones de campo]
+  Revisa un archivo del personaje según los campos obligatorios y los límites de longitud de la app, sin conexión.`,
+      `yomi check -f <arquivo> [opções de campo]
+  Verifica um arquivo do personagem com os campos obrigatórios e os limites de tamanho do app, offline.`,
     ),
     init: tr(
       `yomi init [文件] [--force]
   写一份角色文件模板。`,
       `yomi init [file] [--force]
   Writes a character file template.`,
+      `yomi init [archivo] [--force]
+  Escribe una plantilla de archivo del personaje.`,
+      `yomi init [arquivo] [--force]
+  Grava um template de arquivo do personagem.`,
     ),
     voices: `yomi voices [--json]`,
-    tags: tr(`yomi tags [--query 关键词] [--json]`, `yomi tags [--query keyword] [--json]`),
+    tags: tr(
+      `yomi tags [--query 关键词] [--json]`,
+      `yomi tags [--query keyword] [--json]`,
+      `yomi tags [--query término] [--json]`,
+      `yomi tags [--query termo] [--json]`,
+    ),
     logout: `yomi logout`,
     whoami: `yomi whoami`,
   };
@@ -447,6 +726,8 @@ function specFrom(values: Values): CharacterSpec {
       tr(
         '需要角色文件：-f character.yaml（yomi init 生成模板）',
         'A character file is needed: -f character.yaml (yomi init writes a template)',
+        'Se necesita un archivo del personaje: -f character.yaml (yomi init escribe una plantilla)',
+        'É preciso um arquivo do personagem: -f character.yaml (yomi init grava um template)',
       ),
     );
   if (!base) return specFromObject(overrides);
@@ -470,6 +751,8 @@ function seconds(value: unknown, fallback: number, label: string): number {
       tr(
         `${label} 必须是 1–3600 之间的秒数`,
         `${label} must be a number of seconds from 1 to 3600`,
+        `${label} debe ser un número de segundos entre 1 y 3600`,
+        `${label} deve ser um número de segundos de 1 a 3600`,
       ),
     );
   return parsed;
@@ -484,6 +767,8 @@ function whole(value: unknown, label: string, min: number, max: number): number 
       tr(
         `${label} 必须是 ${min}–${max} 的整数`,
         `${label} must be a whole number from ${min} to ${max}`,
+        `${label} debe ser un número entero entre ${min} y ${max}`,
+        `${label} deve ser um número inteiro de ${min} a ${max}`,
       ),
     );
   return parsed;
@@ -497,6 +782,8 @@ function gems(value: unknown): number {
       tr(
         '--max-spend 必须是 0–1000000 的整数（钻石）',
         '--max-spend must be a whole number of gems from 0 to 1000000',
+        '--max-spend debe ser un número entero de gemas entre 0 y 1000000',
+        '--max-spend deve ser um número inteiro de gemas de 0 a 1000000',
       ),
     );
   return parsed;
@@ -510,7 +797,7 @@ function langFlag(argv: string[]): Language | null | undefined {
   const at = argv.findIndex((arg) => arg === '--lang' || arg.startsWith('--lang='));
   if (at < 0) return undefined;
   const value = argv[at].startsWith('--lang=') ? argv[at].slice('--lang='.length) : argv[at + 1];
-  return /^(zh|en)([-_].*)?$/i.test(value ?? '') ? parseLanguage(value) : null;
+  return /^(zh|en|es|pt)([-_].*)?$/i.test(value ?? '') ? parseLanguage(value) : null;
 }
 
 /** The arguments with `--lang` and its value taken out (it may come before the command). */
@@ -526,7 +813,9 @@ function withoutLang(argv: string[]): string[] {
 export async function main(argv: string[], io: Io = processIo()): Promise<number> {
   const requested = langFlag(argv);
   if (requested === null) {
-    io.stderr.write('--lang 只能是 zh 或 en / --lang must be zh or en\n'); // i18n-ignore
+    io.stderr.write(
+      '--lang 只能是 zh、en、es 或 pt / --lang must be zh, en, es or pt / --lang debe ser zh, en, es o pt / --lang deve ser zh, en, es ou pt\n', // i18n-ignore
+    );
     return 2;
   }
   // For this run only: the next one (a test, a second command) starts from the environment again.
@@ -553,7 +842,14 @@ async function run(argv: string[], io: Io): Promise<number> {
   }
   const own = OPTIONS[command];
   if (!own) {
-    io.stderr.write(tr(`不认识的命令：${command}\n\n`, `Unknown command: ${command}\n\n`) + help());
+    io.stderr.write(
+      tr(
+        `不认识的命令：${command}\n\n`,
+        `Unknown command: ${command}\n\n`,
+        `Comando desconocido: ${command}\n\n`,
+        `Comando desconhecido: ${command}\n\n`,
+      ) + help(),
+    );
     return 2;
   }
   let parsed;
@@ -719,7 +1015,14 @@ async function run(argv: string[], io: Io): Promise<number> {
 function reportError(io: Io, error: unknown) {
   const line = (text: string) => io.stderr.write(paint(io, 'red', redact(text)) + '\n');
   if (error instanceof SpecError) {
-    line(tr('角色文件有问题：', 'The character file has problems:'));
+    line(
+      tr(
+        '角色文件有问题：',
+        'The character file has problems:',
+        'El archivo del personaje tiene problemas:',
+        'O arquivo do personagem tem problemas:',
+      ),
+    );
     for (const problem of error.problems) io.stderr.write(`  · ${problem}\n`);
   } else if (
     error instanceof NotSignedIn ||
@@ -732,18 +1035,27 @@ function reportError(io: Io, error: unknown) {
       tr(
         `请求失败（${error.code}）${error.message && error.message !== error.code ? '：' + error.message : ''}`,
         `Request failed (${error.code})${error.message && error.message !== error.code ? ': ' + error.message : ''}`,
+        `La solicitud falló (${error.code})${error.message && error.message !== error.code ? ': ' + error.message : ''}`,
+        `Falha na solicitação (${error.code})${error.message && error.message !== error.code ? ': ' + error.message : ''}`,
       ),
     );
   else if (error instanceof ApiError) {
     if (error.needsSignIn)
       line(
-        tr('登录已失效，请重新运行 yomi login', 'Your sign-in has expired; run yomi login again'),
+        tr(
+          '登录已失效，请重新运行 yomi login',
+          'Your sign-in has expired; run yomi login again',
+          'Tu sesión expiró; vuelve a ejecutar yomi login',
+          'Seu login expirou; execute yomi login novamente',
+        ),
       );
     else
       line(
         tr(
           `请求失败（${error.code}${error.path ? ' ' + error.path : ''}）${error.message ? '：' + error.message : ''}`,
           `Request failed (${error.code}${error.path ? ' ' + error.path : ''})${error.message ? ': ' + error.message : ''}`,
+          `La solicitud falló (${error.code}${error.path ? ' ' + error.path : ''})${error.message ? ': ' + error.message : ''}`,
+          `Falha na solicitação (${error.code}${error.path ? ' ' + error.path : ''})${error.message ? ': ' + error.message : ''}`,
         ),
       );
   } else line(error instanceof Error ? error.message : String(error));

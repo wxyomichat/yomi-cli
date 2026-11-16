@@ -11,6 +11,8 @@ export class DeactivationPending extends Error {
       tr(
         '这个账号正在注销冷静期，请先在 App 或网页登录处理后再试',
         'This account is in its deletion cool-down period; sign in on the app or the web to deal with it first, then try again',
+        'Esta cuenta está en su periodo de espera de eliminación; inicia sesión en la app o en la web para resolverlo primero y luego vuelve a intentarlo',
+        'Esta conta está no período de espera da exclusão; entre no app ou na web para resolver isso primeiro e depois tente novamente',
       ),
     );
     this.name = 'DeactivationPending';
@@ -70,7 +72,9 @@ export async function exchangeFirebaseToken(
   };
   if (signal?.aborted) {
     if (issued) await abandon(gateway, credential);
-    throw signal.reason instanceof Error ? signal.reason : new Error(tr('已取消', 'Cancelled'));
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error(tr('已取消', 'Cancelled', 'Cancelado', 'Cancelado'));
   }
   if (flag(data.is_deactivate_calmdown)) {
     // A session the server issued anyway is revoked, not left behind.
@@ -80,7 +84,12 @@ export async function exchangeFirebaseToken(
   if (!issued)
     throw new ApiError(
       ApiError.transport,
-      tr('登录回包缺少会话信息', 'The sign-in response is missing session details'),
+      tr(
+        '登录回包缺少会话信息',
+        'The sign-in response is missing session details',
+        'A la respuesta del inicio de sesión le faltan los datos de la sesión',
+        'A resposta do login não traz os dados da sessão',
+      ),
       null,
       'account/login',
     );
@@ -91,7 +100,12 @@ export async function exchangeFirebaseToken(
     if (optionalId(confirmed.user_id) !== credential.userId)
       throw new ApiError(
         ApiError.transport,
-        tr('登录后读回的账号不一致', 'The account read back after sign-in does not match'),
+        tr(
+          '登录后读回的账号不一致',
+          'The account read back after sign-in does not match',
+          'La cuenta leída después de iniciar sesión no coincide',
+          'A conta lida depois do login não corresponde',
+        ),
         null,
         'account/get_account',
       );

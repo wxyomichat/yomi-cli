@@ -41,8 +41,8 @@ function inChineseTable(node: ts.Node): boolean {
   return false;
 }
 
-/** Inside the first (Chinese) or second (English) argument of `tr(…)`. */
-function trArgument(node: ts.Node): 0 | 1 | null {
+/** Which argument of `tr(…)` the node is in: 0 Chinese, 1 English, 2 Spanish, 3 Portuguese. */
+function trArgument(node: ts.Node): number | null {
   for (let at: ts.Node = node; at.parent; at = at.parent) {
     const parent = at.parent;
     if (
@@ -51,7 +51,7 @@ function trArgument(node: ts.Node): 0 | 1 | null {
       parent.expression.text === 'tr'
     ) {
       const index = parent.arguments.indexOf(at as ts.Expression);
-      if (index === 0 || index === 1) return index;
+      if (index >= 0) return index;
     }
   }
   return null;
@@ -79,13 +79,27 @@ function problems(): string[] {
         const { line } = source.getLineAndCharacterOfPosition(node.getStart());
         // matching what the server sends (not printed): marked on the line
         const marked = source.text.split('\n')[line].includes('i18n-ignore');
-        if (where === 1 || (where === null && !inChineseTable(node) && !marked)) {
+        if ((where !== null && where > 0) || (where === null && !inChineseTable(node) && !marked)) {
           found.push(`${relative(ROOT, file)}:${line + 1} ${node.getText().slice(0, 70)}`);
         }
       }
       ts.forEachChild(node, visit);
     };
     visit(source);
+    // every call carries all four languages
+    const arity = (node: ts.Node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'tr' &&
+        node.arguments.length !== 4
+      ) {
+        const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+        found.push(`${relative(ROOT, file)}:${line + 1} tr() with ${node.arguments.length} texts`);
+      }
+      ts.forEachChild(node, arity);
+    };
+    arity(source);
   }
   return found;
 }
@@ -105,14 +119,23 @@ describe('the CLI in two languages', () => {
     expect(languageFrom({ LANG: 'zh_TW.UTF-8' })).toBe('zh');
     setLanguage('en');
     expect(language()).toBe('en');
-    expect(tr('中文', 'English')).toBe('English');
+    expect(tr('中文', 'English', 'Español', 'Português')).toBe('English');
     expect(currentLanguage()).toBe('en');
     setLanguage('zh');
-    expect(tr('中文', 'English')).toBe('中文');
+    expect(tr('中文', 'English', 'Español', 'Português')).toBe('中文');
     expect(currentLanguage()).toBe('zh-Hans');
+    expect(parseLanguage('es_MX.UTF-8')).toBe('es');
+    expect(parseLanguage('pt_BR.UTF-8')).toBe('pt');
+    expect(parseLanguage('pt-PT')).toBe('pt');
+    setLanguage('es');
+    expect(tr('中文', 'English', 'Español', 'Português')).toBe('Español');
+    // the server writes in Chinese or English only
+    expect(currentLanguage()).toBe('en');
+    setLanguage('pt');
+    expect(tr('中文', 'English', 'Español', 'Português')).toBe('Português');
   });
 
-  it('has no Chinese left outside tr() and no Chinese in an English text', () => {
+  it('has no Chinese outside tr(), every tr() in four languages, and no Chinese in the others', () => {
     expect(problems()).toEqual([]);
   });
 });

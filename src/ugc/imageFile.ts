@@ -101,15 +101,36 @@ export function sniffImage(
 
 export function loadImage(path: string, kind: ImageKind): LocalImage {
   const label =
-    kind === 'cover' ? tr('形象图 cover', 'Cover image (cover)') : tr('头像 avatar', 'Avatar');
+    kind === 'cover'
+      ? tr(
+          '形象图 cover',
+          'Cover image (cover)',
+          'Imagen de portada (cover)',
+          'Imagem de capa (cover)',
+        )
+      : tr('头像 avatar', 'Avatar', 'Avatar', 'Avatar');
   let size: number;
   try {
     size = statSync(path).size;
   } catch {
-    throw new ImageError(tr(`${label}：找不到文件 ${path}`, `${label}: file not found: ${path}`));
+    throw new ImageError(
+      tr(
+        `${label}：找不到文件 ${path}`,
+        `${label}: file not found: ${path}`,
+        `${label}: no se encontró el archivo: ${path}`,
+        `${label}: arquivo não encontrado: ${path}`,
+      ),
+    );
   }
   if (size > MAX_IMAGE_BYTES)
-    throw new ImageError(tr(`${label}：文件超过 20 MB`, `${label}: the file is over 20 MB`));
+    throw new ImageError(
+      tr(
+        `${label}：文件超过 20 MB`,
+        `${label}: the file is over 20 MB`,
+        `${label}: el archivo supera los 20 MB`,
+        `${label}: o arquivo tem mais de 20 MB`,
+      ),
+    );
   const bytes = readFileSync(path);
   const info = sniffImage(bytes);
   if (!info)
@@ -117,6 +138,8 @@ export function loadImage(path: string, kind: ImageKind): LocalImage {
       tr(
         `${label}：只支持 JPEG、PNG、WebP（${path}）`,
         `${label}: only JPEG, PNG and WebP are supported (${path})`,
+        `${label}: solo se admiten JPEG, PNG y WebP (${path})`,
+        `${label}: só são aceitos JPEG, PNG e WebP (${path})`,
       ),
     );
   if (!info.width || !info.height || info.width > MAX_SIDE || info.height > MAX_SIDE)
@@ -124,6 +147,8 @@ export function loadImage(path: string, kind: ImageKind): LocalImage {
       tr(
         `${label}：尺寸不合法（${info.width}×${info.height}）`,
         `${label}: invalid size (${info.width}×${info.height})`,
+        `${label}: tamaño no válido (${info.width}×${info.height})`,
+        `${label}: tamanho inválido (${info.width}×${info.height})`,
       ),
     );
   const aspect = info.width / info.height;
@@ -134,6 +159,10 @@ export function loadImage(path: string, kind: ImageKind): LocalImage {
           `App 用 ${RECOMMENDED[kind]}，先裁好再用`,
         `${label}: the aspect ratio must be ${kind === 'cover' ? '1:2 (width:height)' : '1:1'}, but it is ${info.width}×${info.height}; ` +
           `the app uses ${RECOMMENDED[kind]}, so crop it first`,
+        `${label}: la relación de aspecto debe ser ${kind === 'cover' ? '1:2 (ancho:alto)' : '1:1'}, pero es ${info.width}×${info.height}; ` +
+          `la app usa ${RECOMMENDED[kind]}, así que recorta la imagen primero`,
+        `${label}: a proporção deve ser ${kind === 'cover' ? '1:2 (largura:altura)' : '1:1'}, mas é ${info.width}×${info.height}; ` +
+          `o app usa ${RECOMMENDED[kind]}, então recorte a imagem primeiro`,
       ),
     );
   return {

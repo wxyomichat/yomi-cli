@@ -48,12 +48,26 @@ export function sniffMime(bytes: Uint8Array): string {
  */
 function checkPngHeader(bytes: Uint8Array) {
   if (bytes.length < 33 || String.fromCharCode(...bytes.subarray(12, 16)) !== 'IHDR')
-    throw new RasterError(tr('不是 JPEG 或 PNG 图片', 'Not a JPEG or PNG image'));
+    throw new RasterError(
+      tr(
+        '不是 JPEG 或 PNG 图片',
+        'Not a JPEG or PNG image',
+        'No es una imagen JPEG ni PNG',
+        'Não é uma imagem JPEG ou PNG',
+      ),
+    );
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = view.getUint32(16);
   const height = view.getUint32(20);
   if (width === 0 || height === 0 || width * height > MAX_PIXELS)
-    throw new RasterError(tr('图片太大', 'The image is too large'));
+    throw new RasterError(
+      tr(
+        '图片太大',
+        'The image is too large',
+        'La imagen es demasiado grande',
+        'A imagem é grande demais',
+      ),
+    );
 }
 
 /** RGBA pixels of a JPEG or PNG. */
@@ -72,7 +86,14 @@ export function decode(bytes: Uint8Array): Raster {
     checkPngHeader(bytes);
     const image = PNG.sync.read(Buffer.from(bytes));
     if (image.width * image.height > MAX_PIXELS)
-      throw new RasterError(tr('图片太大', 'The image is too large'));
+      throw new RasterError(
+        tr(
+          '图片太大',
+          'The image is too large',
+          'La imagen es demasiado grande',
+          'A imagem é grande demais',
+        ),
+      );
     return { width: image.width, height: image.height, data: new Uint8Array(image.data) };
   }
   throw new RasterError(
@@ -80,8 +101,15 @@ export function decode(bytes: Uint8Array): Raster {
       ? tr(
           '暂不能处理 WebP 图片，请换成 JPEG 或 PNG',
           "WebP images can't be processed yet, please use JPEG or PNG",
+          'Todavía no se pueden procesar imágenes WebP; usa JPEG o PNG',
+          'Ainda não é possível processar imagens WebP, use JPEG ou PNG',
         )
-      : tr('不是 JPEG 或 PNG 图片', 'Not a JPEG or PNG image'),
+      : tr(
+          '不是 JPEG 或 PNG 图片',
+          'Not a JPEG or PNG image',
+          'No es una imagen JPEG ni PNG',
+          'Não é uma imagem JPEG ou PNG',
+        ),
   );
 }
 

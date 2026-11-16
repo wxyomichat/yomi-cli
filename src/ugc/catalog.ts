@@ -19,7 +19,12 @@ export async function loadVoiceCatalog(gateway: Gateway): Promise<VoiceCatalog> 
   if (!version || !items || items.length > 500)
     throw new UgcFailure(
       'PROTOCOL',
-      tr('声音目录回包不完整', 'The voice catalog response is incomplete'),
+      tr(
+        '声音目录回包不完整',
+        'The voice catalog response is incomplete',
+        'La respuesta del catálogo de voces está incompleta',
+        'A resposta do catálogo de vozes está incompleta',
+      ),
     );
   const voices: Voice[] = [];
   const seen = new Set<string>();
@@ -30,7 +35,12 @@ export async function loadVoiceCatalog(gateway: Gateway): Promise<VoiceCatalog> 
     if (!id || seen.has(id) || !name || name.length > 100)
       throw new UgcFailure(
         'PROTOCOL',
-        tr('声音目录里有不合法的条目', 'The voice catalog has an invalid entry'),
+        tr(
+          '声音目录里有不合法的条目',
+          'The voice catalog has an invalid entry',
+          'El catálogo de voces tiene una entrada no válida',
+          'O catálogo de vozes tem uma entrada inválida',
+        ),
       );
     seen.add(id);
     voices.push({

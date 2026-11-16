@@ -25,7 +25,14 @@ export type CallbackResult = { kind: 'token'; idToken: string } | { kind: 'denie
 
 export class CallbackTimeout extends Error {
   constructor() {
-    super(tr('等待网页授权超时', 'Timed out waiting for authorization on the web'));
+    super(
+      tr(
+        '等待网页授权超时',
+        'Timed out waiting for authorization on the web',
+        'Se agotó el tiempo de espera de la autorización en la web',
+        'O tempo de espera pela autorização na web se esgotou',
+      ),
+    );
     this.name = 'CallbackTimeout';
   }
 }
@@ -79,13 +86,14 @@ function sameSecret(a: string, b: string): boolean {
 
 /** A header the caller sent, safe for a terminal: printable ASCII only, cut short. */
 function printable(value: string | undefined): string {
-  if (value === undefined) return tr('（未提供）', '(not provided)');
+  if (value === undefined)
+    return tr('（未提供）', '(not provided)', '(no proporcionado)', '(não informado)');
   return JSON.stringify(value.slice(0, 80).replace(/[^\x20-\x7e]/g, '?'));
 }
 
 function page(title: string, message: string, ok: boolean): string {
   const colour = ok ? '#1f9d55' : '#c53030';
-  return `<!doctype html><html lang="${tr('zh', 'en')}"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="${tr('zh', 'en', 'es', 'pt')}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <style>body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f0f14;color:#eee;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}
@@ -171,6 +179,8 @@ export function startCallbackServer(options: {
         tr(
           '还有更多无效回调，之后不再逐条提示（等待继续，直到超时或 Ctrl+C）',
           'more invalid callbacks; they will no longer be reported one by one (still waiting until the timeout or Ctrl+C)',
+          'más callbacks no válidos; ya no se informarán uno por uno (se sigue esperando hasta el límite de tiempo o Ctrl+C)',
+          'mais callbacks inválidos; eles não serão mais informados um a um (a espera continua até o tempo limite ou Ctrl+C)',
         ),
       );
   };
@@ -196,10 +206,12 @@ export function startCallbackServer(options: {
         response,
         403,
         page(
-          tr('请求被拒绝', 'Request refused'),
+          tr('请求被拒绝', 'Request refused', 'Solicitud rechazada', 'Solicitação recusada'),
           tr(
             '只接受本机发来的授权回调。',
             'Only authorization callbacks from this machine are accepted.',
+            'Solo se aceptan callbacks de autorización desde este equipo.',
+            'Só são aceitos callbacks de autorização vindos desta máquina.',
           ),
           false,
         ),
@@ -211,10 +223,12 @@ export function startCallbackServer(options: {
         response,
         404,
         page(
-          tr('找不到页面', 'Page not found'),
+          tr('找不到页面', 'Page not found', 'Página no encontrada', 'Página não encontrada'),
           tr(
             '这是 Yomi CLI 的本地授权回调。',
             'This is the Yomi CLI local authorization callback.',
+            'Este es el callback local de autorización de Yomi CLI.',
+            'Este é o callback local de autorização do Yomi CLI.',
           ),
           false,
         ),
@@ -226,10 +240,12 @@ export function startCallbackServer(options: {
         response,
         405,
         page(
-          tr('请求被拒绝', 'Request refused'),
+          tr('请求被拒绝', 'Request refused', 'Solicitud rechazada', 'Solicitação recusada'),
           tr(
             '授权信息只能通过网页提交，不能放在地址里。',
             'Authorization details can only be submitted from the web page, not in the address.',
+            'Los datos de autorización solo se pueden enviar desde la página web, no en la dirección.',
+            'Os dados de autorização só podem ser enviados pela página web, não no endereço.',
           ),
           false,
         ),
@@ -241,10 +257,17 @@ export function startCallbackServer(options: {
         response,
         410,
         page(
-          tr('授权已结束', 'Authorization has ended'),
+          tr(
+            '授权已结束',
+            'Authorization has ended',
+            'La autorización terminó',
+            'A autorização terminou',
+          ),
           tr(
             '这次登录已经结束，可以关闭此页。',
             'This sign-in has already ended. You can close this page.',
+            'Este inicio de sesión ya terminó. Puedes cerrar esta página.',
+            'Este login já terminou. Você pode fechar esta página.',
           ),
           false,
         ),
@@ -261,19 +284,38 @@ export function startCallbackServer(options: {
           ? tr(
               `来源不符：Origin 为 ${printable(origin)}，应为 ${options.expectedOrigin}`,
               `origin mismatch: Origin is ${printable(origin)}, expected ${options.expectedOrigin}`,
+              `el origen no coincide: Origin es ${printable(origin)}, se esperaba ${options.expectedOrigin}`,
+              `a origem não corresponde: Origin é ${printable(origin)}, esperado ${options.expectedOrigin}`,
             )
           : !values
-            ? tr('内容格式不对', 'malformed body')
-            : tr('state 与本次登录不符', 'state does not match this sign-in'),
+            ? tr(
+                '内容格式不对',
+                'malformed body',
+                'cuerpo con formato incorrecto',
+                'conteúdo com formato incorreto',
+              )
+            : tr(
+                'state 与本次登录不符',
+                'state does not match this sign-in',
+                'state no coincide con este inicio de sesión',
+                'state não corresponde a este login',
+              ),
       );
       reply(
         response,
         400,
         page(
-          tr('授权请求无效', 'Invalid authorization request'),
+          tr(
+            '授权请求无效',
+            'Invalid authorization request',
+            'Solicitud de autorización no válida',
+            'Solicitação de autorização inválida',
+          ),
           tr(
             '请回到终端重新运行 yomi login，再从它打开的页面授权。',
             'Go back to the terminal, run yomi login again, and authorize from the page it opens.',
+            'Vuelve a la terminal, ejecuta yomi login de nuevo y autoriza desde la página que abre.',
+            'Volte ao terminal, execute yomi login novamente e autorize pela página que ele abrir.',
           ),
           false,
         ),
@@ -286,10 +328,17 @@ export function startCallbackServer(options: {
         response,
         410,
         page(
-          tr('授权已结束', 'Authorization has ended'),
+          tr(
+            '授权已结束',
+            'Authorization has ended',
+            'La autorización terminó',
+            'A autorização terminou',
+          ),
           tr(
             '这次登录已经结束，可以关闭此页。',
             'This sign-in has already ended. You can close this page.',
+            'Este inicio de sesión ya terminó. Puedes cerrar esta página.',
+            'Este login já terminou. Você pode fechar esta página.',
           ),
           false,
         ),
@@ -301,10 +350,17 @@ export function startCallbackServer(options: {
         response,
         409,
         page(
-          tr('终端正在确认', 'Confirming in the terminal'),
+          tr(
+            '终端正在确认',
+            'Confirming in the terminal',
+            'Confirmando en la terminal',
+            'Confirmando no terminal',
+          ),
           tr(
             '终端正在确认刚收到的一次授权或取消。要放弃这次登录，在终端按 Ctrl+C；如果终端显示的不是你的账号，在终端拒绝后，回到授权页再点一次授权。',
             'The terminal is checking an authorization or cancellation it just received. To abandon this sign-in, press Ctrl+C in the terminal; if the terminal shows an account that is not yours, refuse it there, then come back to the authorization page and click authorize again.',
+            'La terminal está revisando una autorización o cancelación que acaba de recibir. Para abandonar este inicio de sesión, presiona Ctrl+C en la terminal; si la terminal muestra una cuenta que no es tuya, recházala ahí y luego vuelve a la página de autorización y haz clic en autorizar otra vez.',
+            'O terminal está verificando uma autorização ou cancelamento que acabou de receber. Para abandonar este login, pressione Ctrl+C no terminal; se o terminal mostrar uma conta que não é sua, recuse-a lá, depois volte à página de autorização e clique em autorizar de novo.',
           ),
           false,
         ),
@@ -316,10 +372,17 @@ export function startCallbackServer(options: {
         response,
         200,
         page(
-          tr('已取消授权', 'Authorization cancelled'),
+          tr(
+            '已取消授权',
+            'Authorization cancelled',
+            'Autorización cancelada',
+            'Autorização cancelada',
+          ),
           tr(
             '已告知终端，可以关闭此页。如果终端询问，确认结束这次登录即可。',
             'The terminal has been told; you can close this page. If the terminal asks, confirm ending this sign-in.',
+            'Ya se avisó a la terminal; puedes cerrar esta página. Si la terminal pregunta, confirma que quieres terminar este inicio de sesión.',
+            'O terminal já foi avisado; você pode fechar esta página. Se o terminal perguntar, confirme o encerramento deste login.',
           ),
           false,
         ),
@@ -333,14 +396,26 @@ export function startCallbackServer(options: {
         tr(
           '网页回传的登录凭证格式不正确',
           'the sign-in credentials sent back by the web page are malformed',
+          'las credenciales de inicio de sesión que devolvió la página web tienen un formato incorrecto',
+          'as credenciais de login enviadas de volta pela página web estão em formato incorreto',
         ),
       );
       reply(
         response,
         400,
         page(
-          tr('授权请求无效', 'Invalid authorization request'),
-          tr('没有收到有效的登录凭证。', 'No valid sign-in credentials were received.'),
+          tr(
+            '授权请求无效',
+            'Invalid authorization request',
+            'Solicitud de autorización no válida',
+            'Solicitação de autorização inválida',
+          ),
+          tr(
+            '没有收到有效的登录凭证。',
+            'No valid sign-in credentials were received.',
+            'No se recibieron credenciales de inicio de sesión válidas.',
+            'Nenhuma credencial de login válida foi recebida.',
+          ),
           false,
         ),
       );
@@ -350,8 +425,13 @@ export function startCallbackServer(options: {
       response,
       200,
       page(
-        tr('已授权 Yomi CLI', 'Yomi CLI authorized'),
-        tr('可以关闭此页，回到终端继续。', 'You can close this page and continue in the terminal.'),
+        tr('已授权 Yomi CLI', 'Yomi CLI authorized', 'Yomi CLI autorizado', 'Yomi CLI autorizado'),
+        tr(
+          '可以关闭此页，回到终端继续。',
+          'You can close this page and continue in the terminal.',
+          'Puedes cerrar esta página y continuar en la terminal.',
+          'Você pode fechar esta página e continuar no terminal.',
+        ),
         true,
       ),
     );
@@ -389,7 +469,15 @@ export function startCallbackServer(options: {
     }
     if (phase === 'closed')
       return Promise.reject(
-        ending ?? new CallbackRejected(tr('这次登录已经结束', 'This sign-in has already ended')),
+        ending ??
+          new CallbackRejected(
+            tr(
+              '这次登录已经结束',
+              'This sign-in has already ended',
+              'Este inicio de sesión ya terminó',
+              'Este login já terminou',
+            ),
+          ),
       );
     const waiting = new Promise<CallbackResult>((resolve, reject) => {
       pending = { resolve, reject };
@@ -423,7 +511,8 @@ export function startCallbackServer(options: {
         callbackURL: `http://127.0.0.1:${port}/callback`,
         next,
         resume,
-        close: () => finish(new CallbackRejected(tr('已取消', 'Cancelled'))),
+        close: () =>
+          finish(new CallbackRejected(tr('已取消', 'Cancelled', 'Cancelado', 'Cancelado'))),
       });
     });
   });

@@ -54,7 +54,12 @@ export function wireIds(value: unknown, path: string[] = []): unknown {
     if (!/^[1-9][0-9]{0,18}$/.test(digits) || BigInt(digits) > 9223372036854775807n)
       throw new UgcFailure(
         'INVALID_ARGUMENT',
-        tr(`${key} 不是合法 ID：${digits}`, `${key} isn't a valid ID: ${digits}`),
+        tr(
+          `${key} 不是合法 ID：${digits}`,
+          `${key} isn't a valid ID: ${digits}`,
+          `${key} no es un ID válido: ${digits}`,
+          `${key} não é um ID válido: ${digits}`,
+        ),
       );
     return i64(digits);
   }
@@ -103,7 +108,15 @@ export async function walletBalance(gateway: Gateway): Promise<number> {
   const total = optionalObject(page.balance).total_amount;
   const value = typeof total === 'number' ? total : Number(total);
   if (!Number.isFinite(value))
-    throw new UgcFailure('PROTOCOL', tr('钱包回包没有余额', 'The wallet response has no balance'));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '钱包回包没有余额',
+        'The wallet response has no balance',
+        'La respuesta de la billetera no tiene saldo',
+        'A resposta da carteira não tem saldo',
+      ),
+    );
   return value;
 }
 
@@ -118,7 +131,15 @@ export async function putObject(
 ) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new UgcFailure('PROTOCOL', tr('上传地址不是 https', "The upload URL isn't https"));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '上传地址不是 https',
+        "The upload URL isn't https",
+        'La URL de subida no es https',
+        'A URL de envio não é https',
+      ),
+    );
   let response: Response;
   try {
     response = await fetcher(url, {
@@ -128,7 +149,15 @@ export async function putObject(
       redirect: 'error',
     });
   } catch {
-    throw new UgcFailure('UPLOAD_FAILED', tr('图片上传失败', 'Image upload failed'));
+    throw new UgcFailure(
+      'UPLOAD_FAILED',
+      tr(
+        '图片上传失败',
+        'Image upload failed',
+        'Error al subir la imagen',
+        'Falha no envio da imagem',
+      ),
+    );
   }
   if (response.status < 200 || response.status >= 300)
     throw new UgcFailure(
@@ -136,6 +165,8 @@ export async function putObject(
       tr(
         `图片上传失败（HTTP ${response.status}）`,
         `Image upload failed (HTTP ${response.status})`,
+        `Error al subir la imagen (HTTP ${response.status})`,
+        `Falha no envio da imagem (HTTP ${response.status})`,
       ),
     );
 }
@@ -153,7 +184,15 @@ export async function postForm(
 ) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new UgcFailure('PROTOCOL', tr('上传地址不是 https', "The upload URL isn't https"));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '上传地址不是 https',
+        "The upload URL isn't https",
+        'La URL de subida no es https',
+        'A URL de envio não é https',
+      ),
+    );
   const form = new FormData();
   for (const key of Object.keys(fields).sort()) form.append(key, fields[key]);
   form.append('file', new Blob([new Uint8Array(data)], { type: mime }), 'image');
@@ -161,7 +200,15 @@ export async function postForm(
   try {
     response = await fetcher(url, { method: 'POST', body: form, redirect: 'error' });
   } catch {
-    throw new UgcFailure('UPLOAD_FAILED', tr('图片上传失败', 'Image upload failed'));
+    throw new UgcFailure(
+      'UPLOAD_FAILED',
+      tr(
+        '图片上传失败',
+        'Image upload failed',
+        'Error al subir la imagen',
+        'Falha no envio da imagem',
+      ),
+    );
   }
   if (response.status < 200 || response.status >= 300)
     throw new UgcFailure(
@@ -169,6 +216,8 @@ export async function postForm(
       tr(
         `图片上传失败（HTTP ${response.status}）`,
         `Image upload failed (HTTP ${response.status})`,
+        `Error al subir la imagen (HTTP ${response.status})`,
+        `Falha no envio da imagem (HTTP ${response.status})`,
       ),
     );
 }

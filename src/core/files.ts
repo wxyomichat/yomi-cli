@@ -44,6 +44,8 @@ export function readJsonFile<T>(path: string): T | null {
       tr(
         `无法读取 ${path}：内容不是 JSON。确认后可删除该文件重试。`,
         `Cannot read ${path}: it is not JSON. Once you have checked it, you can delete the file and try again.`,
+        `No se puede leer ${path}: no es JSON. Después de revisarlo, puedes eliminar el archivo e intentarlo de nuevo.`,
+        `Não é possível ler ${path}: não é JSON. Depois de conferir, você pode apagar o arquivo e tentar novamente.`,
       ),
     );
   }

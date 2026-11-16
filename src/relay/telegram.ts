@@ -116,6 +116,8 @@ export function telegramOrigin(value: string | undefined): string {
       tr(
         'Telegram API 地址只能是 https://api.telegram.org 或本机测试地址',
         'The Telegram API address can only be https://api.telegram.org or a local test address',
+        'La dirección de la API de Telegram solo puede ser https://api.telegram.org o una dirección de prueba local',
+        'O endereço da API do Telegram só pode ser https://api.telegram.org ou um endereço de teste local',
       ),
     );
   return url.origin;
@@ -134,6 +136,8 @@ export class TelegramBot {
         tr(
           'bot token 格式不对（应为 123456789:AA… 的形式）',
           'The bot token has the wrong format (it should look like 123456789:AA…)',
+          'El token del bot tiene un formato incorrecto (debería verse como 123456789:AA…)',
+          'O token do bot está no formato errado (deveria ser como 123456789:AA…)',
         ),
       );
     this.origin = telegramOrigin(options.apiOrigin);
@@ -210,8 +214,18 @@ export class TelegramBot {
         method,
         0,
         error instanceof Error && error.name === 'AbortError'
-          ? tr('请求超时', 'Request timed out')
-          : tr('网络请求失败', 'Network request failed'),
+          ? tr(
+              '请求超时',
+              'Request timed out',
+              'Se agotó el tiempo de espera de la solicitud',
+              'A solicitação excedeu o tempo limite',
+            )
+          : tr(
+              '网络请求失败',
+              'Network request failed',
+              'Falló la solicitud de red',
+              'Falha na solicitação de rede',
+            ),
       );
     } finally {
       clearTimeout(timer);
@@ -311,7 +325,16 @@ export class TelegramBot {
   ) {
     if (photo.bytes.length > MAX_PHOTO_BYTES)
       return Promise.reject(
-        new TelegramError('sendPhoto', 400, tr('图片超过 10 MB', 'The image is over 10 MB')),
+        new TelegramError(
+          'sendPhoto',
+          400,
+          tr(
+            '图片超过 10 MB',
+            'The image is over 10 MB',
+            'La imagen supera los 10 MB',
+            'A imagem passa de 10 MB',
+          ),
+        ),
       );
     const params: Record<string, unknown> = { chat_id: chatId, ...extra };
     if (captionHtml) {

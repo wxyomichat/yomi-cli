@@ -55,16 +55,16 @@ export const GENDER_NAMES: Record<string, number> = {
 
 export const GENDER_LABEL: Record<number, string> = {
   get 0() {
-    return tr('未知', 'unknown');
+    return tr('未知', 'unknown', 'desconocido', 'desconhecido');
   },
   get 1() {
-    return tr('男', 'male');
+    return tr('男', 'male', 'masculino', 'masculino');
   },
   get 2() {
-    return tr('女', 'female');
+    return tr('女', 'female', 'femenino', 'feminino');
   },
   get 3() {
-    return tr('其他', 'other');
+    return tr('其他', 'other', 'otro', 'outro');
   },
 };
 export const GENDER_KEY: Record<number, string> = {
@@ -360,11 +360,20 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
     info = statSync(path);
   } catch (error) {
     if (['ENOENT', 'ENOTDIR'].includes(errorCode(error)))
-      throw new UsageError(tr(`找不到参考图：${path}`, `Reference image not found: ${path}`));
+      throw new UsageError(
+        tr(
+          `找不到参考图：${path}`,
+          `Reference image not found: ${path}`,
+          `No se encontró la imagen de referencia: ${path}`,
+          `Imagem de referência não encontrada: ${path}`,
+        ),
+      );
     throw new UsageError(
       tr(
         `参考图读不出来：${path}（${accessHint(error)}）`,
         `Cannot read the reference image: ${path} (${accessHint(error)})`,
+        `No se puede leer la imagen de referencia: ${path} (${accessHint(error)})`,
+        `Não é possível ler a imagem de referência: ${path} (${accessHint(error)})`,
       ),
     );
   }
@@ -373,6 +382,8 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
       tr(
         `--reference 要指向一张图片，${path} 是文件夹（JPEG 或 PNG）`,
         `--reference must point to an image; ${path} is a folder (JPEG or PNG)`,
+        `--reference debe apuntar a una imagen; ${path} es una carpeta (JPEG o PNG)`,
+        `--reference deve apontar para uma imagem; ${path} é uma pasta (JPEG ou PNG)`,
       ),
     );
   // A pipe or a device could block or never end: only regular files.
@@ -381,11 +392,18 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
       tr(
         `--reference 要指向一张图片文件（JPEG 或 PNG）：${path}`,
         `--reference must point to an image file (JPEG or PNG): ${path}`,
+        `--reference debe apuntar a un archivo de imagen (JPEG o PNG): ${path}`,
+        `--reference deve apontar para um arquivo de imagem (JPEG ou PNG): ${path}`,
       ),
     );
   if (info.size > MAX_REFERENCE_BYTES)
     throw new UsageError(
-      tr('参考图不能超过 20 MB', 'The reference image cannot be larger than 20 MB'),
+      tr(
+        '参考图不能超过 20 MB',
+        'The reference image cannot be larger than 20 MB',
+        'La imagen de referencia no puede pesar más de 20 MB',
+        'A imagem de referência não pode ter mais de 20 MB',
+      ),
     );
   let bytes: Buffer;
   try {
@@ -395,12 +413,19 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
       tr(
         `参考图读不出来：${path}（${accessHint(error)}）`,
         `Cannot read the reference image: ${path} (${accessHint(error)})`,
+        `No se puede leer la imagen de referencia: ${path} (${accessHint(error)})`,
+        `Não é possível ler a imagem de referência: ${path} (${accessHint(error)})`,
       ),
     );
   }
   if (!bytes.length)
     throw new UsageError(
-      tr(`参考图是空文件：${path}`, `The reference image is an empty file: ${path}`),
+      tr(
+        `参考图是空文件：${path}`,
+        `The reference image is an empty file: ${path}`,
+        `La imagen de referencia es un archivo vacío: ${path}`,
+        `A imagem de referência é um arquivo vazio: ${path}`,
+      ),
     );
   try {
     const cropped = centreCrop(decode(bytes), 3 / 4);
@@ -413,11 +438,20 @@ export function prepareReference(path: string): { jpeg: Buffer; sha256: string }
     return { jpeg: encodeJpeg(scaled, 90), sha256: sha256(bytes) };
   } catch (error) {
     if (error instanceof RasterError)
-      throw new UsageError(tr(`参考图：${error.message}`, `Reference image: ${error.message}`));
+      throw new UsageError(
+        tr(
+          `参考图：${error.message}`,
+          `Reference image: ${error.message}`,
+          `Imagen de referencia: ${error.message}`,
+          `Imagem de referência: ${error.message}`,
+        ),
+      );
     throw new UsageError(
       tr(
         '参考图读不出来，请换一张 JPEG 或 PNG',
         'Cannot read the reference image; use another JPEG or PNG',
+        'No se puede leer la imagen de referencia; usa otra en JPEG o PNG',
+        'Não é possível ler a imagem de referência; use outra em JPEG ou PNG',
       ),
     );
   }
@@ -430,9 +464,22 @@ function errorCode(error: unknown): string {
 
 function accessHint(error: unknown): string {
   const code = errorCode(error);
-  if (code === 'EACCES' || code === 'EPERM') return tr('没有读取权限', 'no read permission');
-  if (code === 'EISDIR') return tr('这是文件夹', 'it is a folder');
-  return code ? tr(`系统错误 ${code}`, `system error ${code}`) : tr('读取失败', 'read failed');
+  if (code === 'EACCES' || code === 'EPERM')
+    return tr(
+      '没有读取权限',
+      'no read permission',
+      'sin permiso de lectura',
+      'sem permissão de leitura',
+    );
+  if (code === 'EISDIR') return tr('这是文件夹', 'it is a folder', 'es una carpeta', 'é uma pasta');
+  return code
+    ? tr(
+        `系统错误 ${code}`,
+        `system error ${code}`,
+        `error del sistema ${code}`,
+        `erro do sistema ${code}`,
+      )
+    : tr('读取失败', 'read failed', 'no se pudo leer', 'falha na leitura');
 }
 
 /**
@@ -457,6 +504,8 @@ export async function uploadReference(
       tr(
         '服务端没有给出参考图的上传地址',
         'The server gave no upload address for the reference image',
+        'El servidor no proporcionó una dirección de carga para la imagen de referencia',
+        'O servidor não forneceu um endereço de envio para a imagem de referência',
       ),
     );
   const fields: Record<string, string> = {};
@@ -471,6 +520,8 @@ export async function uploadReference(
       tr(
         `参考图的上传方式（${method}）CLI 暂不支持`,
         `The CLI does not support this reference image upload method yet (${method})`,
+        `La CLI aún no admite este método de carga de la imagen de referencia (${method})`,
+        `A CLI ainda não oferece suporte a este método de envio da imagem de referência (${method})`,
       ),
     );
   return objectKey;
@@ -501,7 +552,15 @@ function readTask(value: unknown, position: number): AvatarTask {
   const task = optionalObject(value);
   const taskId = readId(task.media_task_id);
   if (!taskId)
-    throw new UgcFailure('PROTOCOL', tr('生成任务缺少 ID', 'A generation task has no ID'));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '生成任务缺少 ID',
+        'A generation task has no ID',
+        'Una tarea de generación no tiene ID',
+        'Uma tarefa de geração está sem ID',
+      ),
+    );
   const index = task.image_index === undefined ? position : readInt(task.image_index);
   return {
     index: index + 1,

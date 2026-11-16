@@ -35,7 +35,7 @@ function pieces(paragraph: ImParagraph, options: RenderOptions, limit: number): 
   const text = paragraph.text.trim();
   if (!text) return [];
   const name = speaker(paragraph, options);
-  const prefix = name ? tr(`${name}：`, `${name}: `) : '';
+  const prefix = name ? tr(`${name}：`, `${name}: `, `${name}: `, `${name}: `) : '';
   const room = Math.max(200, limit - prefix.length);
   const parts: string[] = [];
   let rest = text;
@@ -57,7 +57,14 @@ function pieces(paragraph: ImParagraph, options: RenderOptions, limit: number): 
     if (paragraph.type === ParagraphType.narration)
       return { html: `<i>${body}</i>`, length: part.length };
     const label =
-      index === 0 && name ? tr(`<b>${escapeHtml(name)}</b>：`, `<b>${escapeHtml(name)}</b>: `) : '';
+      index === 0 && name
+        ? tr(
+            `<b>${escapeHtml(name)}</b>：`,
+            `<b>${escapeHtml(name)}</b>: `,
+            `<b>${escapeHtml(name)}</b>: `,
+            `<b>${escapeHtml(name)}</b>: `,
+          )
+        : '';
     return { html: label + body, length: part.length + (index === 0 ? prefix.length : 0) };
   });
 }

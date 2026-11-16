@@ -182,7 +182,7 @@ describe('yomi in English', () => {
     expect(unknown.err).toContain('Unknown command: nonsense');
     const bad = await run(['whoami', '--lang', 'fr']);
     expect(bad.code).toBe(2);
-    expect(bad.err).toContain('--lang must be zh or en');
+    expect(bad.err).toContain('--lang must be zh, en, es or pt');
   });
 
   it('switches with --lang and falls back to the system locale', async () => {

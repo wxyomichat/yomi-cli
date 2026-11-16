@@ -29,6 +29,8 @@ export class LockTimeout extends Error {
       tr(
         `等待锁超时：${path}（另一个 yomi 进程正在使用）`,
         `Timed out waiting for the lock: ${path} (another yomi process is using it)`,
+        `Se agotó el tiempo de espera del bloqueo: ${path} (otro proceso de yomi lo está usando)`,
+        `Tempo esgotado aguardando o bloqueio: ${path} (outro processo do yomi está usando)`,
       ),
     );
     this.name = 'LockTimeout';

@@ -25,7 +25,12 @@ function readUpload(value: unknown, purpose: UploadPurpose): ImageReceipt {
   if (!id || id === '0' || upload.purpose !== purpose)
     throw new UgcFailure(
       'PROTOCOL',
-      tr('服务端没有确认这次图片上传', "The server didn't confirm this image upload"),
+      tr(
+        '服务端没有确认这次图片上传',
+        "The server didn't confirm this image upload",
+        'El servidor no confirmó esta subida de imagen',
+        'O servidor não confirmou este envio de imagem',
+      ),
     );
   const status = Number(upload.review_status);
   const url = typeof upload.image_url === 'string' ? upload.image_url : '';
@@ -36,7 +41,12 @@ function readUpload(value: unknown, purpose: UploadPurpose): ImageReceipt {
   )
     throw new UgcFailure(
       'PROTOCOL',
-      tr('图片审核通过但没有地址', 'The image passed review but has no URL'),
+      tr(
+        '图片审核通过但没有地址',
+        'The image passed review but has no URL',
+        'La imagen pasó la revisión pero no tiene URL',
+        'A imagem passou na revisão, mas não tem URL',
+      ),
     );
   return {
     uploadId: id,
@@ -55,6 +65,8 @@ export class ImageRejected extends UgcFailure {
       tr(
         `${label}没有通过审核${reason ? `（${reason}）` : ''}，请换一张`,
         `The ${label} didn't pass review${reason ? ` (${reason})` : ''}; please use another one`,
+        `La imagen (${label}) no pasó la revisión${reason ? ` (${reason})` : ''}; usa otra`,
+        `A imagem (${label}) não passou na revisão${reason ? ` (${reason})` : ''}; use outra`,
       ),
     );
   }
@@ -108,6 +120,8 @@ export async function prepareImage(
       tr(
         `${label}的审核还没有结果，请稍后重试`,
         `The ${label} has no review result yet; please try again later`,
+        `La imagen (${label}) aún no tiene resultado de revisión; inténtalo de nuevo más tarde`,
+        `A imagem (${label}) ainda não tem resultado de revisão; tente novamente mais tarde`,
       ),
     );
   return current;

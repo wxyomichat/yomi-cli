@@ -65,7 +65,12 @@ export async function ensureServerDraft(gateway: Gateway, state: LocalState, sou
   if (!id || id === '0')
     throw new UgcFailure(
       'PROTOCOL',
-      tr('草稿分配回包没有 draft_id', 'The draft response has no draft_id'),
+      tr(
+        '草稿分配回包没有 draft_id',
+        'The draft response has no draft_id',
+        'La respuesta del borrador no tiene draft_id',
+        'A resposta do rascunho não tem draft_id',
+      ),
     );
   state.updateDraft(source, {
     serverDraftId: id,
@@ -103,7 +108,15 @@ export async function preparePreview(
     Number(preview.state) !== 2 ||
     !quota
   )
-    throw new UgcFailure('PROTOCOL', tr('预演回包不完整', 'The preview response is incomplete'));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '预演回包不完整',
+        'The preview response is incomplete',
+        'La respuesta de la vista previa está incompleta',
+        'A resposta da prévia está incompleta',
+      ),
+    );
   state.updateDraft(source, {
     previewNpcId: npc,
     mutationRevision: idOf(preview.mutation_revision) || draft.mutationRevision,
@@ -127,6 +140,8 @@ export async function preparePreview(
       tr(
         '服务端版本与预演协议不匹配，请稍后再试',
         "The server's version doesn't match the preview protocol; try again later",
+        'La versión del servidor no coincide con el protocolo de vista previa; inténtalo más tarde',
+        'A versão do servidor não corresponde ao protocolo de prévia; tente novamente mais tarde',
       ),
     );
   }
@@ -166,7 +181,12 @@ export async function listPreviewMessages(gateway: Gateway, cid: string) {
     if (idOf(message.cid) !== cid || !mid || mid === '0' || (sender !== 1 && sender !== 2))
       throw new UgcFailure(
         'PROTOCOL',
-        tr('预演消息回包不合法', 'The preview messages response is invalid'),
+        tr(
+          '预演消息回包不合法',
+          'The preview messages response is invalid',
+          'La respuesta de los mensajes de vista previa no es válida',
+          'A resposta das mensagens de prévia é inválida',
+        ),
       );
     const content = parseContent(message.content);
     messages.push({ mid, user: sender === 1, text: content.text, paragraphs: content.paragraphs });
@@ -203,6 +223,14 @@ export async function sendPreviewMessage(
   const assistant = idOf(data.assistant_mid);
   const stream = typeof data.stream_id === 'string' ? data.stream_id : '';
   if (idOf(data.cid) !== cid || !mid || !assistant || !stream)
-    throw new UgcFailure('PROTOCOL', tr('发送回包不完整', 'The send response is incomplete'));
+    throw new UgcFailure(
+      'PROTOCOL',
+      tr(
+        '发送回包不完整',
+        'The send response is incomplete',
+        'La respuesta del envío está incompleta',
+        'A resposta do envio está incompleta',
+      ),
+    );
   return { mid, assistantMid: assistant, streamId: stream, quota: readQuota(data.preview_quota) };
 }

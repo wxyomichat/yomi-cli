@@ -317,8 +317,352 @@ const en: RelayTexts = {
     })[state],
 };
 
+const es: RelayTexts = {
+  aiNotice: (name) =>
+    `Estás chateando con el personaje de IA "${name}": las respuestas las genera una IA, no una persona. Los chatbots de compañía pueden no ser adecuados para algunos menores de edad.`,
+  paired: (bot) =>
+    `Vinculado: este bot ahora solo transmite tus mensajes. Elige un personaje con /character; /help muestra los comandos. (${bot})`,
+  badCode:
+    'Ese código de vinculación es incorrecto o expiró. Usa el código que aparece en tu terminal.',
+  help: [
+    'Envía texto y llegará al personaje actual.',
+    '/character [ID] ver o cambiar el personaje',
+    '/price precio por respuesta, saldo y presupuesto',
+    '/budget [cantidad|off] gemas que el relay puede gastar (por defecto: solo respuestas gratis)',
+    '/image generar una imagen de la última respuesta (o de la respuesta a la que contestes con este comando)',
+    '/report reportar la última respuesta o el personaje',
+    '/stop dejar de transmitir la respuesta actual (sin reembolso)',
+  ].join('\n'),
+  noCharacter: 'Aún no hay personaje: envía /character con el ID de un personaje.',
+  characterIs: (name, id) => `Personaje actual: ${name} (ID ${id})`,
+  characterSet: (name) => `Cambiaste a "${name}".`,
+  characterBad: 'No se encontró ese personaje o no puede chatear ahora.',
+  busy: 'La última respuesta todavía está llegando. Espera, por favor.',
+  sendUnknown:
+    'Problema de red: es posible que este mensaje no haya llegado. No se reenviará automáticamente, para evitar pagar dos veces. Si se cobró, el saldo se verifica y se descuenta del presupuesto antes del siguiente mensaje.',
+  walletUnavailable:
+    'No se puede leer tu saldo de gemas en este momento, así que este mensaje no se envió (para no superar el presupuesto). Inténtalo de nuevo en un momento.',
+  priceUnknown:
+    'No se puede leer el precio por respuesta en este momento (eso no significa que sea gratis), así que este mensaje no se envió. Inténtalo de nuevo en un momento.',
+  replyFailed: (detail) =>
+    `La respuesta no llegó${detail ? `: ${detail}` : ''}. Puedes volver a enviar el mensaje.`,
+  replyMissing:
+    'Esta respuesta todavía no llegó; consúltala más tarde en la app de Yomi o en la web.',
+  emptyReply: '(Esta respuesta no tiene nada que mostrar.)',
+  stopped:
+    'Se dejó de transmitir esta respuesta. El servidor no puede detener la generación, así que este turno se cobra igual.',
+  nothingToStop: 'No se está transmitiendo ninguna respuesta en este momento.',
+  stale:
+    'Este mensaje se envió mientras el relay estaba desconectado, así que no se transmitió. Envíalo de nuevo si quieres.',
+  textOnly: 'Por ahora solo se admiten mensajes de texto.',
+  unknownCommand: 'Comando desconocido. /help muestra los comandos.',
+  freeOnlyUnsupported:
+    'El servidor todavía no confirmó el modo de solo respuestas gratis, así que cualquier mensaje puede costar gemas, y no se envía nada hasta que fijes un presupuesto con /budget <cantidad> (permitido en la computadora con --max-spend).',
+  freeExhausted: (price, balance) =>
+    `Se acabaron tus respuestas gratis. ${price}${balance}Para continuar, fija un presupuesto de gemas con /budget <cantidad>.`,
+  priceLine: (price) =>
+    price === null
+      ? 'El precio por respuesta es desconocido por ahora (eso no significa que sea gratis). '
+      : `Aproximadamente ${price} gemas por respuesta (el cobro real puede variar). `,
+  balanceLine: (balance) => (balance === null ? '' : `Saldo: ${balance} gemas. `),
+  budgetLine: (mode, budget, spent, left, ceiling) =>
+    (mode === 'paid'
+      ? `Presupuesto: ${budget} gemas, ${spent} gastadas. `
+      : 'Sin gastar gemas (solo respuestas gratis). ') +
+    `Límite de gasto local: ${ceiling} gemas, quedan ${Math.max(0, left)}.`,
+  budgetAsk: (amount) =>
+    `¿Permitir que el relay gaste hasta ${amount} gemas? Se pausa cuando se gastan y nunca recarga.`,
+  budgetConfirm: (amount) => `Permitir hasta ${amount} gemas`,
+  cancel: 'Cancelar',
+  budgetSet: (amount) => `Presupuesto fijado en ${amount} gemas.`,
+  budgetOff: 'De vuelta al modo de solo respuestas gratis.',
+  budgetCancelled: 'El presupuesto no cambió.',
+  budgetTooHigh: (left, ceiling) =>
+    ceiling > 0
+      ? `Supera el límite de gasto local: ${ceiling} gemas, quedan ${Math.max(0, left)}. Reinicia el relay con --max-spend (o --reset-spend) para subirlo o restablecerlo.`
+      : 'No se permite gastar gemas en esta computadora: reinicia el relay con --max-spend <cantidad>.',
+  budgetUsage:
+    'Uso: /budget 100 para fijar un presupuesto, /budget off para solo respuestas gratis.',
+  budgetExhausted: (spent) =>
+    `Se agotó el presupuesto (${spent} gemas); el relay está en pausa. Fija uno nuevo con /budget.`,
+  budgetShort: (price, left) =>
+    `Quedan ${left} gemas, no alcanzan para la siguiente respuesta (unas ${price}). Sube el presupuesto con /budget.`,
+  freeCharged: (spent) =>
+    `A una respuesta (o imagen) enviada como gratis se le cobraron ${spent} gemas de todos modos; el relay está en pausa. Fija un presupuesto con /budget para continuar.`,
+  insufficientGems:
+    'No tienes suficientes gemas. Recarga en la app de Yomi o en la web y vuelve a enviarlo.',
+  membership: 'Esto es exclusivo para miembros; consulta la app de Yomi o la web.',
+  rateLimited: (seconds) =>
+    `Demasiado rápido${seconds ? `; inténtalo de nuevo en ${seconds} segundos` : '; inténtalo de nuevo en un momento'}.`,
+  ageGate:
+    'Esta cuenta no puede chatear con ese personaje aquí (verificación de edad o clasificación de contenido).',
+  unavailable: 'Ese personaje no está disponible en este momento; elige otro.',
+  disabled: (detail) => `El servidor desactivó el relay${detail ? `: ${detail}` : ''}.`,
+  tooOld:
+    'Esta versión de yomi es demasiado antigua; el relay está en pausa. Actualiza yomi en tu computadora y reinícialo.',
+  refused: (detail) => `No se pudo enviar${detail ? `: ${detail}` : ''}.`,
+  signedOut:
+    'Tu sesión de Yomi expiró; el relay está en pausa. Ejecuta yomi login en tu computadora y se reanudará solo.',
+  resumed: 'Se restableció tu sesión de Yomi; puedes continuar.',
+  otherAccount:
+    'Otra cuenta de Yomi inició sesión en la computadora; el relay se detuvo. Vuelve a ejecutar yomi relay --telegram.',
+  paused: (reason) => `El relay está en pausa: ${reason}`,
+  reportPick: 'Elige un motivo (se recopila para revisión; no garantiza que se tome una medida):',
+  reportCharacter: 'Reportar este personaje',
+  reportNothing:
+    'Aún no hay nada que reportar: responde a un mensaje o inténtalo cuando llegue una respuesta.',
+  reportDone: 'Enviado. Gracias por tus comentarios.',
+  reportFailed: 'No se pudo enviar; inténtalo más tarde.',
+  expired: 'Este botón expiró.',
+  imageUsage:
+    'Uso: /image genera una imagen de la última respuesta; responde a una de las respuestas del personaje con /image para usar esa. /image resume continúa la última imagen que todavía no tiene resultado; /image forget deja de seguir una solicitud con resultado desconocido (una ya aceptada no se puede descartar).',
+  imageDisabled: 'Las imágenes no están disponibles en este chat.',
+  imageConfigUnavailable:
+    'No se puede leer el precio de una imagen en este momento (eso no significa que sea gratis), así que no se pidió ninguna imagen. Inténtalo de nuevo en un momento.',
+  imageHistoryUnavailable:
+    'No se puede leer el historial del chat en este momento, así que no se pidió ninguna imagen.',
+  imageNotReply:
+    'Las imágenes se generan a partir de las respuestas de texto del personaje: responde a una de sus respuestas con /image o envía /image para usar la más reciente.',
+  imageNeedsBudget: (cost) =>
+    `Una imagen cuesta ${cost} gemas (se cobra al entregarse) y el relay está en modo de solo respuestas gratis. Primero fija un presupuesto con /budget <cantidad>.`,
+  imageBudgetShort: (cost, left) =>
+    `Quedan ${left} gemas en el presupuesto, no alcanzan para una imagen (${cost} gemas). Sube el presupuesto con /budget.`,
+  imageGemsShort: (cost, balance) =>
+    `No tienes suficientes gemas: una imagen cuesta ${cost} y tu saldo es ${balance}. Recarga en la app de Yomi o en la web. No se pidió ninguna imagen.`,
+  imagePriceLine: (cost) =>
+    cost > 0
+      ? `Una imagen cuesta ${cost} gemas (se cobra al entregarse). `
+      : 'Las imágenes son gratis por ahora. ',
+  imageStarted: (cost) =>
+    cost > 0
+      ? `Generando la imagen (${cost} gemas, se cobra al entregarse); llegará aquí cuando esté lista.`
+      : 'Generando la imagen (gratis); llegará aquí cuando esté lista.',
+  imageBusy:
+    'La última imagen todavía se está generando. Espera, por favor, o usa /stop para dejar de esperar.',
+  imageSettling:
+    'La última imagen se entregó y su cobro todavía se está liquidando; no se envía nada nuevo hasta que termine. Espera, por favor.',
+  imageUnknown:
+    'No se pudo confirmar el resultado de la solicitud de imagen (problema de red o un error que el relay no reconoce), así que puede que se haya aceptado (si fue así, se cobra al entregarse). No se reenviará automáticamente: /image resume reenvía la misma solicitud (nunca se cobra dos veces), /image forget deja de seguirla.',
+  imageReplayRefused: (why) =>
+    `El reenvío fue rechazado${why ? ` (${why})` : ''} y no se cobró nada. El resultado de la primera solicitud sigue siendo desconocido: puede que se haya aceptado y se cobrará al entregarse, así que se conserva y no se envía nada nuevo hasta que tenga un resultado. Envía /image resume más tarde (mismo ID de solicitud, nunca se cobra dos veces) o /image forget para dejar de seguirla.`,
+  imageFreeOverCeiling: (worst, left) =>
+    `Esta imagen aparece como gratis, pero las imágenes gratis son solo una instantánea (si se agotan en otro lugar, cuesta ${worst} gemas), más que las ${Math.max(0, left)} gemas que este relay todavía puede gastar (su --max-spend). Reinicia el relay con un --max-spend más alto para generar imágenes.`,
+  imageKeptUnknown:
+    'El resultado de la última solicitud de imagen sigue siendo desconocido; no se envía nada nuevo hasta que lo tenga. /image resume reenvía la misma solicitud (nunca se cobra dos veces), /image forget deja de seguirla.',
+  imageUnchecked:
+    'No se puede leer el progreso de la última imagen en este momento, así que esto no se envió (para no contarlo dos veces). Inténtalo de nuevo en un momento.',
+  imageNothingToResume: 'No hay ninguna solicitud de imagen que continuar.',
+  imageResumed: 'Esperando de nuevo la última imagen.',
+  imageForgotten:
+    'Se dejó de seguir la última solicitud de imagen. Si al final se aceptó, la imagen aparecerá en el chat de Yomi y se cobrará al entregarse; ese gasto puede no descontarse del presupuesto.',
+  imageForgetAccepted:
+    'El servidor aceptó la última imagen y se cobrará al entregarse, así que no se puede descartar (su costo no podría descontarse del presupuesto). /image resume vuelve a esperarla y la envía aquí; cuando termine y su cobro se liquide, podrás chatear y pedir imágenes de nuevo.',
+  imageTimeout:
+    'La imagen todavía no está lista. El servidor sigue generándola y la cobra al entregarla; /image resume vuelve a esperarla y la envía aquí.',
+  imageStopped:
+    'Se dejó de esperar esta imagen. El servidor sigue generándola y la cobra al entregarla, como siempre; /image resume vuelve a esperarla y la envía aquí.',
+  imageFailed: (detail, billing) =>
+    `No se pudo generar la imagen${detail ? `: ${detail}` : ''}. ${billing}`,
+  imageRejected: (detail, billing) =>
+    `La imagen no pasó la verificación de contenido${detail ? ` (${detail})` : ''} y no se envió. ${billing}`,
+  imageSkipped: 'Este chat se eliminó; la imagen no se entregó.',
+  imageRefused: (detail) =>
+    `No se generó ninguna imagen${detail ? `: ${detail}` : ''}. No se cobró nada.`,
+  imageGems:
+    'No tienes suficientes gemas: no se generó ninguna imagen y no se cobró nada. Recarga en la app de Yomi o en la web.',
+  imageForwardFailed:
+    'La imagen se generó y está en el chat de Yomi, pero no se pudo enviar a Telegram: mírala en la app de Yomi o en la web.',
+  imageCaption: (name) => `Una imagen de "${name}"`,
+  imageRefunded: 'Las gemas de la imagen que falló volvieron a tu saldo.',
+  imageBilling: (state) =>
+    ({
+      none: 'No se cobró nada por ella.',
+      pending: 'El cobro todavía se está procesando.',
+      charged: 'Se realizó el cobro.',
+      refunding: 'Las gemas cobradas se están reembolsando.',
+      refunded: 'Las gemas cobradas se reembolsaron.',
+      review: 'El cobro está en revisión manual.',
+    })[state],
+};
+
+const pt: RelayTexts = {
+  aiNotice: (name) =>
+    `Você está conversando com o personagem de IA "${name}": as respostas são geradas por IA, não por uma pessoa. Chatbots de companhia podem não ser adequados para alguns menores de idade.`,
+  paired: (bot) =>
+    `Pareado: este bot agora só encaminha as suas mensagens. Escolha um personagem com /character; /help lista os comandos. (${bot})`,
+  badCode:
+    'Esse código de pareamento está errado ou expirou. Use o código mostrado no seu terminal.',
+  help: [
+    'Envie texto e ele vai para o personagem atual.',
+    '/character [ID] ver ou trocar o personagem',
+    '/price preço por resposta, saldo e orçamento',
+    '/budget [quantidade|off] gemas que o relay pode gastar (padrão: só respostas grátis)',
+    '/image gerar uma imagem da última resposta (ou da resposta à qual você responder com este comando)',
+    '/report denunciar a última resposta ou o personagem',
+    '/stop parar de encaminhar a resposta atual (sem reembolso)',
+  ].join('\n'),
+  noCharacter: 'Ainda não há personagem: envie /character com o ID de um personagem.',
+  characterIs: (name, id) => `Personagem atual: ${name} (ID ${id})`,
+  characterSet: (name) => `Você trocou para "${name}".`,
+  characterBad: 'Esse personagem não foi encontrado ou não pode conversar agora.',
+  busy: 'A última resposta ainda está chegando. Aguarde, por favor.',
+  sendUnknown:
+    'Problema de rede: esta mensagem pode não ter chegado. Ela não será reenviada automaticamente, para evitar pagar duas vezes. Se houve cobrança, o saldo é verificado e descontado do orçamento antes da próxima mensagem.',
+  walletUnavailable:
+    'Não foi possível ler o seu saldo de gemas agora, então esta mensagem não foi enviada (para não passar do orçamento). Tente novamente daqui a pouco.',
+  priceUnknown:
+    'Não foi possível ler o preço por resposta agora (isso não significa que seja grátis), então esta mensagem não foi enviada. Tente novamente daqui a pouco.',
+  replyFailed: (detail) =>
+    `A resposta não chegou${detail ? `: ${detail}` : ''}. Você pode enviar novamente.`,
+  replyMissing: 'Esta resposta ainda não chegou; veja mais tarde no app do Yomi ou na web.',
+  emptyReply: '(Esta resposta não tem nada para mostrar.)',
+  stopped:
+    'Paramos de encaminhar esta resposta. O servidor não consegue parar a geração, então este turno ainda é cobrado.',
+  nothingToStop: 'Nenhuma resposta está sendo encaminhada agora.',
+  stale:
+    'Esta mensagem foi enviada enquanto o relay estava offline, então não foi encaminhada. Envie novamente se quiser.',
+  textOnly: 'Por enquanto, só mensagens de texto são aceitas.',
+  unknownCommand: 'Comando desconhecido. /help lista os comandos.',
+  freeOnlyUnsupported:
+    'O servidor ainda não confirmou o modo só respostas grátis, então qualquer mensagem pode custar gemas, e nada é enviado antes de você definir um orçamento com /budget <quantidade> (permitido no computador com --max-spend).',
+  freeExhausted: (price, balance) =>
+    `Suas respostas grátis acabaram. ${price}${balance}Para continuar, defina um orçamento de gemas com /budget <quantidade>.`,
+  priceLine: (price) =>
+    price === null
+      ? 'O preço por resposta é desconhecido no momento (isso não significa que seja grátis). '
+      : `Cerca de ${price} gemas por resposta (a cobrança real pode variar). `,
+  balanceLine: (balance) => (balance === null ? '' : `Saldo: ${balance} gemas. `),
+  budgetLine: (mode, budget, spent, left, ceiling) =>
+    (mode === 'paid'
+      ? `Orçamento: ${budget} gemas, ${spent} gastas. `
+      : 'Sem gastar gemas (só respostas grátis). ') +
+    `Limite de gastos local: ${ceiling} gemas, restam ${Math.max(0, left)}.`,
+  budgetAsk: (amount) =>
+    `Permitir que o relay gaste até ${amount} gemas? Ele pausa quando elas acabarem e nunca faz recarga.`,
+  budgetConfirm: (amount) => `Permitir até ${amount} gemas`,
+  cancel: 'Cancelar',
+  budgetSet: (amount) => `Orçamento definido em ${amount} gemas.`,
+  budgetOff: 'De volta ao modo só respostas grátis.',
+  budgetCancelled: 'O orçamento não mudou.',
+  budgetTooHigh: (left, ceiling) =>
+    ceiling > 0
+      ? `Acima do limite de gastos local: ${ceiling} gemas, restam ${Math.max(0, left)}. Reinicie o relay com --max-spend (ou --reset-spend) para aumentá-lo ou redefini-lo.`
+      : 'Gastar gemas não é permitido neste computador: reinicie o relay com --max-spend <quantidade>.',
+  budgetUsage: 'Uso: /budget 100 para definir um orçamento, /budget off para só respostas grátis.',
+  budgetExhausted: (spent) =>
+    `O orçamento acabou (${spent} gemas); o relay está pausado. Defina um novo com /budget.`,
+  budgetShort: (price, left) =>
+    `Restam ${left} gemas, não é suficiente para a próxima resposta (cerca de ${price}). Aumente o orçamento com /budget.`,
+  freeCharged: (spent) =>
+    `Uma resposta (ou imagem) enviada como grátis teve cobrança de ${spent} gemas mesmo assim; o relay está pausado. Defina um orçamento com /budget para continuar.`,
+  insufficientGems: 'Gemas insuficientes. Recarregue no app do Yomi ou na web e envie novamente.',
+  membership: 'Isto é exclusivo para membros; veja no app do Yomi ou na web.',
+  rateLimited: (seconds) =>
+    `Rápido demais${seconds ? `; tente novamente em ${seconds} segundos` : '; tente novamente daqui a pouco'}.`,
+  ageGate:
+    'Esta conta não pode conversar com esse personagem aqui (verificação de idade ou classificação de conteúdo).',
+  unavailable: 'Esse personagem não está disponível agora; escolha outro.',
+  disabled: (detail) => `O servidor desativou o relay${detail ? `: ${detail}` : ''}.`,
+  tooOld:
+    'Esta versão do yomi é antiga demais; o relay está pausado. Atualize o yomi no seu computador e reinicie-o.',
+  refused: (detail) => `Não foi possível enviar${detail ? `: ${detail}` : ''}.`,
+  signedOut:
+    'Seu login do Yomi expirou; o relay está pausado. Execute yomi login no seu computador e ele volta sozinho.',
+  resumed: 'O login do Yomi foi restabelecido; você pode continuar.',
+  otherAccount:
+    'Outra conta do Yomi está conectada no computador; o relay parou. Execute yomi relay --telegram novamente.',
+  paused: (reason) => `O relay está pausado: ${reason}`,
+  reportPick: 'Escolha um motivo (coletado para revisão; não é uma promessa de ação):',
+  reportCharacter: 'Denunciar este personagem',
+  reportNothing:
+    'Ainda não há nada para denunciar: responda a uma mensagem ou tente depois que uma resposta chegar.',
+  reportDone: 'Enviado. Obrigado pelo feedback.',
+  reportFailed: 'Não foi possível enviar; tente novamente mais tarde.',
+  expired: 'Este botão expirou.',
+  imageUsage:
+    'Uso: /image gera uma imagem da última resposta; responda a uma das respostas do personagem com /image para usar essa. /image resume continua a última imagem que ainda não tem resultado; /image forget para de acompanhar uma solicitação com resultado desconhecido (uma já aceita não pode ser descartada).',
+  imageDisabled: 'Imagens não estão disponíveis neste chat.',
+  imageConfigUnavailable:
+    'Não foi possível ler o preço de uma imagem agora (isso não significa que seja grátis), então nenhuma imagem foi solicitada. Tente novamente daqui a pouco.',
+  imageHistoryUnavailable:
+    'Não foi possível ler o histórico do chat agora, então nenhuma imagem foi solicitada.',
+  imageNotReply:
+    'As imagens são geradas a partir das respostas de texto do personagem: responda a uma das respostas dele com /image ou envie /image para usar a mais recente.',
+  imageNeedsBudget: (cost) =>
+    `Uma imagem custa ${cost} gemas (cobradas na entrega) e o relay está no modo só respostas grátis. Primeiro defina um orçamento com /budget <quantidade>.`,
+  imageBudgetShort: (cost, left) =>
+    `Restam ${left} gemas no orçamento, não é suficiente para uma imagem (${cost} gemas). Aumente o orçamento com /budget.`,
+  imageGemsShort: (cost, balance) =>
+    `Gemas insuficientes: uma imagem custa ${cost} e o seu saldo é ${balance}. Recarregue no app do Yomi ou na web. Nenhuma imagem foi solicitada.`,
+  imagePriceLine: (cost) =>
+    cost > 0
+      ? `Uma imagem custa ${cost} gemas (cobradas na entrega). `
+      : 'As imagens estão grátis no momento. ',
+  imageStarted: (cost) =>
+    cost > 0
+      ? `Gerando a imagem (${cost} gemas, cobradas na entrega); ela chega aqui quando estiver pronta.`
+      : 'Gerando a imagem (grátis); ela chega aqui quando estiver pronta.',
+  imageBusy: 'A última imagem ainda está sendo gerada. Aguarde ou use /stop para parar de esperar.',
+  imageSettling:
+    'A última imagem foi entregue e a cobrança dela ainda está sendo finalizada; nada novo é enviado até que termine. Aguarde, por favor.',
+  imageUnknown:
+    'Não foi possível confirmar o resultado da solicitação de imagem (problema de rede ou um erro que o relay não reconhece), então ela pode ter sido aceita (se foi, é cobrada na entrega). Ela não será reenviada automaticamente: /image resume reenvia a mesma solicitação (nunca cobrada duas vezes), /image forget para de acompanhá-la.',
+  imageReplayRefused: (why) =>
+    `O reenvio foi recusado${why ? ` (${why})` : ''} e nada foi cobrado. O resultado da primeira solicitação ainda é desconhecido: ela pode ter sido aceita e será cobrada na entrega, então ela é mantida e nada novo é enviado até que tenha um resultado. Envie /image resume mais tarde (mesmo ID da solicitação, nunca cobrada duas vezes) ou /image forget para parar de acompanhá-la.`,
+  imageFreeOverCeiling: (worst, left) =>
+    `Esta imagem aparece como grátis, mas as imagens grátis são só um retrato do momento (se acabarem em outro lugar, ela custa ${worst} gemas), mais do que as ${Math.max(0, left)} gemas que este relay ainda pode gastar (o --max-spend dele). Reinicie o relay com um --max-spend maior para gerar imagens.`,
+  imageKeptUnknown:
+    'O resultado da última solicitação de imagem ainda é desconhecido; nada novo é enviado até que ela tenha um. /image resume reenvia a mesma solicitação (nunca cobrada duas vezes), /image forget para de acompanhá-la.',
+  imageUnchecked:
+    'Não foi possível ler o progresso da última imagem agora, então isto não foi enviado (para não contar duas vezes). Tente novamente daqui a pouco.',
+  imageNothingToResume: 'Não há nenhuma solicitação de imagem para continuar.',
+  imageResumed: 'Esperando novamente a última imagem.',
+  imageForgotten:
+    'Paramos de acompanhar a última solicitação de imagem. Se ela tiver sido aceita, a imagem aparece no chat do Yomi e é cobrada na entrega; esse gasto pode não ser descontado do orçamento.',
+  imageForgetAccepted:
+    'A última imagem foi aceita pelo servidor e é cobrada na entrega, então não pode ser descartada (o custo dela não poderia ser descontado do orçamento). /image resume volta a esperá-la e a encaminha; quando ela terminar e a cobrança for finalizada, você pode conversar e pedir imagens novamente.',
+  imageTimeout:
+    'A imagem ainda não está pronta. O servidor continua gerando e cobra na entrega; /image resume volta a esperá-la e a encaminha.',
+  imageStopped:
+    'Paramos de esperar esta imagem. O servidor continua gerando e cobra na entrega, como de costume; /image resume volta a esperá-la e a encaminha.',
+  imageFailed: (detail, billing) =>
+    `Não foi possível gerar a imagem${detail ? `: ${detail}` : ''}. ${billing}`,
+  imageRejected: (detail, billing) =>
+    `A imagem não passou na verificação de conteúdo${detail ? ` (${detail})` : ''} e não foi enviada. ${billing}`,
+  imageSkipped: 'Este chat foi excluído; a imagem não foi entregue.',
+  imageRefused: (detail) =>
+    `Nenhuma imagem foi gerada${detail ? `: ${detail}` : ''}. Nada foi cobrado.`,
+  imageGems:
+    'Gemas insuficientes: nenhuma imagem foi gerada e nada foi cobrado. Recarregue no app do Yomi ou na web.',
+  imageForwardFailed:
+    'A imagem foi gerada e está no chat do Yomi, mas não foi possível encaminhá-la para o Telegram: veja no app do Yomi ou na web.',
+  imageCaption: (name) => `Uma imagem de "${name}"`,
+  imageRefunded: 'As gemas da imagem que falhou voltaram para o seu saldo.',
+  imageBilling: (state) =>
+    ({
+      none: 'Nada foi cobrado por ela.',
+      pending: 'A cobrança ainda está sendo processada.',
+      charged: 'A cobrança foi feita.',
+      refunding: 'As gemas cobradas estão sendo reembolsadas.',
+      refunded: 'As gemas cobradas foram reembolsadas.',
+      review: 'A cobrança está em revisão manual.',
+    })[state],
+};
+
+/** The table for a language: `zh…`, `es…`, `pt…`, English otherwise. */
 export function relayTexts(language: string): RelayTexts {
-  return /^zh/i.test(language) ? zh : en;
+  if (/^zh/i.test(language)) return zh;
+  if (/^es/i.test(language)) return es;
+  if (/^pt/i.test(language)) return pt;
+  return en;
+}
+
+/** The bot's command menu for a language, as relayTexts picks. */
+export function relayCommands(language: string) {
+  if (/^zh/i.test(language)) return COMMANDS.zh;
+  if (/^es/i.test(language)) return COMMANDS.es;
+  if (/^pt/i.test(language)) return COMMANDS.pt;
+  return COMMANDS.en;
 }
 
 export const COMMANDS = {
@@ -339,5 +683,23 @@ export const COMMANDS = {
     { command: 'report', description: 'Report a reply or the character' },
     { command: 'stop', description: 'Stop relaying the reply (no refund)' },
     { command: 'help', description: 'Help' },
+  ],
+  es: [
+    { command: 'character', description: 'Ver o cambiar el personaje' },
+    { command: 'price', description: 'Precio, saldo y presupuesto' },
+    { command: 'budget', description: 'Gemas que el relay puede gastar' },
+    { command: 'image', description: 'Generar una imagen de una respuesta' },
+    { command: 'report', description: 'Reportar una respuesta o el personaje' },
+    { command: 'stop', description: 'Dejar de transmitir la respuesta (sin reembolso)' },
+    { command: 'help', description: 'Ayuda' },
+  ],
+  pt: [
+    { command: 'character', description: 'Ver ou trocar o personagem' },
+    { command: 'price', description: 'Preço, saldo e orçamento' },
+    { command: 'budget', description: 'Gemas que o relay pode gastar' },
+    { command: 'image', description: 'Gerar uma imagem de uma resposta' },
+    { command: 'report', description: 'Denunciar uma resposta ou o personagem' },
+    { command: 'stop', description: 'Parar de encaminhar a resposta (sem reembolso)' },
+    { command: 'help', description: 'Ajuda' },
   ],
 };

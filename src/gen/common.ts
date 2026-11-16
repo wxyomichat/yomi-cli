@@ -122,7 +122,15 @@ export async function confirmSpend(
   options: SpendOptions,
 ): Promise<boolean> {
   if (options.total <= 0) {
-    say(io, tr(`${options.action}：免费。`, `${options.action}: free.`));
+    say(
+      io,
+      tr(
+        `${options.action}：免费。`,
+        `${options.action}: free.`,
+        `${options.action}: gratis.`,
+        `${options.action}: grátis.`,
+      ),
+    );
     return true;
   }
   const balance = await readBalance(gateway);
@@ -130,6 +138,8 @@ export async function confirmSpend(
     ? tr(
         `（${options.unit.price} 钻石/${options.unit.label} × ${options.unit.count}）`,
         ` (${options.unit.price} gems/${options.unit.label} × ${options.unit.count})`,
+        ` (${options.unit.price} gemas/${options.unit.label} × ${options.unit.count})`,
+        ` (${options.unit.price} gemas/${options.unit.label} × ${options.unit.count})`,
       )
     : '';
   say(
@@ -140,6 +150,8 @@ export async function confirmSpend(
       tr(
         `${options.action}：共 ${options.total} 钻石${detail}。`,
         `${options.action}: ${options.total} gems in total${detail}.`,
+        `${options.action}: ${options.total} gemas en total${detail}.`,
+        `${options.action}: ${options.total} gemas no total${detail}.`,
       ),
     ),
   );
@@ -150,11 +162,21 @@ export async function confirmSpend(
       tr(
         '暂时读不到钻石余额，为避免扣费出错没有继续。请稍后再试。',
         'Could not read your gem balance right now; stopped to avoid a wrong charge. Please try again later.',
+        'No se pudo leer tu saldo de gemas en este momento; se detuvo para evitar un cobro incorrecto. Vuelve a intentarlo más tarde.',
+        'Não foi possível ler seu saldo de gemas agora; a operação foi interrompida para evitar uma cobrança incorreta. Tente novamente mais tarde.',
       ),
     );
     return false;
   }
-  say(io, tr(`当前余额 ${balance} 钻石。`, `Current balance: ${balance} gems.`));
+  say(
+    io,
+    tr(
+      `当前余额 ${balance} 钻石。`,
+      `Current balance: ${balance} gems.`,
+      `Saldo actual: ${balance} gemas.`,
+      `Saldo atual: ${balance} gemas.`,
+    ),
+  );
   if (balance < options.total && options.replay)
     say(
       io,
@@ -164,6 +186,8 @@ export async function confirmSpend(
         tr(
           '余额低于这个价格：如果上次已经受理，重发不会再扣；如果没有受理，服务端会因余额不足拒绝。',
           'Your balance is below this price: if the last request was accepted, the resend is not charged again; if not, the server will refuse it because there are not enough gems.',
+          'Tu saldo es menor que este precio: si la última solicitud se aceptó, el reenvío no se vuelve a cobrar; si no, el servidor lo rechazará porque no hay suficientes gemas.',
+          'Seu saldo está abaixo deste preço: se a última solicitação foi aceita, o reenvio não é cobrado de novo; se não, o servidor vai recusá-lo porque não há gemas suficientes.',
         ),
       ),
     );
@@ -173,6 +197,8 @@ export async function confirmSpend(
       tr(
         `钻石不足（还差 ${options.total - balance}），请先在 Yomi App 或网页充值。没有发出请求。`,
         `Not enough gems (${options.total - balance} short). Top up in the Yomi app or on the web first. No request was sent.`,
+        `No tienes suficientes gemas (faltan ${options.total - balance}). Recarga primero en la app de Yomi o en la web. No se envió ninguna solicitud.`,
+        `Gemas insuficientes (faltam ${options.total - balance}). Recarregue primeiro no app do Yomi ou na web. Nenhuma solicitação foi enviada.`,
       ),
     );
     return false;
@@ -184,6 +210,8 @@ export async function confirmSpend(
       tr(
         '非交互运行时，花钻石需要加 --accept-price 明确同意上面的价格。',
         'When running non-interactively, add --accept-price to explicitly accept the price above before spending gems.',
+        'Al ejecutar sin interacción, agrega --accept-price para aceptar explícitamente el precio de arriba antes de gastar gemas.',
+        'Ao executar de forma não interativa, adicione --accept-price para aceitar explicitamente o preço acima antes de gastar gemas.',
       ),
     );
     return false;
@@ -194,6 +222,8 @@ export async function confirmSpend(
       tr(
         '确认按这个价格扣除钻石？输入 yes 继续：',
         'Charge gems at this price? Type yes to continue: ',
+        '¿Cobrar gemas a este precio? Escribe yes para continuar: ',
+        'Cobrar gemas por este preço? Digite yes para continuar: ',
       ),
     )) ?? '';
   return answer.trim().toLowerCase() === 'yes';
@@ -209,6 +239,8 @@ export function explainRefusal(io: Io, error: unknown): boolean {
         tr(
           '钻石不足，请先在 Yomi App 或网页充值。这次没有扣费。',
           'Not enough gems. Top up in the Yomi app or on the web first. Nothing was charged.',
+          'No tienes suficientes gemas. Recarga primero en la app de Yomi o en la web. No se cobró nada.',
+          'Gemas insuficientes. Recarregue primeiro no app do Yomi ou na web. Nada foi cobrado.',
         ),
       );
       break;
@@ -218,6 +250,8 @@ export function explainRefusal(io: Io, error: unknown): boolean {
         tr(
           `生成太频繁或同时进行的任务太多，请稍后再试（${error.code}）。`,
           `Too many generations, or too many tasks running at once. Please try again later (${error.code}).`,
+          `Demasiadas generaciones o demasiadas tareas en curso a la vez. Vuelve a intentarlo más tarde (${error.code}).`,
+          `Gerações demais ou tarefas demais em andamento ao mesmo tempo. Tente novamente mais tarde (${error.code}).`,
         ),
       );
       break;
@@ -227,6 +261,8 @@ export function explainRefusal(io: Io, error: unknown): boolean {
         tr(
           `这项生成功能暂时不可用（${error.code}）。`,
           `This generation feature is unavailable right now (${error.code}).`,
+          `Esta función de generación no está disponible en este momento (${error.code}).`,
+          `Este recurso de geração não está disponível no momento (${error.code}).`,
         ),
       );
       break;
@@ -236,6 +272,8 @@ export function explainRefusal(io: Io, error: unknown): boolean {
         tr(
           `服务端拒绝了这次生成（${error.code}${error.message && error.message !== error.code ? `：${error.message}` : ''}）。这次没有扣费。`,
           `The server refused this generation (${error.code}${error.message && error.message !== error.code ? `: ${error.message}` : ''}). Nothing was charged.`,
+          `El servidor rechazó esta generación (${error.code}${error.message && error.message !== error.code ? `: ${error.message}` : ''}). No se cobró nada.`,
+          `O servidor recusou esta geração (${error.code}${error.message && error.message !== error.code ? `: ${error.message}` : ''}). Nada foi cobrado.`,
         ),
       );
   }
@@ -293,10 +331,24 @@ export async function download(
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(tr('结果地址不合法', 'The result address is invalid'));
+    throw new Error(
+      tr(
+        '结果地址不合法',
+        'The result address is invalid',
+        'La dirección del resultado no es válida',
+        'O endereço do resultado é inválido',
+      ),
+    );
   }
   if (parsed.protocol !== 'https:' && !loopbackHttpAllowed(parsed))
-    throw new Error(tr('结果地址不是 https', 'The result address is not https'));
+    throw new Error(
+      tr(
+        '结果地址不是 https',
+        'The result address is not https',
+        'La dirección del resultado no es https',
+        'O endereço do resultado não é https',
+      ),
+    );
   const response = await (options.fetcher ?? fetch)(url, { redirect: 'error' });
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -304,13 +356,22 @@ export async function download(
       tr(
         `下载结果失败（HTTP ${response.status}）`,
         `Downloading the result failed (HTTP ${response.status})`,
+        `No se pudo descargar el resultado (HTTP ${response.status})`,
+        `Falha ao baixar o resultado (HTTP ${response.status})`,
       ),
     );
   }
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > options.maxBytes) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error(tr('结果文件太大', 'The result file is too large'));
+    throw new Error(
+      tr(
+        '结果文件太大',
+        'The result file is too large',
+        'El archivo del resultado es demasiado grande',
+        'O arquivo do resultado é grande demais',
+      ),
+    );
   }
   // Counted as it arrives: a compressed or chunked answer cannot grow past the cap in memory.
   const chunks: Buffer[] = [];
@@ -323,7 +384,14 @@ export async function download(
       total += value.byteLength;
       if (total > options.maxBytes) {
         await reader.cancel().catch(() => undefined);
-        throw new Error(tr('结果文件太大', 'The result file is too large'));
+        throw new Error(
+          tr(
+            '结果文件太大',
+            'The result file is too large',
+            'El archivo del resultado es demasiado grande',
+            'O arquivo do resultado é grande demais',
+          ),
+        );
       }
       chunks.push(Buffer.from(value));
     }

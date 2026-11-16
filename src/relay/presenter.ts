@@ -162,6 +162,8 @@ export class ReplyPresenter {
       tr(
         `Telegram 调用失败：${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
         `Telegram call failed: ${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
+        `Falló la llamada a Telegram: ${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
+        `Falha na chamada ao Telegram: ${error instanceof TelegramError ? `${error.method} ${error.code}` : 'error'}`,
       ),
     );
   }
@@ -230,6 +232,8 @@ export class ReplyPresenter {
           tr(
             '这个 bot 不能发流式草稿，改为编辑消息',
             "This bot can't stream drafts, editing messages instead",
+            'Este bot no puede transmitir borradores; se editarán los mensajes en su lugar',
+            'Este bot não consegue transmitir rascunhos; editando as mensagens em vez disso',
           ),
         );
         return;

@@ -17,13 +17,13 @@ import { contentForSubmission, type ResolvedCharacter } from './character.js';
 
 export const ReviewState: Record<number, string> = {
   get 1() {
-    return tr('审核中', 'in review');
+    return tr('审核中', 'in review', 'en revisión', 'em revisão');
   },
   get 2() {
-    return tr('已通过', 'approved');
+    return tr('已通过', 'approved', 'aprobado', 'aprovado');
   },
   get 3() {
-    return tr('未通过', 'not approved');
+    return tr('未通过', 'not approved', 'no aprobado', 'não aprovado');
   },
 };
 
@@ -42,6 +42,8 @@ export class AlreadyCreated extends Error {
       tr(
         `这个文件的当前内容已经创建过角色 ${npcId}`,
         `A character was already created from this file's current content: ${npcId}`,
+        `Ya se creó un personaje con el contenido actual de este archivo: ${npcId}`,
+        `Um personagem já foi criado com o conteúdo atual deste arquivo: ${npcId}`,
       ),
     );
     this.name = 'AlreadyCreated';
@@ -56,29 +58,44 @@ export function failureMessage(code: string, recovering: boolean): string {
       ? tr(
           '之前未确认的提交被文本审核拒绝；文件内容未改动，请修改后重新提交',
           "The earlier unconfirmed submission was rejected by text review; your file wasn't changed. Edit it and submit again",
+          'La revisión de texto rechazó el envío anterior sin confirmar; tu archivo no se modificó. Edítalo y vuelve a enviarlo',
+          'A revisão de texto rejeitou o envio anterior não confirmado; seu arquivo não foi alterado. Edite-o e envie novamente',
         )
       : tr(
           '角色文本没有通过审核，请修改后重试',
           "The character's text didn't pass review; edit it and try again",
+          'El texto del personaje no pasó la revisión; edítalo e inténtalo de nuevo',
+          'O texto do personagem não passou na revisão; edite-o e tente novamente',
         );
   if (code === '50301')
     return tr(
       '文本审核暂时不可用，请稍后重试',
       'Text review is unavailable right now; try again later',
+      'La revisión de texto no está disponible en este momento; inténtalo más tarde',
+      'A revisão de texto está indisponível no momento; tente novamente mais tarde',
     );
   if (code === '409')
     return tr(
       '角色已被修改，请重新读取后再提交',
       'The character has changed; reload it and submit again',
+      'El personaje cambió; vuelve a cargarlo y envíalo de nuevo',
+      'O personagem foi alterado; recarregue-o e envie novamente',
     );
   if (code === '402' || code === '40201' || code === '1503021061')
-    return tr('钻石不足', 'Not enough gems');
+    return tr('钻石不足', 'Not enough gems', 'No tienes suficientes gemas', 'Gemas insuficientes');
   if (code === 'NETWORK')
     return tr(
       '网络错误，提交结果未知；再次运行同一命令会用原请求重试，不会重复创建',
       "Network error; the outcome is unknown. Running the same command again resends the original request and won't create a second character",
+      'Error de red; el resultado es desconocido. Si vuelves a ejecutar el mismo comando, se reenviará la solicitud original y no se creará un segundo personaje',
+      'Erro de rede; o resultado é desconhecido. Executar o mesmo comando novamente reenvia a solicitação original e não cria um segundo personagem',
     );
-  return tr(`提交失败（${code}）`, `Submission failed (${code})`);
+  return tr(
+    `提交失败（${code}）`,
+    `Submission failed (${code})`,
+    `Error en el envío (${code})`,
+    `Falha no envio (${code})`,
+  );
 }
 
 export function readCharacter(result: Json) {
@@ -89,7 +106,12 @@ export function readCharacter(result: Json) {
   if (!npcId || npcId === '0')
     throw new UgcFailure(
       'PROTOCOL',
-      tr('创建回包没有角色 ID', 'The create response has no character ID'),
+      tr(
+        '创建回包没有角色 ID',
+        'The create response has no character ID',
+        'La respuesta de creación no tiene ID de personaje',
+        'A resposta da criação não tem ID de personagem',
+      ),
     );
   return {
     npcId,

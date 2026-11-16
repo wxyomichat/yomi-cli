@@ -165,6 +165,8 @@ WantedBy=default.target
     tr(
       '后台服务只支持 macOS（launchd）和 Linux（systemd --user）',
       'The background service supports only macOS (launchd) and Linux (systemd --user)',
+      'El servicio en segundo plano solo es compatible con macOS (launchd) y Linux (systemd --user)',
+      'O serviço em segundo plano só funciona no macOS (launchd) e no Linux (systemd --user)',
     ),
   );
 }
@@ -201,6 +203,8 @@ export function installService(plan: ServicePlan, run: Runner = runCommand) {
         tr(
           `${command} ${args.join(' ')} 失败${result.output ? `：${result.output.slice(0, 300)}` : ''}`,
           `${command} ${args.join(' ')} failed${result.output ? `: ${result.output.slice(0, 300)}` : ''}`,
+          `${command} ${args.join(' ')} falló${result.output ? `: ${result.output.slice(0, 300)}` : ''}`,
+          `${command} ${args.join(' ')} falhou${result.output ? `: ${result.output.slice(0, 300)}` : ''}`,
         ),
       );
   }

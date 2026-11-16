@@ -43,7 +43,12 @@ export function normalizeOrigin(value: string, label: string): string {
     url = new URL(value);
   } catch {
     throw new UsageError(
-      tr(`${label} 不是合法地址：${value}`, `${label} is not a valid address: ${value}`),
+      tr(
+        `${label} 不是合法地址：${value}`,
+        `${label} is not a valid address: ${value}`,
+        `${label} no es una dirección válida: ${value}`,
+        `${label} não é um endereço válido: ${value}`,
+      ),
     );
   }
   const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
@@ -52,6 +57,8 @@ export function normalizeOrigin(value: string, label: string): string {
       tr(
         `${label} 必须是 https（本机 127.0.0.1 可用 http）：${value}`,
         `${label} must be https (http is allowed for 127.0.0.1 on this machine): ${value}`,
+        `${label} debe ser https (se permite http para 127.0.0.1 en este equipo): ${value}`,
+        `${label} deve ser https (http é permitido para 127.0.0.1 nesta máquina): ${value}`,
       ),
     );
   if (url.username || url.password || (url.pathname !== '/' && url.pathname !== ''))
@@ -59,6 +66,8 @@ export function normalizeOrigin(value: string, label: string): string {
       tr(
         `${label} 只能是 origin（不带路径和账号）：${value}`,
         `${label} must be an origin only (no path or account): ${value}`,
+        `${label} debe ser solo un origen (sin ruta ni cuenta): ${value}`,
+        `${label} deve ser só uma origem (sem caminho nem conta): ${value}`,
       ),
     );
   return url.origin;
@@ -74,16 +83,27 @@ export function resolveEnvironment(
       tr(
         `--env 只能是 test 或 prod，收到：${String(name)}`,
         `--env must be test or prod, got: ${String(name)}`,
+        `--env debe ser test o prod; se recibió: ${String(name)}`,
+        `--env deve ser test ou prod; recebido: ${String(name)}`,
       ),
     );
   const lane = options.lane ?? environ.YOMI_LANE ?? '';
   if (lane && !LANE.test(lane))
-    throw new UsageError(tr(`泳道名不合法：${lane}`, `Invalid lane name: ${lane}`));
+    throw new UsageError(
+      tr(
+        `泳道名不合法：${lane}`,
+        `Invalid lane name: ${lane}`,
+        `Nombre de lane no válido: ${lane}`,
+        `Nome de lane inválido: ${lane}`,
+      ),
+    );
   if (lane && name === 'prod')
     throw new UsageError(
       tr(
         '泳道只在测试环境（--env test）可用',
         'Lanes are only available in the test environment (--env test)',
+        'Las lanes solo están disponibles en el entorno de pruebas (--env test)',
+        'As lanes só estão disponíveis no ambiente de teste (--env test)',
       ),
     );
   const apiOverride = environ.YOMI_API_ORIGIN;
@@ -97,6 +117,8 @@ export function resolveEnvironment(
         tr(
           '测试环境的地址需要自己配置：设置 YOMI_TEST_API_ORIGIN 和 YOMI_TEST_WEB_ORIGIN（或 YOMI_API_ORIGIN / YOMI_WEB_ORIGIN）',
           'The test environment has no built-in addresses: set YOMI_TEST_API_ORIGIN and YOMI_TEST_WEB_ORIGIN (or YOMI_API_ORIGIN / YOMI_WEB_ORIGIN)',
+          'El entorno de pruebas no tiene direcciones integradas: configura YOMI_TEST_API_ORIGIN y YOMI_TEST_WEB_ORIGIN (o YOMI_API_ORIGIN / YOMI_WEB_ORIGIN)',
+          'O ambiente de teste não tem endereços embutidos: defina YOMI_TEST_API_ORIGIN e YOMI_TEST_WEB_ORIGIN (ou YOMI_API_ORIGIN / YOMI_WEB_ORIGIN)',
         ),
       );
     base = {
@@ -145,12 +167,18 @@ export function isProduction(env: Environment): boolean {
 export function describeEnvironment(env: Environment): string {
   const parts = [
     env.custom
-      ? tr(`自定义地址（${env.name}）`, `custom address (${env.name})`)
+      ? tr(
+          `自定义地址（${env.name}）`,
+          `custom address (${env.name})`,
+          `dirección personalizada (${env.name})`,
+          `endereço personalizado (${env.name})`,
+        )
       : env.name === 'prod'
-        ? tr('生产环境', 'production')
-        : tr('测试环境 test', 'test environment'),
+        ? tr('生产环境', 'production', 'producción', 'produção')
+        : tr('测试环境 test', 'test environment', 'entorno de pruebas', 'ambiente de teste'),
   ];
-  if (env.lane) parts.push(tr(`泳道 ${env.lane}`, `lane ${env.lane}`));
+  if (env.lane)
+    parts.push(tr(`泳道 ${env.lane}`, `lane ${env.lane}`, `lane ${env.lane}`, `lane ${env.lane}`));
   if (env.custom) parts.push(`API ${env.apiOrigin}`);
   return parts.join(' · ');
 }

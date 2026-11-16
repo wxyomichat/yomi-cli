@@ -62,7 +62,10 @@ async function resolveImage(
   progress: Progress,
   fetcher?: typeof fetch,
 ): Promise<{ ref: ImageRef; url: string }> {
-  const label = kind === 'cover' ? tr('形象图', 'cover image') : tr('头像', 'avatar');
+  const label =
+    kind === 'cover'
+      ? tr('形象图', 'cover image', 'imagen de portada', 'imagem de capa')
+      : tr('头像', 'avatar', 'avatar', 'avatar');
   if (input.kind === 'asset') return { ref: { asset_id: input.assetId }, url: '' };
   if (input.kind === 'upload') {
     const result = await call(
@@ -77,6 +80,8 @@ async function resolveImage(
         tr(
           `${label} upload_id ${input.uploadId} 不是审核通过的 ${kind} 图片`,
           `The ${label} upload_id ${input.uploadId} isn't a ${kind} image that passed review`,
+          `El upload_id ${input.uploadId} (${label}) no es una imagen de tipo ${kind} aprobada en la revisión`,
+          `O upload_id ${input.uploadId} (${label}) não é uma imagem ${kind} aprovada na revisão`,
         ),
       );
     return { ref: { upload_id: input.uploadId }, url: String(upload.image_url ?? '') };
@@ -88,10 +93,14 @@ async function resolveImage(
       ? tr(
           `${label}（${image.width}×${image.height}）已审核通过，沿用`,
           `The ${label} (${image.width}×${image.height}) already passed review; reusing it`,
+          `Se reutiliza la imagen ya aprobada en la revisión (${label}, ${image.width}×${image.height})`,
+          `Reutilizando a imagem já aprovada na revisão (${label}, ${image.width}×${image.height})`,
         )
       : tr(
           `上传并审核${label}（${image.width}×${image.height}）…`,
           `Uploading the ${label} (${image.width}×${image.height}) for review…`,
+          `Subiendo la imagen para su revisión (${label}, ${image.width}×${image.height})…`,
+          `Enviando a imagem para revisão (${label}, ${image.width}×${image.height})…`,
         ),
   );
   const receipt = await prepareImage(gateway, state, image, kind, label, fetcher);
@@ -107,7 +116,14 @@ export async function resolveCharacter(
 ): Promise<ResolvedCharacter> {
   checkSpec(spec);
   const voice = spec.voice!;
-  progress(tr('读取声音目录…', 'Loading the voice catalog…'));
+  progress(
+    tr(
+      '读取声音目录…',
+      'Loading the voice catalog…',
+      'Cargando el catálogo de voces…',
+      'Carregando o catálogo de vozes…',
+    ),
+  );
   const catalog = await loadVoiceCatalog(gateway);
   const missing = voice.voices.filter(
     (item) => !catalog.voices.some((entry) => entry.id === item.id),
@@ -118,6 +134,8 @@ export async function resolveCharacter(
         tr(
           `声音 ${item.id} 不在当前目录里（yomi voices 查看可选声音）`,
           `Voice ${item.id} isn't in the current catalog (run yomi voices to see the voices you can use)`,
+          `La voz ${item.id} no está en el catálogo actual (ejecuta yomi voices para ver las voces que puedes usar)`,
+          `A voz ${item.id} não está no catálogo atual (execute yomi voices para ver as vozes que você pode usar)`,
         ),
       ),
     );
@@ -127,7 +145,14 @@ export async function resolveCharacter(
   let tagIds: string[] = [];
   let tagNames: string[] = [];
   if (spec.tags.length) {
-    progress(tr('读取标签目录…', 'Loading the tag catalog…'));
+    progress(
+      tr(
+        '读取标签目录…',
+        'Loading the tag catalog…',
+        'Cargando el catálogo de etiquetas…',
+        'Carregando o catálogo de tags…',
+      ),
+    );
     const tags = await loadAllTags(gateway);
     const resolved = resolveTags(spec.tags, tags.tags);
     if (resolved.unknown.length)
@@ -136,12 +161,19 @@ export async function resolveCharacter(
           tr(
             `标签「${tag}」不在当前目录里（yomi tags 查看）`,
             `Tag "${tag}" isn't in the current catalog (see yomi tags)`,
+            `La etiqueta "${tag}" no está en el catálogo actual (consulta yomi tags)`,
+            `A tag "${tag}" não está no catálogo atual (veja yomi tags)`,
           ),
         ),
       );
     if (resolved.ids.length > tags.maxSelect)
       throw new SpecError([
-        tr(`标签最多选 ${tags.maxSelect} 个`, `You can pick at most ${tags.maxSelect} tags`),
+        tr(
+          `标签最多选 ${tags.maxSelect} 个`,
+          `You can pick at most ${tags.maxSelect} tags`,
+          `Puedes elegir como máximo ${tags.maxSelect} etiquetas`,
+          `Você pode escolher no máximo ${tags.maxSelect} tags`,
+        ),
       ]);
     tagIds = resolved.ids;
     tagNames = tagIds.map((id) => tags.tags.find((tag) => tag.id === id)?.name ?? id);
@@ -208,7 +240,12 @@ export function contentForSubmission(
   if (!declarationAccepted)
     throw new UgcFailure(
       'DECLARATION',
-      tr('需要先确认 18+ 与版权声明', 'Confirm the 18+ and copyright declaration first'),
+      tr(
+        '需要先确认 18+ 与版权声明',
+        'Confirm the 18+ and copyright declaration first',
+        'Primero confirma la declaración de 18+ y derechos de autor',
+        'Primeiro confirme a declaração de 18+ e direitos autorais',
+      ),
     );
   return {
     ...baseContent(character),

@@ -73,7 +73,7 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
 } from './telegram.js';
-import { COMMANDS, type ImageBillingNote, relayTexts, type RelayTexts } from './texts.js';
+import { type ImageBillingNote, relayCommands, relayTexts, type RelayTexts } from './texts.js';
 
 /**
  * `yomi relay --telegram`: the owner's private chat with their own bot ⇄ a published Yomi
@@ -342,15 +342,19 @@ export class Relay {
         tr(
           '这个 bot 设置了 webhook（正被别的服务使用）。relay 不会删除它：请为 relay 单独建一个 bot。',
           'This bot has a webhook set (another service is using it). Relay will not delete it: please create a separate bot for relay.',
+          'Este bot tiene un webhook configurado (otro servicio lo está usando). Relay no lo eliminará: crea un bot aparte para relay.',
+          'Este bot tem um webhook configurado (outro serviço está usando). O relay não vai excluí-lo: crie um bot separado para o relay.',
         ),
       );
-    const commands = /^zh/i.test(this.options.language) ? COMMANDS.zh : COMMANDS.en;
+    const commands = relayCommands(this.options.language);
     await this.bot.setMyCommands(commands).catch(() => undefined);
     if (this.state.bindAccount(this.userId))
       this.log(
         tr(
           '这台电脑上登录的 Yomi 账号和上次不同：预算、角色和记录已重置',
           'A different Yomi account is signed in on this machine than last time: budget, character and records have been reset',
+          'En este equipo inició sesión una cuenta de Yomi distinta de la última vez: se restablecieron el presupuesto, el personaje y los registros',
+          'Uma conta do Yomi diferente da última vez está conectada nesta máquina: orçamento, personagem e registros foram redefinidos',
         ),
       );
     this.state.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
@@ -365,6 +369,8 @@ export class Relay {
         tr(
           '上次有一条消息的花费还没核对：读不到余额，下一条发送前再核对',
           "The cost of a message from last time is not checked yet: can't read the balance, will check before the next send",
+          'El costo de un mensaje de la vez anterior aún no se verificó: no se puede leer el saldo, se verificará antes del próximo envío',
+          'O custo de uma mensagem da última vez ainda não foi conferido: não foi possível ler o saldo, será conferido antes do próximo envio',
         ),
       );
     // A picture asked for before the restart is still followed (and forwarded when it is ours).
@@ -373,6 +379,8 @@ export class Relay {
         tr(
           '上次请求的图片还没有结算，继续跟进',
           'The image requested last time is not settled yet, still following it',
+          'La imagen solicitada la vez anterior aún no se liquidó, se sigue su estado',
+          'A imagem solicitada da última vez ainda não foi finalizada, continuando a acompanhá-la',
         ),
       );
       this.startImageJob(kept);
@@ -381,6 +389,8 @@ export class Relay {
         tr(
           '上次的生图请求结果未知：主人发送 /image resume 用同一个请求重发',
           'The outcome of the last image request is unknown: the owner can send /image resume to resend the same request',
+          'El resultado de la última solicitud de imagen es desconocido: el dueño puede enviar /image resume para reenviar la misma solicitud',
+          'O resultado da última solicitação de imagem é desconhecido: o dono pode enviar /image resume para reenviar a mesma solicitação',
         ),
       );
     const { billing, allowance } = this.state.data;
@@ -389,6 +399,8 @@ export class Relay {
         tr(
           `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机上限 ${allowance.maxSpend}，还可花 ${Math.max(0, this.left())}`,
           `Budget ${billing.budget} gems (used ${billing.spent}); local spending cap ${allowance.maxSpend}, ${Math.max(0, this.left())} left to spend`,
+          `Presupuesto ${billing.budget} gemas (usadas ${billing.spent}); límite de gasto local ${allowance.maxSpend}, quedan ${Math.max(0, this.left())} por gastar`,
+          `Orçamento ${billing.budget} gemas (usadas ${billing.spent}); limite de gastos local ${allowance.maxSpend}, restam ${Math.max(0, this.left())} para gastar`,
         ),
       );
     this.connect();
@@ -405,6 +417,8 @@ export class Relay {
         tr(
           `yomi ${VERSION} 低于服务端要求的 ${this.policy.minVersion}，relay 暂停`,
           `yomi ${VERSION} is older than the ${this.policy.minVersion} the server requires, relay paused`,
+          `yomi ${VERSION} es anterior a la versión ${this.policy.minVersion} que requiere el servidor, relay en pausa`,
+          `yomi ${VERSION} é anterior à versão ${this.policy.minVersion} exigida pelo servidor, relay pausado`,
         ),
       );
     this.log(
@@ -415,6 +429,12 @@ export class Relay {
         `Server policy: ${this.policy.source === 'server' ? 'loaded' : 'not provided (using the strictest defaults)'}` +
           `; free messages only: ${this.policy.freeOnly ? 'supported' : 'not confirmed'}` +
           `; compliance notices: ${this.policy.complianceNotices ? 'added by the server' : 'shown by relay'}`,
+        `Política del servidor: ${this.policy.source === 'server' ? 'cargada' : 'no proporcionada (se usan los valores predeterminados más estrictos)'}` +
+          `; solo mensajes gratis: ${this.policy.freeOnly ? 'admitido' : 'sin confirmar'}` +
+          `; avisos de cumplimiento: ${this.policy.complianceNotices ? 'los agrega el servidor' : 'los muestra relay'}`,
+        `Política do servidor: ${this.policy.source === 'server' ? 'carregada' : 'não fornecida (usando os padrões mais restritivos)'}` +
+          `; só mensagens grátis: ${this.policy.freeOnly ? 'suportado' : 'não confirmado'}` +
+          `; avisos de conformidade: ${this.policy.complianceNotices ? 'adicionados pelo servidor' : 'exibidos pelo relay'}`,
       ),
     );
   }
@@ -441,6 +461,8 @@ export class Relay {
             tr(
               '另一个程序正在用这个 bot 收消息（Telegram 409）。同一个 bot 只能运行一个 relay。',
               'Another program is receiving messages with this bot (Telegram 409). Only one relay can run per bot.',
+              'Otro programa está recibiendo mensajes con este bot (Telegram 409). Solo puede ejecutarse un relay por bot.',
+              'Outro programa está recebendo mensagens com este bot (Telegram 409). Só é possível executar um relay por bot.',
             ),
           );
         if (error instanceof TelegramError && error.unauthorized)
@@ -449,12 +471,16 @@ export class Relay {
             tr(
               'Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 yomi relay --telegram --set-token 重新设置。',
               'Telegram does not accept this bot token (it may have been reset in BotFather). Set it again with yomi relay --telegram --set-token.',
+              'Telegram no acepta este token de bot (puede que se haya restablecido en BotFather). Vuelve a configurarlo con yomi relay --telegram --set-token.',
+              'O Telegram não aceita este token de bot (ele pode ter sido redefinido no BotFather). Configure-o novamente com yomi relay --telegram --set-token.',
             ),
           );
         this.log(
           tr(
             `Telegram 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
             `Can't reach Telegram right now, retrying in ${Math.round(backoff / 1000)} s`,
+            `No se puede conectar con Telegram en este momento, se reintentará en ${Math.round(backoff / 1000)} s`,
+            `Não foi possível conectar ao Telegram agora, tentando novamente em ${Math.round(backoff / 1000)} s`,
           ),
         );
         await sleep(backoff, this.abort.signal);
@@ -515,7 +541,14 @@ export class Relay {
         chat.type !== 'private' &&
         ['member', 'administrator', 'restricted'].includes(member.status)
       ) {
-        this.log(tr('有人把 bot 拉进了群，已退出', 'Someone added the bot to a group; it left'));
+        this.log(
+          tr(
+            '有人把 bot 拉进了群，已退出',
+            'Someone added the bot to a group; it left',
+            'Alguien agregó el bot a un grupo; el bot salió',
+            'Alguém adicionou o bot a um grupo; ele saiu',
+          ),
+        );
         await this.bot.leaveChat(chat.id).catch(() => undefined);
       }
       return;
@@ -531,6 +564,8 @@ export class Relay {
           tr(
             `已忽略非主人的消息（共 ${this.strangers} 条，没有转发、没有扣费）`,
             `Ignored messages from someone other than the owner (${this.strangers} in total, not forwarded, not charged)`,
+            `Se ignoraron mensajes de alguien que no es el dueño (${this.strangers} en total, sin reenviar, sin cobro)`,
+            `Mensagens de alguém que não é o dono foram ignoradas (${this.strangers} no total, não encaminhadas, sem cobrança)`,
           ),
         );
       return;
@@ -575,6 +610,8 @@ export class Relay {
       tr(
         `已配对：Telegram 用户 ${message.from.first_name}（${message.from.id}）`,
         `Paired: Telegram user ${message.from.first_name} (${message.from.id})`,
+        `Vinculado: usuario de Telegram ${message.from.first_name} (${message.from.id})`,
+        `Pareado: usuário do Telegram ${message.from.first_name} (${message.from.id})`,
       ),
     );
     await this.say(this.texts.paired(`@${this.state.data.botUsername}`));
@@ -630,7 +667,14 @@ export class Relay {
       profile = await characterProfile(this.gateway, npcId);
     } catch (error) {
       if (error instanceof NotSignedIn) throw error;
-      this.log(tr('角色读取失败', "Couldn't load the character"));
+      this.log(
+        tr(
+          '角色读取失败',
+          "Couldn't load the character",
+          'No se pudo cargar el personaje',
+          'Não foi possível carregar o personagem',
+        ),
+      );
       if (announce) await this.say(this.texts.characterBad);
       return;
     }
@@ -641,6 +685,8 @@ export class Relay {
       tr(
         `当前角色：${character.name}（${npcId}${character.group ? '，群聊' : ''}）`,
         `Current character: ${character.name} (${npcId}${character.group ? ', group chat' : ''})`,
+        `Personaje actual: ${character.name} (${npcId}${character.group ? ', chat grupal' : ''})`,
+        `Personagem atual: ${character.name} (${npcId}${character.group ? ', chat em grupo' : ''})`,
       ),
     );
     if (!announce) return;
@@ -849,6 +895,8 @@ export class Relay {
         tr(
           `主人确认了预算 ${button.amount} 钻石`,
           `The owner confirmed a budget of ${button.amount} gems`,
+          `El dueño confirmó un presupuesto de ${button.amount} gemas`,
+          `O dono confirmou um orçamento de ${button.amount} gemas`,
         ),
       );
       return void (await this.say(this.texts.budgetSet(button.amount)));
@@ -971,6 +1019,8 @@ export class Relay {
         tr(
           '读不到余额：这条只用免费额度的回复无法核对是否扣费',
           "Can't read the balance: can't check whether this free-messages-only reply was charged",
+          'No se puede leer el saldo: no se puede verificar si se cobró esta respuesta en modo solo mensajes gratis',
+          'Não foi possível ler o saldo: não é possível conferir se esta resposta no modo só mensagens grátis foi cobrada',
         ),
       );
     else this.state.update({ pending: { before, mode: billing.mode, price, at: Date.now() } });
@@ -1016,7 +1066,12 @@ export class Relay {
       return;
     }
     this.log(
-      tr(`已转发一条消息给「${character.name}」`, `Forwarded a message to "${character.name}"`),
+      tr(
+        `已转发一条消息给「${character.name}」`,
+        `Forwarded a message to "${character.name}"`,
+        `Se reenvió un mensaje a "${character.name}"`,
+        `Uma mensagem foi encaminhada para "${character.name}"`,
+      ),
     );
     turn.streamId = answer.streamId;
     turn.assistantMid = answer.assistantMid;
@@ -1044,6 +1099,8 @@ export class Relay {
         tr(
           `发送被拒绝：${error.kind}（${error.code}）`,
           `Send refused: ${error.kind} (${error.code})`,
+          `Envío rechazado: ${error.kind} (${error.code})`,
+          `Envio recusado: ${error.kind} (${error.code})`,
         ),
       );
       switch (error.kind) {
@@ -1083,6 +1140,8 @@ export class Relay {
       tr(
         `发送失败：${error instanceof Error ? error.name : 'error'}`,
         `Send failed: ${error instanceof Error ? error.name : 'error'}`,
+        `Falló el envío: ${error instanceof Error ? error.name : 'error'}`,
+        `Falha no envio: ${error instanceof Error ? error.name : 'error'}`,
       ),
     );
     await this.say(this.texts.refused(''));
@@ -1219,6 +1278,8 @@ export class Relay {
         tr(
           `回复发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
           `Couldn't send the reply to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `No se pudo enviar la respuesta a Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `Não foi possível enviar a resposta ao Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
         ),
       );
     }
@@ -1228,6 +1289,8 @@ export class Relay {
           tr(
             '暂时读不到余额：这条回复的花费会在下一条发送前核对',
             "Can't read the balance right now: this reply's cost will be checked before the next send",
+            'No se puede leer el saldo en este momento: el costo de esta respuesta se verificará antes del próximo envío',
+            'Não foi possível ler o saldo agora: o custo desta resposta será conferido antes do próximo envio',
           ),
         );
     } catch (error) {
@@ -1248,7 +1311,14 @@ export class Relay {
     if (!turn && this.job) return this.stopImage();
     if (!turn || turn.settled || turn.presenter.isClosed)
       return void (await this.say(this.texts.nothingToStop));
-    this.log(tr('主人停止了这条回复的转发', 'The owner stopped forwarding this reply'));
+    this.log(
+      tr(
+        '主人停止了这条回复的转发',
+        'The owner stopped forwarding this reply',
+        'El dueño detuvo el reenvío de esta respuesta',
+        'O dono parou o encaminhamento desta resposta',
+      ),
+    );
     await turn.presenter.stop(this.texts.stopped);
   }
 
@@ -1271,6 +1341,8 @@ export class Relay {
         tr(
           `余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入预算`,
           `The balance went up during this reply, so the cost can't be measured: counting ${estimate} gems against the budget`,
+          `El saldo aumentó durante esta respuesta, así que no se puede medir el costo: se descuentan ${estimate} gemas del presupuesto`,
+          `O saldo aumentou durante esta resposta, então o custo não pode ser medido: ${estimate} gemas serão descontadas do orçamento`,
         ),
       );
       await this.book(estimate, pending.mode);
@@ -1288,6 +1360,8 @@ export class Relay {
         tr(
           `只用免费额度时被扣了 ${amount} 钻石，relay 暂停`,
           `Charged ${amount} gems while on free messages only, relay paused`,
+          `Se cobraron ${amount} gemas en modo solo mensajes gratis, relay en pausa`,
+          `Foram cobradas ${amount} gemas no modo só mensagens grátis, relay pausado`,
         ),
       );
       this.state.update({ billingPause: 'freeCharged' });
@@ -1301,6 +1375,8 @@ export class Relay {
       tr(
         `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机还可花 ${Math.max(0, this.ceilingLeft())}）`,
         `This reply cost ${amount} gems (budget ${billing.budget}, used ${spent}; ${Math.max(0, this.ceilingLeft())} left under the local spending cap)`,
+        `Esta respuesta costó ${amount} gemas (presupuesto ${billing.budget}, usadas ${spent}; quedan ${Math.max(0, this.ceilingLeft())} dentro del límite de gasto local)`,
+        `Esta resposta custou ${amount} gemas (orçamento ${billing.budget}, usadas ${spent}; restam ${Math.max(0, this.ceilingLeft())} dentro do limite de gastos local)`,
       ),
     );
     if (this.left() <= 0) {
@@ -1338,6 +1414,8 @@ export class Relay {
         tr(
           '主人放弃追踪上一次结果未知的生图请求',
           'The owner stopped tracking the last image request with an unknown outcome',
+          'El dueño dejó de seguir la última solicitud de imagen con resultado desconocido',
+          'O dono parou de acompanhar a última solicitação de imagem com resultado desconhecido',
         ),
       );
       return void (await this.say(this.texts.imageForgotten));
@@ -1392,7 +1470,14 @@ export class Relay {
       if (error instanceof ApiError && error.code === CHARACTER_REMOVED)
         return void (await this.say(this.texts.unavailable));
       // An unknown price is "not free": nothing is asked for.
-      this.log(tr('读不到生图配置', "Can't read the image generation settings"));
+      this.log(
+        tr(
+          '读不到生图配置',
+          "Can't read the image generation settings",
+          'No se puede leer la configuración de generación de imágenes',
+          'Não foi possível ler as configurações de geração de imagem',
+        ),
+      );
       return void (await this.say(this.texts.imageConfigUnavailable));
     }
     if (!config.enabled) return void (await this.say(this.texts.imageDisabled));
@@ -1546,6 +1631,8 @@ export class Relay {
           tr(
             `重发的生图请求被拒绝：${refusal?.kind}（${refusal?.code}），保留请求`,
             `The resent image request was refused: ${refusal?.kind} (${refusal?.code}), keeping the request`,
+            `Se rechazó la solicitud de imagen reenviada: ${refusal?.kind} (${refusal?.code}), se conserva la solicitud`,
+            `A solicitação de imagem reenviada foi recusada: ${refusal?.kind} (${refusal?.code}), mantendo a solicitação`,
           ),
         );
         return void (await this.say(
@@ -1565,6 +1652,8 @@ export class Relay {
         tr(
           `生图请求结果未知（${code}）：保留请求，等主人用 /image resume 重发同一个请求`,
           `Image request outcome unknown (${code}): keeping the request until the owner resends it with /image resume`,
+          `Resultado desconocido de la solicitud de imagen (${code}): se conserva la solicitud hasta que el dueño la reenvíe con /image resume`,
+          `Resultado desconhecido da solicitação de imagem (${code}): mantendo a solicitação até o dono reenviá-la com /image resume`,
         ),
       );
       return void (await this.say(this.texts.imageUnknown));
@@ -1578,10 +1667,14 @@ export class Relay {
         ? tr(
             '同一个生图请求已被受理过：继续跟进，不会重复扣费',
             'This image request was already accepted: still following it, no second charge',
+            'Esta solicitud de imagen ya se aceptó: se sigue su estado, sin un segundo cobro',
+            'Esta solicitação de imagem já foi aceita: continuando a acompanhá-la, sem uma segunda cobrança',
           )
         : tr(
             `已为「${record.name}」请求一张图片（${record.price > 0 ? `${record.price} 钻石` : '免费'}）`,
             `Requested an image for "${record.name}" (${record.price > 0 ? `${record.price} gems` : 'free'})`,
+            `Se solicitó una imagen para "${record.name}" (${record.price > 0 ? `${record.price} gemas` : 'gratis'})`,
+            `Uma imagem foi solicitada para "${record.name}" (${record.price > 0 ? `${record.price} gemas` : 'grátis'})`,
           ),
     );
     await this.say(this.texts.imageStarted(record.price));
@@ -1593,6 +1686,8 @@ export class Relay {
       tr(
         `生图被拒绝：${refusal.kind}（${refusal.code}）`,
         `Image generation refused: ${refusal.kind} (${refusal.code})`,
+        `Generación de imagen rechazada: ${refusal.kind} (${refusal.code})`,
+        `Geração de imagem recusada: ${refusal.kind} (${refusal.code})`,
       ),
     );
     switch (refusal.kind) {
@@ -1684,7 +1779,12 @@ export class Relay {
           return this.signedOut();
         if (!reported)
           this.log(
-            tr('读取生图进度失败，继续重试', "Couldn't read the image progress, still retrying"),
+            tr(
+              '读取生图进度失败，继续重试',
+              "Couldn't read the image progress, still retrying",
+              'No se pudo leer el progreso de la imagen, se sigue reintentando',
+              'Não foi possível ler o progresso da imagem, continuando a tentar',
+            ),
           );
         reported = true;
       }
@@ -1698,6 +1798,8 @@ export class Relay {
             tr(
               '图片的扣费还没结算完：下一次发送前再核对',
               "The image's charge is not settled yet: will check before the next send",
+              'El cobro de la imagen aún no se liquidó: se verificará antes del próximo envío',
+              'A cobrança da imagem ainda não foi finalizada: será conferida antes do próximo envio',
             ),
           );
         else {
@@ -1705,6 +1807,8 @@ export class Relay {
             tr(
               '图片还没生成好：服务端会继续，主人可用 /image resume 继续等待',
               'The image is not ready yet: the server keeps going, the owner can wait again with /image resume',
+              'La imagen aún no está lista: el servidor sigue trabajando, el dueño puede volver a esperar con /image resume',
+              'A imagem ainda não está pronta: o servidor continua trabalhando, o dono pode esperar de novo com /image resume',
             ),
           );
           await this.say(this.texts.imageTimeout);
@@ -1742,6 +1846,8 @@ export class Relay {
           tr(
             `图片没有生成成功（${task.failure?.code || '未知原因'}）`,
             `The image was not generated (${task.failure?.code || 'unknown reason'})`,
+            `No se generó la imagen (${task.failure?.code || 'motivo desconocido'})`,
+            `A imagem não foi gerada (${task.failure?.code || 'motivo desconhecido'})`,
           ),
         );
       } else if (task.delivery === ImageDelivery.skippedConversationDeleted)
@@ -1788,6 +1894,8 @@ export class Relay {
           tr(
             '暂时读不到余额：这张图片的花费会在下一条发送前核对',
             "Can't read the balance right now: this image's cost will be checked before the next send",
+            'No se puede leer el saldo en este momento: el costo de esta imagen se verificará antes del próximo envío',
+            'Não foi possível ler o saldo agora: o custo desta imagem será conferido antes do próximo envio',
           ),
         );
       return;
@@ -1799,6 +1907,8 @@ export class Relay {
         tr(
           `这张图片按任务记为 ${known} 钻石；同期余额变化 ${pending.before - now}（其他扣费或充值），按任务计入预算`,
           `The task records this image at ${known} gems; the balance changed by ${pending.before - now} meanwhile (other charges or top-ups), counting the task's amount against the budget`,
+          `La tarea registra esta imagen en ${known} gemas; mientras tanto el saldo cambió en ${pending.before - now} (otros cobros o recargas), se descuenta del presupuesto el monto de la tarea`,
+          `A tarefa registra esta imagem em ${known} gemas; enquanto isso o saldo mudou em ${pending.before - now} (outras cobranças ou recargas), descontando do orçamento o valor da tarefa`,
         ),
       );
     await this.book(known, pending.mode);
@@ -1834,13 +1944,22 @@ export class Relay {
         tr(
           '配对的主人变了：这张图片没有转发',
           'The paired owner changed: this image was not forwarded',
+          'Cambió el dueño vinculado: esta imagen no se reenvió',
+          'O dono pareado mudou: esta imagem não foi encaminhada',
         ),
       );
       return;
     }
     const picture = await this.downloadImage(task, message);
     if (!picture) {
-      this.log(tr('图片下载失败', "Couldn't download the image"));
+      this.log(
+        tr(
+          '图片下载失败',
+          "Couldn't download the image",
+          'No se pudo descargar la imagen',
+          'Não foi possível baixar a imagem',
+        ),
+      );
       return void (await this.say(this.texts.imageForwardFailed));
     }
     await this.bot.sendChatAction(owner.chatId, 'upload_photo').catch(() => undefined);
@@ -1853,13 +1972,20 @@ export class Relay {
       const mid = task.resultMid || message?.mid || '';
       if (mid) this.state.rememberReply(sent.message_id, mid);
       this.log(
-        tr(`已转发一张「${record.name}」的图片`, `Forwarded an image from "${record.name}"`),
+        tr(
+          `已转发一张「${record.name}」的图片`,
+          `Forwarded an image from "${record.name}"`,
+          `Se reenvió una imagen de "${record.name}"`,
+          `Uma imagem de "${record.name}" foi encaminhada`,
+        ),
       );
     } catch (error) {
       this.log(
         tr(
           `图片发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
           `Couldn't send the image to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `No se pudo enviar la imagen a Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `Não foi possível enviar a imagem ao Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
         ),
       );
       await this.say(this.texts.imageForwardFailed);
@@ -1912,7 +2038,14 @@ export class Relay {
     if (!job) return void (await this.say(this.texts.nothingToStop));
     job.stop.abort();
     await job.done;
-    this.log(tr('主人停止了等待图片', 'The owner stopped waiting for the image'));
+    this.log(
+      tr(
+        '主人停止了等待图片',
+        'The owner stopped waiting for the image',
+        'El dueño dejó de esperar la imagen',
+        'O dono parou de esperar a imagem',
+      ),
+    );
     await this.say(this.texts.imageStopped);
   }
 
@@ -1962,7 +2095,14 @@ export class Relay {
       },
       onState: (state) => {
         if (state === 'retrying' && connection.reconnects % 10 === 1)
-          this.log(tr('Yomi 长连接断开，正在重连', 'Yomi connection dropped, reconnecting'));
+          this.log(
+            tr(
+              'Yomi 长连接断开，正在重连',
+              'Yomi connection dropped, reconnecting',
+              'Se cortó la conexión con Yomi, reconectando',
+              'A conexão com o Yomi caiu, reconectando',
+            ),
+          );
       },
     });
     connection.on((event) => {
@@ -2002,6 +2142,8 @@ export class Relay {
       tr(
         'Yomi 登录已失效，relay 暂停；在这台电脑上运行 yomi login 后自动恢复',
         'Yomi sign-in expired, relay paused; it resumes on its own after you run yomi login on this machine',
+        'La sesión de Yomi expiró, relay en pausa; se reanuda solo cuando ejecutes yomi login en este equipo',
+        'O login do Yomi expirou, relay pausado; ele volta sozinho depois que você executar yomi login nesta máquina',
       ),
     );
     this.gate = 'signedOut';
@@ -2031,7 +2173,14 @@ export class Relay {
     if (this.resumeTimer) clearInterval(this.resumeTimer);
     this.resumeTimer = null;
     if (this.gate === 'signedOut') this.gate = '';
-    this.log(tr('Yomi 登录已恢复', 'Yomi sign-in restored'));
+    this.log(
+      tr(
+        'Yomi 登录已恢复',
+        'Yomi sign-in restored',
+        'Sesión de Yomi restablecida',
+        'Login do Yomi restabelecido',
+      ),
+    );
     this.connect();
     await this.say(this.texts.resumed);
     const kept = this.keptImage();
@@ -2045,6 +2194,8 @@ export class Relay {
       tr(
         '这台电脑上登录的 Yomi 账号变了，relay 已停止。',
         'The Yomi account signed in on this machine changed, relay stopped.',
+        'Cambió la cuenta de Yomi con sesión iniciada en este equipo, relay detenido.',
+        'A conta do Yomi conectada nesta máquina mudou, relay parado.',
       ),
     );
     void this.say(this.texts.otherAccount);
@@ -2058,6 +2209,8 @@ export class Relay {
       tr(
         `处理消息出错：${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
         `Error handling a message: ${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
+        `Error al procesar un mensaje: ${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
+        `Erro ao processar uma mensagem: ${error instanceof Error ? `${error.name} ${error.message}`.slice(0, 200) : 'error'}`,
       ),
     );
   }
@@ -2081,13 +2234,20 @@ export class Relay {
     } catch (error) {
       if (error instanceof TelegramError && error.blocked)
         this.log(
-          tr('主人屏蔽了 bot，消息发不出去', "The owner blocked the bot, messages can't be sent"),
+          tr(
+            '主人屏蔽了 bot，消息发不出去',
+            "The owner blocked the bot, messages can't be sent",
+            'El dueño bloqueó el bot, no se pueden enviar mensajes',
+            'O dono bloqueou o bot, não é possível enviar mensagens',
+          ),
         );
       else
         this.log(
           tr(
             `发给 Telegram 失败${error instanceof TelegramError ? `（${error.code}）` : ''}`,
             `Couldn't send to Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
+            `No se pudo enviar a Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
+            `Não foi possível enviar ao Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
           ),
         );
       return null;

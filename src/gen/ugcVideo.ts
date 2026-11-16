@@ -40,10 +40,10 @@ export type VideoUse = 'dynamic-cover' | 'intro-video';
 /** What a use is called in the CLI's output. */
 export const VIDEO_USE_LABEL: Record<VideoUse, string> = {
   get 'dynamic-cover'() {
-    return tr('动态封面', 'dynamic cover');
+    return tr('动态封面', 'dynamic cover', 'portada animada', 'capa animada');
   },
   get 'intro-video'() {
-    return tr('介绍视频', 'intro video');
+    return tr('介绍视频', 'intro video', 'video de presentación', 'vídeo de apresentação');
   },
 };
 
@@ -56,6 +56,8 @@ export function parseVideoUse(value: string): VideoUse {
     tr(
       '--as 只能是 dynamic-cover（动态封面）或 intro-video（介绍视频）',
       '--as must be dynamic-cover (dynamic cover) or intro-video (intro video)',
+      '--as debe ser dynamic-cover (portada animada) o intro-video (video de presentación)',
+      '--as deve ser dynamic-cover (capa animada) ou intro-video (vídeo de apresentação)',
     ),
   );
 }
@@ -93,14 +95,28 @@ function str(value: unknown): string {
 function whole(value: unknown, label: string): number {
   const parsed = typeof value === 'string' && /^-?\d+$/.test(value) ? Number(value) : value;
   if (typeof parsed !== 'number' || !Number.isSafeInteger(parsed))
-    throw protocol(tr(`回包的 ${label} 不是整数`, `${label} in the response is not an integer`));
+    throw protocol(
+      tr(
+        `回包的 ${label} 不是整数`,
+        `${label} in the response is not an integer`,
+        `${label} en la respuesta no es un número entero`,
+        `${label} na resposta não é um número inteiro`,
+      ),
+    );
   return parsed;
 }
 
 function listOf(value: unknown, label: string): unknown[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value))
-    throw protocol(tr(`回包的 ${label} 不是列表`, `${label} in the response is not a list`));
+    throw protocol(
+      tr(
+        `回包的 ${label} 不是列表`,
+        `${label} in the response is not a list`,
+        `${label} en la respuesta no es una lista`,
+        `${label} na resposta não é uma lista`,
+      ),
+    );
   return value;
 }
 
@@ -108,7 +124,14 @@ function objectOf(value: unknown, label: string): Json {
   try {
     return object(value);
   } catch {
-    throw protocol(tr(`回包缺少 ${label}`, `The response is missing ${label}`));
+    throw protocol(
+      tr(
+        `回包缺少 ${label}`,
+        `The response is missing ${label}`,
+        `A la respuesta le falta ${label}`,
+        `Falta ${label} na resposta`,
+      ),
+    );
   }
 }
 
@@ -136,7 +159,14 @@ export type VideoConfig = {
 function durationsOf(value: unknown, label: string): number[] {
   const durations = listOf(value, label).map((item) => whole(item, label));
   if (!durations.length || durations.some((seconds) => seconds <= 0))
-    throw protocol(tr(`配置的 ${label} 不合法`, `${label} in the config is invalid`));
+    throw protocol(
+      tr(
+        `配置的 ${label} 不合法`,
+        `${label} in the config is invalid`,
+        `${label} en la configuración no es válido`,
+        `${label} na configuração é inválido`,
+      ),
+    );
   return durations;
 }
 
@@ -148,7 +178,12 @@ function pricesOf(value: unknown, label: string): Map<number, number> | null {
     const amount = whole(entry.diamond_amount, `${label}.diamond_amount`);
     if (amount < 0)
       throw protocol(
-        tr(`配置的 ${label} 有负数价格`, `${label} in the config has a negative price`),
+        tr(
+          `配置的 ${label} 有负数价格`,
+          `${label} in the config has a negative price`,
+          `${label} en la configuración tiene un precio negativo`,
+          `${label} na configuração tem um preço negativo`,
+        ),
       );
     prices.set(whole(entry.duration_seconds, `${label}.duration_seconds`), amount);
   }
@@ -160,7 +195,14 @@ export function readVideoConfig(result: Json): VideoConfig {
   const configVersion = str(result.config_version);
   const customVersion = str(result.custom_version);
   if (!configVersion || !customVersion)
-    throw protocol(tr('视频配置缺少版本', 'The video config is missing its version'));
+    throw protocol(
+      tr(
+        '视频配置缺少版本',
+        'The video config is missing its version',
+        'A la configuración de video le falta la versión',
+        'Falta a versão na configuração de vídeo',
+      ),
+    );
   const customDurations = durationsOf(result.custom_duration_seconds, 'custom_duration_seconds');
   const customDefaultDuration = whole(
     result.custom_default_duration_seconds,
@@ -171,6 +213,8 @@ export function readVideoConfig(result: Json): VideoConfig {
       tr(
         '视频配置的自定义默认时长不在可选时长里',
         "The video config's default custom duration is not one of its durations",
+        'La duración personalizada por defecto de la configuración de video no está entre sus duraciones',
+        'A duração personalizada padrão da configuração de vídeo não está entre as suas durações',
       ),
     );
   const templates = listOf(result.templates, 'templates').map((item): VideoTemplate => {
@@ -186,13 +230,20 @@ export function readVideoConfig(result: Json): VideoConfig {
     };
     if (!template.id || !template.version || !template.name)
       throw protocol(
-        tr('视频模板缺少 ID、版本或名称', 'A video template is missing its ID, version or name'),
+        tr(
+          '视频模板缺少 ID、版本或名称',
+          'A video template is missing its ID, version or name',
+          'A una plantilla de video le falta su ID, versión o nombre',
+          'Um template de vídeo está sem ID, versão ou nome',
+        ),
       );
     if (!template.durations.includes(template.defaultDuration))
       throw protocol(
         tr(
           `模板 ${template.id} 的默认时长不在可选时长里`,
           `The default duration of template ${template.id} is not one of its durations`,
+          `La duración por defecto de la plantilla ${template.id} no está entre sus duraciones`,
+          `A duração padrão do template ${template.id} não está entre as suas durações`,
         ),
       );
     return template;
@@ -255,7 +306,12 @@ export async function uploadFrame(
   if (jpeg.length < 1 || jpeg.length > FRAME_MAX_BYTES)
     throw new UgcFailure(
       'INVALID_ARGUMENT',
-      tr('首帧 JPEG 超过 10 MiB', 'The first-frame JPEG is over 10 MiB'),
+      tr(
+        '首帧 JPEG 超过 10 MiB',
+        'The first-frame JPEG is over 10 MiB',
+        'El JPEG del primer fotograma supera los 10 MiB',
+        'O JPEG do primeiro quadro passa de 10 MiB',
+      ),
     );
   const prepared = await call(gateway, 'ugc/video/frame/prepare', {
     request_id: frameRequestId(draftId, jpeg),
@@ -267,7 +323,12 @@ export async function uploadFrame(
   const url = str(prepared.upload_url);
   if (!uploadId || !url)
     throw protocol(
-      tr('首帧上传登记回包不完整', 'The first-frame upload registration response is incomplete'),
+      tr(
+        '首帧上传登记回包不完整',
+        'The first-frame upload registration response is incomplete',
+        'La respuesta del registro de subida del primer fotograma está incompleta',
+        'A resposta do registro de envio do primeiro quadro está incompleta',
+      ),
     );
   await putObject(url, jpeg, 'image/jpeg', fetcher, { 'x-oss-object-acl': 'private' });
   const completed = await call(gateway, 'ugc/video/frame/complete', { upload_id: uploadId });
@@ -277,6 +338,8 @@ export async function uploadFrame(
       tr(
         '首帧上传完成回包没有 asset_id',
         'The first-frame upload completion response has no asset_id',
+        'La respuesta de finalización de la subida del primer fotograma no tiene asset_id',
+        'A resposta de conclusão do envio do primeiro quadro não tem asset_id',
       ),
     );
   return assetId;
@@ -348,13 +411,25 @@ export async function quoteVideo(
   const expiresAt = whole(quote.expires_at_ms, 'expires_at_ms');
   const serverTime = whole(quote.server_time_ms, 'server_time_ms');
   if (!quoteId || amount < 0)
-    throw protocol(tr('报价回包不完整', 'The quote response is incomplete'));
-  if (expiresAt <= serverTime) throw protocol(tr('报价已过期', 'The quote has expired'));
+    throw protocol(
+      tr(
+        '报价回包不完整',
+        'The quote response is incomplete',
+        'La respuesta de la cotización está incompleta',
+        'A resposta da cotação está incompleta',
+      ),
+    );
+  if (expiresAt <= serverTime)
+    throw protocol(
+      tr('报价已过期', 'The quote has expired', 'La cotización venció', 'A cotação expirou'),
+    );
   if (!sameInput(readInput(quote.input), input))
     throw protocol(
       tr(
         '报价对应的参数与发送的不一致，无法确认价格',
         "The quote's parameters do not match what was sent; the price cannot be confirmed",
+        'Los parámetros de la cotización no coinciden con lo enviado; no se puede confirmar el precio',
+        'Os parâmetros da cotação não correspondem ao que foi enviado; não é possível confirmar o preço',
       ),
     );
   return { quoteId, amount, input, deadline: received + (expiresAt - serverTime) };
@@ -399,18 +474,37 @@ export function readVideoTask(value: unknown): VideoTask {
   const status = str(task.status);
   const billing = str(task.billing_status);
   if (!STATUSES.has(status) || !BILLING.has(billing))
-    throw protocol(tr('视频任务的状态不认识', 'Unknown video task status'));
+    throw protocol(
+      tr(
+        '视频任务的状态不认识',
+        'Unknown video task status',
+        'Estado de tarea de video desconocido',
+        'Status de tarefa de vídeo desconhecido',
+      ),
+    );
   const resultAssetId = str(task.result_asset_id);
   if ((status === 'SUCCEEDED') !== Boolean(resultAssetId))
     throw protocol(
-      tr('视频任务的结果与状态不一致', "The video task's result does not match its status"),
+      tr(
+        '视频任务的结果与状态不一致',
+        "The video task's result does not match its status",
+        'El resultado de la tarea de video no coincide con su estado',
+        'O resultado da tarefa de vídeo não corresponde ao seu status',
+      ),
     );
   const progress =
     task.progress_percent === undefined || task.progress_percent === null
       ? null
       : whole(task.progress_percent, 'progress_percent');
   if (progress !== null && (progress < 0 || progress > 99))
-    throw protocol(tr('视频任务的进度不合法', "The video task's progress is invalid"));
+    throw protocol(
+      tr(
+        '视频任务的进度不合法',
+        "The video task's progress is invalid",
+        'El progreso de la tarea de video no es válido',
+        'O progresso da tarefa de vídeo é inválido',
+      ),
+    );
   const parsed: VideoTask = {
     requestId: str(task.request_id),
     taskId: str(task.task_id),
@@ -425,7 +519,14 @@ export function readVideoTask(value: unknown): VideoTask {
     createdAtMs: whole(task.created_at_ms ?? 0, 'created_at_ms'),
   };
   if (!parsed.requestId || !parsed.taskId)
-    throw protocol(tr('视频任务缺少 ID', 'The video task is missing its ID'));
+    throw protocol(
+      tr(
+        '视频任务缺少 ID',
+        'The video task is missing its ID',
+        'A la tarea de video le falta su ID',
+        'Falta o ID na tarefa de vídeo',
+      ),
+    );
   return parsed;
 }
 
@@ -486,7 +587,12 @@ export async function createVideo(gateway: Gateway, body: CreateVideoBody): Prom
   const task = readVideoTask(result.task);
   if (task.requestId !== body.request_id)
     throw protocol(
-      tr('创建回包的 request_id 不一致', "The create response's request_id does not match"),
+      tr(
+        '创建回包的 request_id 不一致',
+        "The create response's request_id does not match",
+        'El request_id de la respuesta de creación no coincide',
+        'O request_id da resposta de criação não corresponde',
+      ),
     );
   return task;
 }
@@ -505,7 +611,12 @@ export async function readTask(
   const task = readVideoTask(result.task);
   if (task.requestId !== requestId)
     throw protocol(
-      tr('任务回包的 request_id 不一致', "The task response's request_id does not match"),
+      tr(
+        '任务回包的 request_id 不一致',
+        "The task response's request_id does not match",
+        'El request_id de la respuesta de la tarea no coincide',
+        'O request_id da resposta da tarefa não corresponde',
+      ),
     );
   return task;
 }
@@ -577,7 +688,14 @@ export async function resolveVideoMedia(
   const result = await call(gateway, 'ugc/video/media', { asset_id: assetId, purpose });
   const url = str(result.url);
   if (!url || str(result.asset_id) !== assetId)
-    throw protocol(tr('视频地址回包不完整', 'The video address response is incomplete'));
+    throw protocol(
+      tr(
+        '视频地址回包不完整',
+        'The video address response is incomplete',
+        'La respuesta con la dirección del video está incompleta',
+        'A resposta com o endereço do vídeo está incompleta',
+      ),
+    );
   return {
     url,
     mime: str(result.mime_type),
@@ -608,11 +726,18 @@ export async function saveVideoPreview(
           tr(
             '下载的视频大小与服务端不一致',
             "The downloaded video's size does not match the server's",
+            'El tamaño del video descargado no coincide con el del servidor',
+            'O tamanho do vídeo baixado não corresponde ao do servidor',
           ),
         );
       if (media.sha256 && sha256(file.bytes) !== media.sha256)
         throw new Error(
-          tr('下载的视频校验不一致', "The downloaded video's checksum does not match"),
+          tr(
+            '下载的视频校验不一致',
+            "The downloaded video's checksum does not match",
+            'La suma de verificación del video descargado no coincide',
+            'O checksum do vídeo baixado não confere',
+          ),
         );
       return saveFile(dir, `${name}.${extensionOf(media.mime || file.mime)}`, file.bytes);
     } catch (error) {
@@ -742,16 +867,28 @@ export function describeVideoFeatures(features: Json | null | undefined): string
       ?.length ?? 0;
   const parts = [
     count('dynamic_cover')
-      ? tr(`动态封面 ${count('dynamic_cover')} 条`, `${count('dynamic_cover')} dynamic cover(s)`)
+      ? tr(
+          `动态封面 ${count('dynamic_cover')} 条`,
+          `${count('dynamic_cover')} dynamic cover(s)`,
+          `${count('dynamic_cover')} portada(s) animada(s)`,
+          `${count('dynamic_cover')} capa(s) animada(s)`,
+        )
       : '',
     count('intro_video')
-      ? tr(`介绍视频 ${count('intro_video')} 条`, `${count('intro_video')} intro video(s)`)
+      ? tr(
+          `介绍视频 ${count('intro_video')} 条`,
+          `${count('intro_video')} intro video(s)`,
+          `${count('intro_video')} video(s) de presentación`,
+          `${count('intro_video')} vídeo(s) de apresentação`,
+        )
       : '',
   ].filter(Boolean);
   return parts.length
     ? tr(
         `AI 视频：${parts.join('、')}（选用最新一条）`,
         `AI video: ${parts.join(', ')} (the newest is used)`,
+        `Video con IA: ${parts.join(', ')} (se usa el más reciente)`,
+        `Vídeo com IA: ${parts.join(', ')} (o mais recente é usado)`,
       )
     : '';
 }

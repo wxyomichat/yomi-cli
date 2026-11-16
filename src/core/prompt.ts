@@ -8,7 +8,7 @@ import type { Io } from './ui.js';
  */
 export class SecretInputCancelled extends Error {
   constructor() {
-    super(tr('已取消输入', 'Input cancelled'));
+    super(tr('已取消输入', 'Input cancelled', 'Entrada cancelada', 'Entrada cancelada'));
     this.name = 'SecretInputCancelled';
   }
 }
@@ -37,6 +37,8 @@ export function readSecret(
         tr(
           '没有终端可输入：用 --token-stdin 从标准输入传入',
           'No terminal to type into: pass it on standard input with --token-stdin',
+          'No hay terminal donde escribir: pásalo por la entrada estándar con --token-stdin',
+          'Não há terminal para digitar: passe pela entrada padrão com --token-stdin',
         ),
       ),
     );
@@ -84,7 +86,12 @@ function readFirstLine(input: NodeJS.ReadableStream): Promise<string> {
     };
     const onData = (chunk: Buffer | string) => {
       buffered += chunk.toString();
-      if (buffered.length > MAX_LENGTH) done(new Error(tr('输入过长', 'Input too long')));
+      if (buffered.length > MAX_LENGTH)
+        done(
+          new Error(
+            tr('输入过长', 'Input too long', 'Entrada demasiado larga', 'Entrada longa demais'),
+          ),
+        );
       else if (/\r?\n/.test(buffered)) done(null);
     };
     const onEnd = () => done(null);

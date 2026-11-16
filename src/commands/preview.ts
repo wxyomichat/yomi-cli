@@ -37,6 +37,8 @@ const disclaimer = () =>
   tr(
     'AI 生成的回复，所有角色均已年满 18 岁。AI-generated replies. All characters are 18+.',
     'AI-generated replies. All characters are 18+.',
+    'Respuestas generadas por IA. Todos los personajes son mayores de 18 años.',
+    'Respostas geradas por IA. Todos os personagens são maiores de 18 anos.',
   );
 
 function renderParagraphs(io: Io, name: string, paragraphs: ImParagraph[]): string {
@@ -45,7 +47,7 @@ function renderParagraphs(io: Io, name: string, paragraphs: ImParagraph[]): stri
     .map((paragraph) =>
       paragraph.type === ParagraphType.narration
         ? paint(io, 'italic', paint(io, 'dim', paragraph.text))
-        : `${paint(io, 'magenta', (paragraph.npcName || name) + tr('：', ': '))}${paragraph.text}`,
+        : `${paint(io, 'magenta', (paragraph.npcName || name) + tr('：', ': ', ': ', ': '))}${paragraph.text}`,
     )
     .join('\n');
 }
@@ -55,10 +57,14 @@ function quotaLine(quota: PreviewQuota) {
     ? tr(
         `剩余 ${quota.remaining} 条免费消息${quota.limit ? `（共 ${quota.limit} 条）` : ''}`,
         `${quota.remaining} free message${quota.remaining === 1 ? '' : 's'} left${quota.limit ? ` (${quota.limit} in total)` : ''}`,
+        `Mensajes gratis restantes: ${quota.remaining}${quota.limit ? ` (de ${quota.limit} en total)` : ''}`,
+        `Mensagens grátis restantes: ${quota.remaining}${quota.limit ? ` (de ${quota.limit} no total)` : ''}`,
       )
     : tr(
         `免费消息已用完${quota.limit ? `（共 ${quota.limit} 条）` : ''}，之后的消息将按标准费率消耗钻石`,
         `No free messages left${quota.limit ? ` (${quota.limit} in total)` : ''}; further messages cost gems at the standard rate`,
+        `No te quedan mensajes gratis${quota.limit ? ` (${quota.limit} en total)` : ''}; los siguientes mensajes cuestan gemas a la tarifa estándar`,
+        `Não há mais mensagens grátis${quota.limit ? ` (${quota.limit} no total)` : ''}; as próximas mensagens custam gemas na tarifa padrão`,
       );
 }
 
@@ -72,7 +78,13 @@ class ReplyPrinter {
   ) {}
   update(text: string) {
     if (!this.started) {
-      this.io.stdout.write(paint(this.io, 'magenta', tr(`${this.name}：`, `${this.name}: `)));
+      this.io.stdout.write(
+        paint(
+          this.io,
+          'magenta',
+          tr(`${this.name}：`, `${this.name}: `, `${this.name}: `, `${this.name}: `),
+        ),
+      );
       this.started = true;
     }
     if (text.startsWith(this.printed)) this.io.stdout.write(text.slice(this.printed.length));
@@ -104,6 +116,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
     tr(
       `预演角色「${spec.name}」（${describeEnvironment(context.env)}）`,
       `Previewing the character "${spec.name}" (${describeEnvironment(context.env)})`,
+      `Vista previa del personaje "${spec.name}" (${describeEnvironment(context.env)})`,
+      `Prévia do personagem "${spec.name}" (${describeEnvironment(context.env)})`,
     ),
   );
   if (!(await confirmDeclaration(context, options.acceptDeclaration))) {
@@ -113,6 +127,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
       tr(
         '没有确认声明，未开始预演。',
         'The declaration was not confirmed; the preview did not start.',
+        'No se confirmó la declaración; la vista previa no se inició.',
+        'A declaração não foi confirmada; a prévia não foi iniciada.',
       ),
     );
     return;
@@ -123,6 +139,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
       tr(
         '用草稿角色发预演消息（可能消耗服务端额度和钻石）',
         'send preview messages to a draft character (this may use server quota and gems)',
+        'enviar mensajes de vista previa a un personaje en borrador (esto puede usar cuota del servidor y gemas)',
+        'enviar mensagens de prévia para um personagem em rascunho (isso pode usar cota do servidor e gemas)',
       ),
       options.confirmProd,
     ))
@@ -138,7 +156,19 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
     (line) => say(io, paint(io, 'dim', line)),
     context.fetch,
   );
-  say(io, paint(io, 'dim', tr('准备预演会话…', 'Preparing the preview session…')));
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      tr(
+        '准备预演会话…',
+        'Preparing the preview session…',
+        'Preparando la sesión de vista previa…',
+        'Preparando a sessão de prévia…',
+      ),
+    ),
+  );
   const prepared: PreparedPreview = await preparePreview(
     gateway,
     state,
@@ -191,7 +221,16 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
   if (prepared.openingStatus === 2)
     say(
       io,
-      paint(io, 'dim', tr('（开场白暂不可用）', '(The opening message is unavailable for now)')),
+      paint(
+        io,
+        'dim',
+        tr(
+          '（开场白暂不可用）',
+          '(The opening message is unavailable for now)',
+          '(El mensaje de apertura no está disponible por ahora)',
+          '(A mensagem de abertura não está disponível no momento)',
+        ),
+      ),
     );
   else say(io, renderParagraphs(io, spec.name, prepared.openingParagraphs));
   say(io);
@@ -203,6 +242,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
       tr(
         '长连接暂时没有连上，回复会在生成完成后整段显示。',
         "The live connection isn't up yet; each reply will appear in full once it's generated.",
+        'La conexión en vivo aún no está activa; cada respuesta aparecerá completa cuando se genere.',
+        'A conexão ao vivo ainda não está ativa; cada resposta aparecerá completa quando for gerada.',
       ),
     );
 
@@ -217,7 +258,12 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
         let balance = '';
         try {
           const gems = await walletBalance(gateway);
-          balance = tr(`，当前余额 ${gems} 钻石`, ` (balance: ${gems} gems)`);
+          balance = tr(
+            `，当前余额 ${gems} 钻石`,
+            ` (balance: ${gems} gems)`,
+            ` (saldo: ${gems} gemas)`,
+            ` (saldo: ${gems} gemas)`,
+          );
         } catch {
           balance = '';
         }
@@ -229,6 +275,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
             tr(
               `免费消息已用完：继续发送将按标准费率消耗钻石${balance}。`,
               `No free messages left: sending more costs gems at the standard rate${balance}.`,
+              `No te quedan mensajes gratis: enviar más cuesta gemas a la tarifa estándar${balance}.`,
+              `Não há mais mensagens grátis: enviar mais custa gemas na tarifa padrão${balance}.`,
             ),
           ),
         );
@@ -236,10 +284,12 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           tr(
             '继续并按标准费率扣除钻石？输入 yes 确认：',
             'Continue and be charged gems at the standard rate? Type yes to confirm: ',
+            '¿Continuar y que se te cobren gemas a la tarifa estándar? Escribe yes para confirmar: ',
+            'Continuar e ser cobrado em gemas na tarifa padrão? Digite yes para confirmar: ',
           ),
         );
         if (!paidAllowed) {
-          say(io, tr('未发送。', 'Not sent.'));
+          say(io, tr('未发送。', 'Not sent.', 'No se envió.', 'Não enviado.'));
           return false;
         }
       }
@@ -256,6 +306,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           tr(
             '钻石不足，请先在 App 或网页充值。',
             'Not enough gems; top up in the app or on the web first.',
+            'No tienes suficientes gemas; recarga primero en la app o en la web.',
+            'Gemas insuficientes; recarregue primeiro no app ou na web.',
           ),
         );
         return false;
@@ -266,6 +318,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           tr(
             `发送失败（${error.code}）${error.message !== error.code ? '：' + error.message : ''}`,
             `Send failed (${error.code})${error.message !== error.code ? ': ' + error.message : ''}`,
+            `Error al enviar (${error.code})${error.message !== error.code ? ': ' + error.message : ''}`,
+            `Falha no envio (${error.code})${error.message !== error.code ? ': ' + error.message : ''}`,
           ),
         );
         return true;
@@ -298,6 +352,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
         tr(
           `预览回复失败，请重试${outcome.message ? `（${outcome.message}）` : ''}`,
           `The preview reply failed; please try again${outcome.message ? ` (${outcome.message})` : ''}`,
+          `La respuesta de la vista previa falló; inténtalo de nuevo${outcome.message ? ` (${outcome.message})` : ''}`,
+          `A resposta da prévia falhou; tente novamente${outcome.message ? ` (${outcome.message})` : ''}`,
         ),
       );
     } else if (outcome.kind === 'timeout') {
@@ -311,7 +367,12 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           io,
           reply.paragraphs.length
             ? renderParagraphs(io, spec.name, reply.paragraphs)
-            : tr(`${spec.name}：${reply.text}`, `${spec.name}: ${reply.text}`),
+            : tr(
+                `${spec.name}：${reply.text}`,
+                `${spec.name}: ${reply.text}`,
+                `${spec.name}: ${reply.text}`,
+                `${spec.name}: ${reply.text}`,
+              ),
         );
       } else
         warn(
@@ -319,6 +380,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           tr(
             '暂时没有收到回复，可以稍后用 /history 查看。',
             'No reply yet; check later with /history.',
+            'Aún no hay respuesta; revisa más tarde con /history.',
+            'Ainda não há resposta; confira mais tarde com /history.',
           ),
         );
     }
@@ -329,7 +392,7 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
   try {
     if (options.messages.length) {
       for (const text of options.messages) {
-        say(io, `${paint(io, 'cyan', tr('你：', 'You: '))}${text}`);
+        say(io, `${paint(io, 'cyan', tr('你：', 'You: ', 'Tú: ', 'Você: '))}${text}`);
         const goOn = await turn(text, async () => {
           if (!options.allowPaid)
             warn(
@@ -337,6 +400,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
               tr(
                 '非交互运行时，付费消息需要加 --allow-paid 明确同意。',
                 'When running non-interactively, add --allow-paid to explicitly allow paid messages.',
+                'Al ejecutar sin interacción, agrega --allow-paid para permitir explícitamente los mensajes de pago.',
+                'Ao executar de forma não interativa, adicione --allow-paid para permitir explicitamente mensagens pagas.',
               ),
             );
           return options.allowPaid;
@@ -351,6 +416,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
         tr(
           '没有终端可交互：用 --message 传入要发送的消息。',
           'No interactive terminal: pass the messages to send with --message.',
+          'No hay una terminal interactiva: pasa con --message los mensajes que quieres enviar.',
+          'Não há terminal interativo: passe com --message as mensagens que deseja enviar.',
         ),
       );
       return;
@@ -363,6 +430,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
         tr(
           '输入消息回车发送；/quota 查看免费条数，/history 查看记录，/quit 退出。',
           'Type a message and press Enter to send; /quota shows your free messages, /history the messages so far, /quit exits.',
+          'Escribe un mensaje y presiona Enter para enviarlo; /quota muestra tus mensajes gratis, /history los mensajes hasta ahora y /quit sale.',
+          'Digite uma mensagem e pressione Enter para enviar; /quota mostra suas mensagens grátis, /history as mensagens até agora e /quit sai.',
         ),
       ),
     );
@@ -376,6 +445,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           tr(
             '/quota 免费条数　/history 本次预演记录　/quit 退出',
             '/quota free messages  /history this preview so far  /quit exit',
+            '/quota mensajes gratis  /history esta vista previa hasta ahora  /quit salir',
+            '/quota mensagens grátis  /history esta prévia até agora  /quit sair',
           ),
         );
         return true;
@@ -390,10 +461,15 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
           say(
             io,
             message.user
-              ? `${paint(io, 'cyan', tr('你：', 'You: '))}${message.text}`
+              ? `${paint(io, 'cyan', tr('你：', 'You: ', 'Tú: ', 'Você: '))}${message.text}`
               : message.paragraphs.length
                 ? renderParagraphs(io, spec.name, message.paragraphs)
-                : tr(`${spec.name}：${message.text}`, `${spec.name}: ${message.text}`),
+                : tr(
+                    `${spec.name}：${message.text}`,
+                    `${spec.name}: ${message.text}`,
+                    `${spec.name}: ${message.text}`,
+                    `${spec.name}: ${message.text}`,
+                  ),
           );
         if (listed.quota) quota = newerQuota(quota, listed.quota);
         return true;
@@ -411,6 +487,8 @@ export async function preview(context: Context, spec: CharacterSpec, options: Pr
         tr(
           '预演已结束（临时会话已关闭，不会出现在正式聊天里）。',
           "Preview ended (the temporary session is closed and won't show up in your real chats).",
+          'La vista previa terminó (la sesión temporal se cerró y no aparecerá en tus chats reales).',
+          'A prévia terminou (a sessão temporária foi encerrada e não aparecerá nos seus chats reais).',
         ),
       ),
     );
@@ -457,7 +535,7 @@ async function repl(
   };
   try {
     for (;;) {
-      const line = await next(paint(io, 'cyan', tr('你：', 'You: ')));
+      const line = await next(paint(io, 'cyan', tr('你：', 'You: ', 'Tú: ', 'Você: ')));
       if (line === null) break;
       if (!(await onLine(line, ask))) break;
     }

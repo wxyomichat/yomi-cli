@@ -151,7 +151,12 @@ export function parseChatImageTask(value: unknown): ChatImageTask {
   if (!taskId)
     throw new ApiError(
       ApiError.transport,
-      tr('生图回包缺少 task_id', 'The image generation response has no task_id'),
+      tr(
+        '生图回包缺少 task_id',
+        'The image generation response has no task_id',
+        'La respuesta de generación de imagen no tiene task_id',
+        'A resposta da geração de imagem não tem task_id',
+      ),
       null,
     );
   const source = optionalObject(raw.source);
@@ -254,7 +259,12 @@ export async function createChatImageTask(
     if (content) throw new GenRefusal('rejected', 'NO_TASK', content);
     throw new ApiError(
       ApiError.transport,
-      tr('生图回包缺少 task', 'The image generation response has no task'),
+      tr(
+        '生图回包缺少 task',
+        'The image generation response has no task',
+        'La respuesta de generación de imagen no tiene task',
+        'A resposta da geração de imagem não tem task',
+      ),
       result,
       path,
     );
