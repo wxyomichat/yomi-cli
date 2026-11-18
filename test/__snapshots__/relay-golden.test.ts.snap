@@ -1,0 +1,365 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the relay, golden transcript > says the same things, in the same order, call for call 1`] = `
+{
+  "bot": [
+    {
+      "method": "getWebhookInfo",
+      "params": {},
+    },
+    {
+      "method": "setMyCommands",
+      "params": {
+        "commands": [
+          {
+            "command": "character",
+            "description": "查看或切换角色",
+          },
+          {
+            "command": "price",
+            "description": "价格、余额和预算",
+          },
+          {
+            "command": "budget",
+            "description": "设置可花的钻石上限",
+          },
+          {
+            "command": "image",
+            "description": "根据回复生成图片",
+          },
+          {
+            "command": "report",
+            "description": "举报回复或角色",
+          },
+          {
+            "command": "stop",
+            "description": "停止转发当前回复（不退费）",
+          },
+          {
+            "command": "help",
+            "description": "帮助",
+          },
+        ],
+        "scope": {
+          "type": "all_private_chats",
+        },
+      },
+    },
+  ],
+  "chats": {
+    "owner": [
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已配对：这个 bot 现在只为你转发消息。用 /character 选择角色，/help 查看命令。（@lin_golden_bot）",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "当前角色：林夏（ID 7300000000000009001）",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "你正在与 AI 角色「林夏」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<i>她合上书，看着你。</i>
+
+今天天气怎么样？这个问题，我想了很久。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已切换到「雾港」。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "你正在与 AI 角色「雾港」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<i>雾港的码头上，灯一盏盏亮起来。</i>
+
+<b>阿青</b>：新来的？",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<b>阿青</b>：大家好？我先说两句。
+
+<b>小白</b>：我也在听。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "每条回复约 5 钻石（以实际扣费为准）。当前余额 500 钻石。生成图片目前免费。
+当前不花钻石（只用免费额度）。本机上限 50 钻石，还可花 50。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "reply_markup": {
+            "inline_keyboard": [
+              [
+                {
+                  "callback_data": "<nonce 1>:y",
+                  "text": "允许最多 20 钻石",
+                },
+                {
+                  "callback_data": "<nonce 1>:n",
+                  "text": "取消",
+                },
+              ],
+            ],
+          },
+          "text": "确认允许 relay 最多花 20 钻石吗？用完会暂停，不会自动续。
+每条回复约 5 钻石（以实际扣费为准）。当前余额 500 钻石。",
+        },
+      },
+      {
+        "method": "answerCallbackQuery",
+        "params": {
+          "callback_query_id": "<callback 1>",
+        },
+      },
+      {
+        "method": "editMessageReplyMarkup",
+        "params": {
+          "chat_id": 5570001,
+          "message_id": "<message 10>",
+          "reply_markup": {
+            "inline_keyboard": [],
+          },
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已设置预算 20 钻石。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "reply_markup": {
+            "inline_keyboard": [
+              [
+                {
+                  "callback_data": "<nonce 2>:0",
+                  "text": "涉及未成年人",
+                },
+              ],
+              [
+                {
+                  "callback_data": "<nonce 2>:1",
+                  "text": "骚扰",
+                },
+              ],
+              [
+                {
+                  "callback_data": "<nonce 2>:c",
+                  "text": "举报这个角色",
+                },
+              ],
+            ],
+          },
+          "text": "选择举报原因（只收集，不代表已处理）：",
+        },
+      },
+      {
+        "method": "answerCallbackQuery",
+        "params": {
+          "callback_query_id": "<callback 2>",
+        },
+      },
+      {
+        "method": "editMessageReplyMarkup",
+        "params": {
+          "chat_id": 5570001,
+          "message_id": "<message 12>",
+          "reply_markup": {
+            "inline_keyboard": [],
+          },
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已提交，谢谢反馈。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "正在生成图片（免费），好了会发到这里。",
+        },
+      },
+      {
+        "method": "sendPhoto",
+        "params": {
+          "caption": "「雾港」的图片",
+          "chat_id": "5570001",
+          "parse_mode": "HTML",
+        },
+        "photo": {
+          "height": 128,
+          "type": "image/png",
+          "width": 96,
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已停止转发这条回复。服务端没有中止生成的接口，本轮仍会照常扣费。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "现在没有正在转发的回复。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "这条消息是 relay 离线时发的，没有转发。需要的话请重新发送。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "目前只支持文字消息。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "不认识这个命令，/help 查看可用命令。",
+        },
+      },
+    ],
+    "stranger": [
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570999,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "配对码不对或已过期，请看电脑终端上显示的配对码。",
+        },
+      },
+    ],
+  },
+}
+`;
