@@ -25,6 +25,11 @@ export type FakeSwitch = {
   on: boolean;
   /** The channels open() gave, in order. */
   opened: FakeChannel[];
+  /**
+   * Run in place of the real setCredentials (--set-app, --login) while `on`; none: nothing is
+   * asked or saved.
+   */
+  setCredentials?: () => void | Promise<void>;
 };
 
 /** Connects, then stops the relay at once (`RelayStopped`) when it asks for events. */
@@ -42,7 +47,13 @@ export function fakeSetup(
   identity: BotIdentity = { id: '42', name: 'Lin bot', handle: '' },
 ): ChannelSetup {
   const overrides: Partial<ChannelSetup> = {
-    wantsCredentials: (options) => (fake.on ? false : real.wantsCredentials(options)),
+    // The channel's own credential flag (the command checked which flags the channel takes).
+    wantsCredentials: (options) =>
+      fake.on ? options.setApp || options.login : real.wantsCredentials(options),
+    setCredentials: async (context, options) => {
+      if (!fake.on) return real.setCredentials(context, options);
+      await fake.setCredentials?.();
+    },
     open: async (context, options) => {
       if (!fake.on) return real.open(context, options);
       const channel = new StoppingChannel({ kind: real.kind, identity });

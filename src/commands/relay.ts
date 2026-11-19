@@ -4,9 +4,15 @@ import { join } from 'node:path';
 import { describeEnvironment, type Environment, isProduction, UsageError } from '../core/env.js';
 import { configDir, ensurePrivateDir } from '../core/files.js';
 import { tr, language } from '../core/i18n.js';
-import { acquireProcessLock } from '../core/lock.js';
+import { acquireProcessLock, type LockNote } from '../core/lock.js';
+import { sha256 } from '../core/state.js';
 import { paint, say, warn } from '../core/ui.js';
-import { type ChannelKind, type ChannelSetup, channelSetup } from '../relay/channels/index.js';
+import {
+  CHANNEL_KINDS,
+  type ChannelKind,
+  type ChannelSetup,
+  channelSetup,
+} from '../relay/channels/index.js';
 import type { BotIdentity } from '../relay/channels/types.js';
 import { PairingCode } from '../relay/pairing.js';
 import { Relay, RelayStopped } from '../relay/relay.js';
@@ -25,8 +31,9 @@ import { confirmProduction } from './declaration.js';
  * `yomi relay --channel telegram|qq|wechat` (`--telegram` is `--channel telegram`): the setup
  * around `Relay`, the same for every channel — which flags the channel takes, the credentials
  * (typed without echo or piped on stdin, kept in the keychain, never an argument or variable),
- * the pairing in this terminal, one relay per bot (a lock file), the background service, and
- * `--forget`. What differs per channel is asked of its `ChannelSetup` (relay/channels/setup.ts).
+ * the pairing in this terminal, one relay per bot and one per Yomi account and environment (lock
+ * files), the background service, and `--forget`. What differs per channel is asked of its
+ * `ChannelSetup` (relay/channels/setup.ts).
  */
 
 export type RelayCommandOptions = {
@@ -194,13 +201,95 @@ function planFor(context: Context, setup: ChannelSetup, options: RelayCommandOpt
   });
 }
 
-/** Refuses `flag` while this channel's relay runs (process `pid`, 0 when unknown). */
-function runningRefusal(pid: number, flag: string): string {
+/**
+ * Who holds a relay lock: its process (0 when unknown) and, for the environment's lock, what it
+ * wrote there: the channel, and the bot it relays (a relay) or the flag it runs (`--set-app`,
+ * `--login`).
+ */
+type Holder = { pid: number; setup: ChannelSetup | null; bot: string; flag: string };
+
+function holderOf(lock: { heldBy: number; note?: LockNote }): Holder {
+  const note = lock.note ?? {};
+  const kind = CHANNEL_KINDS.find((name) => name === note.channel);
+  return {
+    pid: lock.heldBy,
+    setup: kind ? channelSetup(kind) : null,
+    bot: note.bot ?? '',
+    flag: note.flag ?? '',
+  };
+}
+
+/** "Telegram bot @lin_bot, process 1234": what is known of a holder, '' when nothing is. */
+function holderDetails(holder: Holder): string {
+  const parts: string[] = [];
+  const name = holder.setup?.displayName ?? '';
+  if (name)
+    parts.push(
+      holder.bot
+        ? tr(
+            `${name} bot ${holder.bot}`,
+            `${name} bot ${holder.bot}`,
+            `bot de ${name} ${holder.bot}`,
+            `bot do ${name} ${holder.bot}`,
+          )
+        : name,
+    );
+  if (holder.pid)
+    parts.push(
+      tr(
+        `进程 ${holder.pid}`,
+        `process ${holder.pid}`,
+        `proceso ${holder.pid}`,
+        `processo ${holder.pid}`,
+      ),
+    );
+  return parts.join(tr('，', ', ', ', ', ', '));
+}
+
+/** How to stop a holder's background service: its channel's command when it is known. */
+const uninstallCommand = (holder: Holder) =>
+  holder.setup ? `${holder.setup.command} --uninstall-service` : '--uninstall-service';
+
+/**
+ * Refuses `flag` while a relay runs: this channel's (--forget, its own lock, known by pid only),
+ * or any relay of this environment (--set-app, --login), named with its channel and bot.
+ */
+function runningRefusal(holder: Holder, flag: string): string {
+  const details = holderDetails(holder);
+  const stop = uninstallCommand(holder);
   return tr(
-    `relay 正在运行${pid ? `（进程 ${pid}）` : ''}：先停止它（Ctrl+C，或 --uninstall-service），再 ${flag}。`,
-    `Relay is running${pid ? ` (process ${pid})` : ''}: stop it first (Ctrl+C, or --uninstall-service), then ${flag}.`,
-    `El relay está en ejecución${pid ? ` (proceso ${pid})` : ''}: detenlo primero (Ctrl+C o --uninstall-service) y luego usa ${flag}.`,
-    `O relay está em execução${pid ? ` (processo ${pid})` : ''}: pare-o primeiro (Ctrl+C ou --uninstall-service) e depois use ${flag}.`,
+    `relay 正在运行${details ? `（${details}）` : ''}：先停止它（Ctrl+C，或 ${stop}），再 ${flag}。`,
+    `Relay is running${details ? ` (${details})` : ''}: stop it first (Ctrl+C, or ${stop}), then ${flag}.`,
+    `El relay está en ejecución${details ? ` (${details})` : ''}: detenlo primero (Ctrl+C o ${stop}) y luego usa ${flag}.`,
+    `O relay está em execução${details ? ` (${details})` : ''}: pare-o primeiro (Ctrl+C ou ${stop}) e depois use ${flag}.`,
+  );
+}
+
+/** A relay start refused: another relay of this Yomi account and environment runs. */
+function anotherRelayRunning(holder: Holder, env: Environment): string {
+  const details = holderDetails(holder);
+  const stop = uninstallCommand(holder);
+  const where = describeEnvironment(env);
+  return tr(
+    `这个 Yomi 账号（${where}）已经有另一个 relay 在运行${details ? `：${details}` : ''}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 ${stop}）。`,
+    `Another relay is already running for this Yomi account (${where})${details ? `: ${details}` : ''}. Only one relay per Yomi account and environment can run at a time: stop it first (Ctrl+C, or ${stop}).`,
+    `Ya hay otro relay en ejecución para esta cuenta de Yomi (${where})${details ? `: ${details}` : ''}. Solo puede ejecutarse un relay a la vez por cuenta de Yomi y entorno: detenlo primero (Ctrl+C o ${stop}).`,
+    `Já existe outro relay em execução para esta conta do Yomi (${where})${details ? `: ${details}` : ''}. Só é possível executar um relay por vez por conta do Yomi e ambiente: pare-o primeiro (Ctrl+C ou ${stop}).`,
+  );
+}
+
+/**
+ * Refused while `--set-app` or `--login` of this environment runs: a relay start (`flag` '') or
+ * another of those flags.
+ */
+function credentialsRunning(holder: Holder, flag: string): string {
+  const command = `${holder.setup?.command ?? 'yomi relay'} ${holder.flag}`;
+  const pid = holder.pid;
+  return tr(
+    `${command} 正在运行${pid ? `（进程 ${pid}）` : ''}：等它结束后再${flag ? ` ${flag}` : '启动 relay'}。`,
+    `${command} is running${pid ? ` (process ${pid})` : ''}: wait for it to finish, then ${flag || 'start the relay'}.`,
+    `${command} está en ejecución${pid ? ` (proceso ${pid})` : ''}: espera a que termine y luego ${flag ? `usa ${flag}` : 'inicia el relay'}.`,
+    `${command} está em execução${pid ? ` (processo ${pid})` : ''}: espere terminar e depois ${flag ? `use ${flag}` : 'inicie o relay'}.`,
   );
 }
 
@@ -209,6 +298,50 @@ const inChinese = (name: string) => (/^[\x21-\x7e]/.test(name) ? ` ${name} ` : n
 
 const lockPath = (name: string) => join(configDir(), 'locks', `relay-${name}.lock`);
 
+/**
+ * One relay per Yomi account and environment, whatever the channel (design §5.2, §12.2): every
+ * relay holds `relay-env-<sha256(account)[0:16]>.lock` while it runs, and so do --set-app and
+ * --login. Relays side by side would share the device id on the Yomi long connection, take each
+ * other's offline messages, count each other's spending in balance-measured charges and each
+ * spend a whole --max-spend.
+ */
+function lockEnvironment(
+  context: Context,
+  note: LockNote,
+  refusal: (holder: Holder) => string,
+): { release: () => void } {
+  const name = `env-${sha256(context.account).slice(0, 16)}`;
+  const lock = acquireProcessLock(lockPath(name), note);
+  if ('heldBy' in lock) throw new UsageError(refusal(holderOf(lock)));
+  return lock;
+}
+
+/**
+ * `--install-service` beside another channel's installed service of this environment: only one
+ * of them could run (the other would fail on the environment's lock and restart every 30 s).
+ */
+function otherServiceRefusal(
+  context: Context,
+  setup: ChannelSetup,
+  options: RelayCommandOptions,
+): string | null {
+  for (const kind of CHANNEL_KINDS) {
+    if (kind === setup.kind) continue;
+    const other = channelSetup(kind);
+    const plan = planFor(context, other, { ...options, channel: kind });
+    if (!existsSync(plan.path)) continue;
+    const name = other.displayName;
+    const remove = `${other.command} --uninstall-service`;
+    return tr(
+      `这个环境已经安装了${inChinese(name)}的 relay 后台服务（${plan.path}）。同一个账号和环境同时只能运行一个 relay：先用 ${remove} 删除它，再安装这个。`,
+      `A ${name} relay service is already installed for this environment (${plan.path}). Only one relay per Yomi account and environment can run at a time: remove it first with ${remove}, then install this one.`,
+      `Ya hay un servicio de relay de ${name} instalado para este entorno (${plan.path}). Solo puede ejecutarse un relay a la vez por cuenta de Yomi y entorno: elimínalo primero con ${remove} y luego instala este.`,
+      `Já existe um serviço de relay do ${name} instalado para este ambiente (${plan.path}). Só é possível executar um relay por vez por conta do Yomi e ambiente: remova-o primeiro com ${remove} e depois instale este.`,
+    );
+  }
+  return null;
+}
+
 /** `--forget`: this channel's secret, pairing and service; the other channels keep theirs. */
 function forget(context: Context, setup: ChannelSetup, options: RelayCommandOptions) {
   const { io, store } = context;
@@ -216,7 +349,10 @@ function forget(context: Context, setup: ChannelSetup, options: RelayCommandOpti
   const lockName = secret ? setup.lockNameOf(secret) : null;
   if (lockName) {
     const lock = acquireProcessLock(lockPath(lockName));
-    if ('heldBy' in lock) throw new UsageError(runningRefusal(lock.heldBy, '--forget'));
+    if ('heldBy' in lock)
+      throw new UsageError(
+        runningRefusal({ pid: lock.heldBy, setup: null, bot: '', flag: '' }, '--forget'),
+      );
     lock.release();
   }
   const plan = planFor(context, setup, options);
@@ -322,7 +458,26 @@ export async function relay(context: Context, options: RelayCommandOptions) {
         `Esta máquina não tem um Keychain do sistema disponível, então o relay não inicia por padrão (o ${setup.secretLabel} e a sessão seriam salvos em arquivos de texto sem criptografia). Para aceitar isso, adicione --allow-file-store.`,
       ),
     );
-  if (settingCredentials) return setup.setCredentials(context, options);
+  if (settingCredentials) {
+    // Telegram's --set-token touches nothing a running relay uses (design Appendix A, 11).
+    if (setup.kind === 'telegram') return setup.setCredentials(context, options);
+    // --set-app and --login never run beside a relay of this environment, nor a relay beside
+    // them (QQ's gateway probe could take a running relay's events; a login rewrites the owner a
+    // running relay saves): they hold the environment's lock while they run.
+    const flag = options.login ? '--login' : '--set-app';
+    const held = lockEnvironment(context, { channel: setup.kind, flag }, (holder) =>
+      holder.flag ? credentialsRunning(holder, flag) : runningRefusal(holder, flag),
+    );
+    try {
+      return await setup.setCredentials(context, options);
+    } finally {
+      held.release();
+    }
+  }
+  if (options.installService) {
+    const refusal = otherServiceRefusal(context, setup, options);
+    if (refusal) throw new UsageError(refusal);
+  }
 
   const credential = requireSignIn(context);
   const name = setup.displayName;
@@ -432,6 +587,18 @@ export async function relay(context: Context, options: RelayCommandOptions) {
         `Já existe um relay em execução para este bot${lock.heldBy ? ` (processo ${lock.heldBy})` : ''}. Só é possível executar um por bot.`,
       ),
     );
+  let environment: { release: () => void };
+  try {
+    environment = lockEnvironment(
+      context,
+      { channel: channel.kind, bot: setup.label(identity) },
+      (holder) =>
+        holder.flag ? credentialsRunning(holder, '') : anotherRelayRunning(holder, context.env),
+    );
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
   try {
     // Another person may pair now: their consent to spend starts over.
     if (options.pair) state.resetOwner();
@@ -561,6 +728,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     }
     say(io, tr('relay 已停止。', 'Relay stopped.', 'El relay se detuvo.', 'O relay parou.'));
   } finally {
+    environment.release();
     lock.release();
   }
 }

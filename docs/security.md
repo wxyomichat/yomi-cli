@@ -69,6 +69,7 @@
 - 默认连生产环境，这也是唯一内置的环境；测试环境要显式 `--env test` 并自己配置地址，用 `YOMI_API_ORIGIN` / `YOMI_WEB_ORIGIN` 指向的 mock 或本地构建不算生产。生产环境的 `create` / `preview` / `relay` 需要再输入 `prod` 确认（非交互时需 `--confirm-prod`）。
 - 预演开始先显示服务端返回的剩余免费条数。用完后，CLI 先查询并显示钻石余额，用户输入 `yes` 才会以 `consumption_mode=1`（付费）发送；非交互运行必须加 `--allow-paid`，否则停止。CLI 从不在未确认的情况下发付费消息。
 - 18+ 与版权声明每次 `create` / `preview` 都要确认（输入 `yes`，或非交互时显式 `--accept-declaration`），不写在角色文件里。
+- 同一个 Yomi 账号和环境，本机同时只运行一个 relay，不论通道（Telegram 也一样，由本机锁文件保证）：否则几个 relay 会共用 Yomi 长连接的设备 ID、抢走彼此的离线消息，各自一份的 `--max-spend` 本机上限可以被花上几遍，按余额差额核对的花费也会互相算错。
 
 ## 已知风险与后续
 

@@ -37,7 +37,13 @@ export class LockTimeout extends Error {
   }
 }
 
-type Holder = { pid: number; at: number; token: string };
+/**
+ * What a process lock says about its holder besides the pid (`acquireProcessLock`'s `note`): read
+ * back by whoever is refused, so the refusal can say who holds it.
+ */
+export type LockNote = Record<string, string>;
+
+type Holder = { pid: number; at: number; token: string; note?: LockNote };
 
 export type LockOptions = {
   /** Give up waiting after this long (default 45 s). */
@@ -47,11 +53,21 @@ export type LockOptions = {
   pollMs?: number;
 };
 
+/** The string fields of a note; null when there are none. */
+function noteOf(value: unknown): LockNote | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const fields = Object.entries(value).filter(([, field]) => typeof field === 'string');
+  return fields.length ? (Object.fromEntries(fields) as LockNote) : null;
+}
+
 function readHolder(path: string): Holder | null {
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<Holder>;
     if (typeof value.pid !== 'number' || typeof value.at !== 'number') return null;
-    return { pid: value.pid, at: value.at, token: String(value.token ?? '') };
+    const holder: Holder = { pid: value.pid, at: value.at, token: String(value.token ?? '') };
+    const note = noteOf(value.note);
+    if (note) holder.note = note;
+    return holder;
   } catch {
     return null;
   }
@@ -80,10 +96,12 @@ function removeIfHeldBy(path: string, token: string) {
 
 /**
  * Takes a stale lock away atomically: renamed aside first, so of two waiters only one gets it. If
- * what was renamed is not the stale lock that was judged (someone took over in between), it is
- * put back, unless a newer lock is already there.
+ * what was renamed is not the stale lock that was judged (`staleToken`, or an unreadable file at
+ * least `unwrittenMs` old when null), it is put back, unless a newer lock is already there: a lock
+ * someone else took over in between, even one created and not written yet (still empty), stays
+ * theirs. Removing that one would let both of them hold the lock.
  */
-function takeOver(path: string, staleToken: string | null) {
+function takeOver(path: string, staleToken: string | null, unwrittenMs: number) {
   const aside = `${path}.stale.${process.pid}.${randomBytes(4).toString('hex')}`;
   try {
     renameSync(path, aside);
@@ -91,7 +109,9 @@ function takeOver(path: string, staleToken: string | null) {
     return;
   }
   const moved = readHolder(aside);
-  if (staleToken !== null && moved && moved.token !== staleToken) {
+  const judged =
+    staleToken !== null ? moved?.token === staleToken : !moved && fileAge(aside) >= unwrittenMs;
+  if (!judged) {
     try {
       linkSync(aside, path);
     } catch {
@@ -121,7 +141,7 @@ function fileAge(path: string): number {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Tries once; true when this call now holds the lock. */
-function tryCreate(path: string, token: string): boolean {
+function tryCreate(path: string, token: string, note?: LockNote): boolean {
   let fd: number;
   try {
     fd = openSync(path, 'wx', 0o600);
@@ -130,7 +150,9 @@ function tryCreate(path: string, token: string): boolean {
     throw error;
   }
   try {
-    writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
+    const holder: Holder = { pid: process.pid, at: Date.now(), token };
+    if (note) holder.note = note;
+    writeSync(fd, JSON.stringify(holder));
   } finally {
     closeSync(fd);
   }
@@ -158,12 +180,12 @@ export async function withFileLock<T>(
         Date.now() - holder.at > staleMs ||
         fromBeforeBoot(holder.at)
       ) {
-        takeOver(path, holder.token);
+        takeOver(path, holder.token, staleMs);
         continue;
       }
     } else if (fileAge(path) > staleMs) {
       // Unreadable for longer than any writer needs: a crash between create and write.
-      takeOver(path, null);
+      takeOver(path, null, staleMs);
       continue;
     }
     if (Date.now() > deadline) throw new LockTimeout(path);
@@ -199,7 +221,7 @@ export function withFileLockSync<T>(path: string, run: () => T, options: LockOpt
       ? !processAlive(holder.pid) || Date.now() - holder.at > staleMs || fromBeforeBoot(holder.at)
       : fileAge(path) > staleMs;
     if (stale) {
-      takeOver(path, holder?.token ?? null);
+      takeOver(path, holder?.token ?? null, staleMs);
       continue;
     }
     if (Date.now() > deadline) throw new LockTimeout(path);
@@ -212,15 +234,23 @@ export function withFileLockSync<T>(path: string, run: () => T, options: LockOpt
   }
 }
 
+/** A process lock still unreadable after this long was abandoned between create and write. */
+const UNWRITTEN_MS = 5_000;
+
 /**
- * A lock held for a whole process (one `yomi relay` per bot): taken without waiting, kept until
- * `release()` or exit. Returns null with the holder's pid when another live process has it.
+ * A lock held for a whole process (one `yomi relay` per bot, and per Yomi environment): taken
+ * without waiting, kept until `release()` or exit. Returns the holder's pid instead when another
+ * live process has it (0 when unknown), with the `note` that process wrote, if any. A holder that
+ * is gone (or from before this boot) is taken over.
  */
-export function acquireProcessLock(path: string): { release: () => void } | { heldBy: number } {
+export function acquireProcessLock(
+  path: string,
+  note?: LockNote,
+): { release: () => void } | { heldBy: number; note?: LockNote } {
   const token = randomBytes(12).toString('hex');
   ensurePrivateDir(dirname(path));
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (tryCreate(path, token)) {
+    if (tryCreate(path, token, note)) {
       const release = () => removeIfHeldBy(path, token);
       process.once('exit', release);
       return {
@@ -232,9 +262,9 @@ export function acquireProcessLock(path: string): { release: () => void } | { he
     }
     const holder = readHolder(path);
     if (holder && processAlive(holder.pid) && !fromBeforeBoot(holder.at))
-      return { heldBy: holder.pid };
-    if (!holder && fileAge(path) < 5_000) return { heldBy: 0 };
-    takeOver(path, holder?.token ?? null);
+      return holder.note ? { heldBy: holder.pid, note: holder.note } : { heldBy: holder.pid };
+    if (!holder && fileAge(path) < UNWRITTEN_MS) return { heldBy: 0 };
+    takeOver(path, holder?.token ?? null, UNWRITTEN_MS);
   }
   return { heldBy: 0 };
 }

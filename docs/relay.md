@@ -25,6 +25,8 @@ yomi relay --channel telegram --character 7300000000000009001
 - 凭证不接受命令行参数和环境变量（会出现在 `ps`、shell 历史、子进程里）：在终端里输入（不显示），或用 `--token-stdin` 从标准输入读。没有系统钥匙串（Linux 没有 Secret Service 时）relay 默认拒绝启动，确认接受明文 0600 文件时才加 `--allow-file-store`。
 - QQ 和微信启动时会提示「仅限个人使用」；微信还会提示它是实验功能，不加 `--experimental` 不启动。
 
+同一个 Yomi 账号和环境，本机同时只能运行一个 relay，不论通道（两个 Telegram bot 也一样）：几个 relay 会共用 Yomi 长连接的设备 ID，互相取走对方的离线消息，按余额差额核对的花费会算进对方花的钻石，`--max-spend` 本机上限也会被每个 relay 各花一遍。所以第二个 relay 会被拒绝，并说明正在运行的是哪个通道、哪个 bot、哪个进程；relay 运行时 `--set-app` 和 `--login` 也会被拒绝；已经装了另一个通道的后台服务时，要先用那个通道的 `--uninstall-service` 删除它，才能装新的。
+
 ## 聊天里的命令
 
 | 命令                              | 作用                                                                                                         |
