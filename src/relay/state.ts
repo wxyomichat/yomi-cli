@@ -14,11 +14,12 @@ import type { ChannelKind, ChannelStore } from './channels/types.js';
  * secret on its own: useless without the bot_token in the keychain). Plus a short map from the
  * chat's messages to Yomi message ids for `/report`.
  *
- * Money state is bound to who agreed to it: the budget belongs to the paired owner and the Yomi
- * account (`bindAccount`, `resetOwner` start it over), and the local ceiling (`--max-spend`)
- * keeps its own running total that nothing from the chat can reset. A charge the relay could not
- * measure yet (`pending`) survives restarts. Session and server pauses are not stored: they are
- * worked out again on every start. `yomi relay … --forget` deletes it.
+ * Money state is bound to who agreed to it: the in-chat budget (optional: none by default, and Yomi
+ * charges by its normal rules) belongs to the paired owner and the Yomi account (`bindAccount`,
+ * `resetOwner` start it over), and the local ceiling (`--max-spend`, optional too) keeps its own
+ * running total of everything the relay spent, which nothing from the chat can reset. A charge the
+ * relay could not measure yet (`pending`) survives restarts. Session and server pauses are not
+ * stored: they are worked out again on every start. `yomi relay … --forget` deletes it.
  *
  * A Telegram file has no `kind` and no `channel`, so it is the same file it was before channels.
  */
@@ -32,26 +33,52 @@ export type RelayOwner = {
   pairedAt: number;
 };
 
+/**
+ * The in-chat budget. `open` (the default): no budget, Yomi charges by its normal rules (within
+ * `--max-spend` when set). `paid`: may spend gems up to `budget` (`/budget <amount>`). `free`:
+ * free replies only (`/budget off`).
+ */
+export type BillingMode = 'open' | 'paid' | 'free';
+
 export type Billing = {
-  /** `free`: free replies only. `paid`: may spend gems up to `budget`. */
-  mode: 'free' | 'paid';
-  /** Gems this budget allows. */
+  mode: BillingMode;
+  /** Gems this budget allows (`paid`). */
   budget: number;
   /** Gems measured as spent since the budget was set. */
   spent: number;
   setAt: number;
 };
 
-/** The local ceiling (`--max-spend`) and what was spent under it; only this computer resets it. */
-export type Allowance = { maxSpend: number; spent: number; since: number };
+/**
+ * The local ceiling (`--max-spend`; null: none) and what the relay spent since `since`, with or
+ * without a ceiling: the running total the chat's status shows. `unmeasured`: sends whose cost
+ * could not be measured meanwhile (without a cap they go anyway), so the total is a lower bound
+ * when it is above 0. Only this computer resets it.
+ */
+export type Allowance = {
+  maxSpend: number | null;
+  spent: number;
+  since: number;
+  unmeasured: number;
+};
 
 /** A send whose cost is not known yet: the balance before it (`wallet/get_wallet_page`). */
 export type PendingCharge = {
   before: number;
-  mode: 'free' | 'paid';
+  mode: BillingMode;
   /** The quoted price then (display only), used when the cost cannot be measured. */
   price: number | null;
   at: number;
+  /**
+   * Replies sent without a cap while an image held this measurement also landed in it: once the
+   * image is booked by its task, the rest of the drop is theirs.
+   */
+  extra?: boolean;
+  /**
+   * False when a send in it went without a cap (no price bound it): a cost the balance hides is
+   * then unmeasured, never the rest of a budget set since. Absent in older files: capped.
+   */
+  capped?: boolean;
 };
 
 export type BillingPause = '' | 'budget' | 'freeCharged';
@@ -77,7 +104,10 @@ export type RelayStateFile = {
   billing: Billing;
   allowance: Allowance;
   pending: PendingCharge | null;
-  /** A pause only a new /budget lifts ('' when none). */
+  /**
+   * A money pause ('' when none): lifted by a new /budget (or `/budget none`), or by a restart
+   * whose limits allow spending again.
+   */
   billingPause: BillingPause;
   /** The relay's own AI notice (until the server injects one), per character. */
   noticeAt: Record<string, number>;
@@ -91,7 +121,16 @@ export type RelayStateFile = {
 
 const MAX_REPLIES = 500;
 
-export const freshBilling = (): Billing => ({ mode: 'free', budget: 0, spent: 0, setAt: 0 });
+/**
+ * Before budgets were optional, `free` with `setAt` 0 was the default nobody chose: it becomes
+ * `open`. A `/budget off` (`setAt` set) and a `paid` budget stay as they were. A pause stays too:
+ * whether it still holds depends on this run's `--max-spend` (the relay's `prepare`).
+ */
+function migratedBilling(billing: Billing): Billing {
+  return billing.mode === 'free' && !billing.setAt ? { ...billing, mode: 'open' } : billing;
+}
+
+export const freshBilling = (): Billing => ({ mode: 'open', budget: 0, spent: 0, setAt: 0 });
 
 function empty(botId: string, account: string, kind: ChannelKind = 'telegram'): RelayStateFile {
   return {
@@ -106,7 +145,7 @@ function empty(botId: string, account: string, kind: ChannelKind = 'telegram'): 
     offsetSavedAt: 0,
     character: null,
     billing: freshBilling(),
-    allowance: { maxSpend: 0, spent: 0, since: 0 },
+    allowance: { maxSpend: null, spent: 0, since: 0, unmeasured: 0 },
     pending: null,
     billingPause: '',
     noticeAt: {},
@@ -165,7 +204,7 @@ export class RelayState {
       this.data = {
         ...empty(scope, account, kind),
         ...rest,
-        billing: { ...freshBilling(), ...stored.billing },
+        billing: migratedBilling({ ...freshBilling(), ...stored.billing }),
         allowance: { ...empty(scope, account, kind).allowance, ...stored.allowance },
         // Older files kept every pause in one field; only the money ones carry over.
         billingPause:
@@ -199,7 +238,7 @@ export class RelayState {
         ...(channel ? { channel } : {}),
         yomiUserId: userId,
         billing: freshBilling(),
-        allowance: { ...this.data.allowance, spent: 0, since: Date.now() },
+        allowance: { ...this.data.allowance, spent: 0, since: Date.now(), unmeasured: 0 },
         pending: null,
         billingPause: '',
         character: null,
@@ -219,13 +258,13 @@ export class RelayState {
   }
 
   /**
-   * The local ceiling for this run. Its running total starts over only when this computer says
-   * so: a different `--max-spend`, or `--reset-spend`.
+   * The local ceiling for this run (null: none). Its running total starts over only when this
+   * computer says so: a different `--max-spend` (set, changed or taken away), or `--reset-spend`.
    */
-  useAllowance(maxSpend: number, reset: boolean) {
+  useAllowance(maxSpend: number | null, reset: boolean) {
     const allowance = this.data.allowance;
     if (reset || allowance.maxSpend !== maxSpend || allowance.since === 0)
-      this.update({ allowance: { maxSpend, spent: 0, since: Date.now() } });
+      this.update({ allowance: { maxSpend, spent: 0, since: Date.now(), unmeasured: 0 } });
   }
 
   /** `messageId` as the channel persists it (`RelayChannel.persistId`: Telegram a number). */

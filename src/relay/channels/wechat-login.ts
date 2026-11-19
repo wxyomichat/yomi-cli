@@ -20,8 +20,8 @@ import {
 /**
  * `yomi relay --channel wechat --experimental --login` (design §10.2): the QR login, at a
  * terminal only, while the environment's lock is held (commands/relay.ts). Whoever scans becomes
- * the relay's owner and may set a /budget up to --max-spend, so the code is treated like a
- * password: the link is printed only with `--qr-link` (or when the terminal is too narrow to draw
+ * the relay's owner and spends this Yomi account's gems by Yomi's normal rules (no cap unless the
+ * relay runs with --max-spend), so the code is treated like a password: the link is printed only with `--qr-link` (or when the terminal is too narrow to draw
  * the code), the drawing and the link are erased from the terminal when the flow ends, and the
  * `qrcode` value is never logged or stored. At most three codes per login (a code expires, or
  * the phone's digits were wrong too often), eight minutes in all. On `confirmed` the login is
@@ -409,10 +409,10 @@ async function agreed(io: Io): Promise<boolean> {
   );
   dim(
     tr(
-      '扫码的微信号会成为这个 relay 的主人，可以用 /budget 在 --max-spend 以内花钻石：不要在共享屏幕、录屏或直播里显示二维码。',
-      'Whoever scans becomes the owner of this relay and can spend gems with /budget up to --max-spend: do not show the QR code on a shared screen, a recording or a stream.',
-      'Quien escanee se convierte en el dueño de este relay y puede gastar gemas con /budget hasta --max-spend: no muestres el código QR en una pantalla compartida, una grabación o una transmisión.',
-      'Quem escanear vira o dono deste relay e pode gastar gemas com /budget até --max-spend: não mostre o código QR em tela compartilhada, gravação ou transmissão.',
+      '扫码的微信号会成为这个 relay 的主人，按 Yomi 的正常规则花这个账号的钻石（除非用 --max-spend 启动 relay，否则没有上限）：不要在共享屏幕、录屏或直播里显示二维码。',
+      "Whoever scans becomes the owner of this relay and spends this account's gems by Yomi's normal rules (with no cap unless the relay runs with --max-spend): do not show the QR code on a shared screen, a recording or a stream.",
+      'Quien escanee se convierte en el dueño de este relay y gasta las gemas de esta cuenta según las reglas habituales de Yomi (sin límite, salvo que el relay se ejecute con --max-spend): no muestres el código QR en una pantalla compartida, una grabación o una transmisión.',
+      'Quem escanear vira o dono deste relay e gasta as gemas desta conta pelas regras normais do Yomi (sem limite, a menos que o relay rode com --max-spend): não mostre o código QR em tela compartilhada, gravação ou transmissão.',
     ),
   );
   return confirm(

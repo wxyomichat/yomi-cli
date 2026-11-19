@@ -9,6 +9,7 @@ import {
   conversationId,
   type FeedbackReason,
   feedbackReasons,
+  INSUFFICIENT_GEMS,
   listMessages,
   openingOf,
   pollMessages,
@@ -87,7 +88,7 @@ import {
   relayPolicy,
 } from './policy.js';
 import { renderReply } from './render.js';
-import { type RelayCharacter, type RelayState } from './state.js';
+import { type BillingMode, type RelayCharacter, type RelayState } from './state.js';
 import { TelegramBot } from './telegram.js';
 import {
   type ImageBillingNote,
@@ -106,30 +107,45 @@ import {
  * - A reply is ours only if its `stream_id` came back from our own `send_message`: the account's
  *   other devices get the same pushes, and none of them is ever relayed.
  * - Only reviewed `paragraphs` are shown; a chunk's `text` and `thinking_content` never are.
- * - Money: no gems until the owner sets a budget (`/budget`, confirmed with a button or a typed
- *   code), and never more than `--max-spend` on this computer, whose running total nothing from
- *   the chat resets. Every send is measured: the server's `charged_diamonds`, else the balance
- *   before and after. A charge that could not be measured yet stays pending (across restarts) and
- *   is settled before the next send; when the balance cannot be read, nothing is sent. A spent
- *   budget pauses the relay, and so does a "free" reply that was charged. A send is never
- *   repeated.
+ * - Money: by default there is no cap and Yomi charges by its normal rules, as in the app; when
+ *   the balance is too low the server refuses the send and the owner is told so in the chat, and
+ *   the relay keeps running. Two caps are optional: `/budget <amount>` in the chat (confirmed with
+ *   a button or a typed code; `/budget none` goes back to no cap, confirmed the same way when it
+ *   lifts one) and `--max-spend` on this computer, whose running total nothing from the chat
+ *   resets; `/budget off` and `--max-spend 0` mean free replies only. Every send is measured (the
+ *   server's `charged_diamonds`, else the balance before and after) and booked, so the total is
+ *   known. Under a cap measuring is strict: a charge that could not be measured yet stays pending
+ *   (across restarts) and is settled before the next send, and when the balance cannot be read
+ *   nothing is sent. Without one it is bookkeeping only: a pending charge is settled when a reading
+ *   comes (a send never replaces a pending charge before it is settled: the reading measures both),
+ *   and an unreadable balance blocks nothing; what could not be measured is counted. A spent cap
+ *   pauses the relay, and so does a "free" reply that was charged under free-only or a budget. A
+ *   send is never repeated.
  * - The channel only translates: its inbound events in, the core's sends out under its own reply
  *   rules. Every rule about money, consent, policy and Yomi is here, the same on every channel.
- * - `/image` asks for a picture of a reply (one at a time, like a reply): free ones go without a
- *   budget, a priced one needs the budget and is measured like a reply. The request is kept before
- *   it is sent and resent only as the same request (`/image resume`); only a request whose outcome
- *   is unknown may be dropped (`/image forget`). Its charge lands on delivery, so it is measured
- *   once the task has ended (or its 180 s window has passed), never earlier. The picture is
- *   forwarded only when it is the result of this relay's own task, never another device's.
+ * - `/image` asks for a picture of a reply (one at a time, like a reply): a priced one goes as a
+ *   reply does (refused under free-only, within a cap when one is set) and is measured like a
+ *   reply. The request is kept before it is sent and resent only as the same request (`/image
+ *   resume`); only a request whose outcome is unknown may be dropped (`/image forget`). Its charge
+ *   lands on delivery, so it is measured once the task has ended (or its 180 s window has passed),
+ *   never earlier. Under a cap nothing else is sent until then; without one a reply goes anyway
+ *   once the picture is delivered (following its charge stops first) and its cost lands in the
+ *   image's measurement (the image is booked by its task, the rest is the replies'). The picture is forwarded only when it is the result of this relay's own task,
+ *   never another device's.
  * - The long connection never gives up, reconnects after sleep, and reads `poll_message` on every
  *   connect; a reply that still did not arrive is read back from history.
- * - What the server promises lives in `relay/get_policy`; until it
- *   exists, the strictest defaults apply.
+ * - What the server promises lives in `relay/get_policy`; without it no server feature is assumed
+ *   (FreeOnly, the spend cap, the notices): free-only sends nothing, a cap (a budget or
+ *   `--max-spend`) needs a known price, and the relay shows its own notices. Without a cap none
+ *   of that is needed.
  */
 
 export type RelayOptions = {
-  /** Gems the relay may spend at most, set on this computer (`--max-spend`); 0: none. */
-  maxSpend: number;
+  /**
+   * Gems the relay may spend at most, set on this computer (`--max-spend`): null, no local cap
+   * (Yomi charges by its normal rules); 0, free replies only.
+   */
+  maxSpend: number | null;
   /** Start the local ceiling's running total over (`--reset-spend`). */
   resetSpend?: boolean;
   /** Character to start with (`--character`), '' to keep the saved one. */
@@ -182,9 +198,15 @@ type Turn = {
   presenter: ReplyPresenter;
   lastSeq: number;
   settled: boolean;
-  mode: 'free' | 'paid';
+  mode: BillingMode;
   /** The server reported this turn's charge and it is booked. */
   booked: boolean;
+  /** The pending charge was stored for this send alone: a sure refusal clears it. */
+  ownPending: boolean;
+  /** Its end settles the pending charge; not while it rides along an image's measurement. */
+  settles: boolean;
+  /** Nothing measures it: unless the server says what it cost, it is counted as unmeasured. */
+  unmeasured: boolean;
   /** Once settled: shown and booked (`finishTurn`). */
   finished: Promise<void> | null;
   watchdog: ReturnType<typeof setTimeout> | null;
@@ -207,8 +229,14 @@ type ImageRecord = {
   /** '' while the server's answer is unknown. */
   taskId: string;
   /** The billing mode then and the price shown (0: free). */
-  mode: 'free' | 'paid';
+  mode: BillingMode;
   price: number;
+  /**
+   * The pending charge is this image's own measurement (absent in older records: it was). False
+   * (only without a cap): another measurement was open, or the balance unreadable; it is booked
+   * by its task alone.
+   */
+  measured?: boolean;
   /** What it costs if charged (the full price; a free one is charged this once the quota is gone). */
   worst: number;
   /** The owner's chat it goes to (as the channel persists ids: a number for Telegram). */
@@ -243,7 +271,8 @@ type Gate = '' | 'signedOut' | 'disabled' | 'tooOld';
 
 /** An open question (buttons, or a typed code), by its nonce. */
 type Button =
-  | { kind: 'budget'; amount: number; ref: AskRef }
+  /** `amount` null: no budget (`/budget none`). */
+  | { kind: 'budget'; amount: number | null; ref: AskRef }
   | { kind: 'report'; npcId: string; mid: string; reasons: FeedbackReason[]; ref: AskRef }
   | { kind: 'reportCharacter'; npcId: string; reasons: FeedbackReason[]; ref: AskRef };
 
@@ -405,6 +434,7 @@ export class Relay {
         ),
       );
     this.state.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
+    this.liftStalePause();
     await this.readPolicy(true);
     if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
     const kept = this.keptImage();
@@ -439,17 +469,74 @@ export class Relay {
           'O resultado da última solicitação de imagem é desconhecido: o dono pode enviar /image resume para reenviar a mesma solicitação',
         ),
       );
+    this.logMoney();
+    this.connect();
+  }
+
+  /**
+   * Without a budget, a pause this run's limits no longer hold is lifted: a cap spent under an
+   * earlier `--max-spend` (also under `--max-spend 0`: free-only spends nothing, as `/budget off`
+   * lifts it), or a charged "free" reply once free-only is no longer asked for. Under a budget
+   * only the owner lifts it (`/budget`), as always.
+   */
+  private liftStalePause() {
+    const { billing, billingPause } = this.state.data;
+    if (billing.mode !== 'open') return;
+    if (
+      (billingPause === 'budget' && (this.left() > 0 || this.freeOnly())) ||
+      (billingPause === 'freeCharged' && !this.freeOnly())
+    )
+      this.state.update({ billingPause: '' });
+  }
+
+  /** The money rules of this run, once at the start. */
+  private logMoney() {
     const { billing, allowance } = this.state.data;
-    if (billing.mode === 'paid')
+    const ceiling = this.options.maxSpend;
+    const left = Math.max(0, this.ceilingLeft());
+    if (this.uncapped())
       this.log(
         tr(
-          `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机上限 ${allowance.maxSpend}，还可花 ${Math.max(0, this.left())}`,
-          `Budget ${billing.budget} gems (used ${billing.spent}); local spending cap ${allowance.maxSpend}, ${Math.max(0, this.left())} left to spend`,
-          `Presupuesto ${billing.budget} gemas (usadas ${billing.spent}); límite de gasto local ${allowance.maxSpend}, quedan ${Math.max(0, this.left())} por gastar`,
-          `Orçamento ${billing.budget} gemas (usadas ${billing.spent}); limite de gastos local ${allowance.maxSpend}, restam ${Math.max(0, this.left())} para gastar`,
+          `没有设花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示；通过 relay 已花 ${allowance.spent} 钻石`,
+          `No spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat; ${allowance.spent} gems spent through the relay so far`,
+          `Sin límite de gasto: Yomi cobra según sus reglas habituales, y si el saldo no alcanza se avisa en el chat; hasta ahora se gastaron ${allowance.spent} gemas a través del relay`,
+          `Sem limite de gastos: o Yomi cobra pelas regras normais, e saldo baixo é avisado no chat; até agora, ${allowance.spent} gemas foram gastas pelo relay`,
         ),
       );
-    this.connect();
+    else if (this.freeOnly())
+      this.log(
+        tr(
+          '只用免费额度（不花钻石）',
+          'Free replies only (no gems spent)',
+          'Solo respuestas gratis (sin gastar gemas)',
+          'Só respostas grátis (sem gastar gemas)',
+        ),
+      );
+    else if (billing.mode === 'paid')
+      this.log(
+        ceiling === null
+          ? tr(
+              `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机没有设上限`,
+              `Budget ${billing.budget} gems (used ${billing.spent}); no local spending cap`,
+              `Presupuesto ${billing.budget} gemas (usadas ${billing.spent}); sin límite de gasto local`,
+              `Orçamento ${billing.budget} gemas (usadas ${billing.spent}); sem limite de gastos local`,
+            )
+          : tr(
+              `预算 ${billing.budget} 钻石（已用 ${billing.spent}）；本机上限 ${ceiling}，还可花 ${Math.max(0, this.left())}`,
+              `Budget ${billing.budget} gems (used ${billing.spent}); local spending cap ${ceiling}, ${Math.max(0, this.left())} left to spend`,
+              `Presupuesto ${billing.budget} gemas (usadas ${billing.spent}); límite de gasto local ${ceiling}, quedan ${Math.max(0, this.left())} por gastar`,
+              `Orçamento ${billing.budget} gemas (usadas ${billing.spent}); limite de gastos local ${ceiling}, restam ${Math.max(0, this.left())} para gastar`,
+            ),
+      );
+    else
+      this.log(
+        tr(
+          `聊天里没有设预算：按 Yomi 的正常规则扣费，不超过本机上限 ${ceiling} 钻石（还可花 ${left}）`,
+          `No budget in the chat: Yomi charges by its normal rules, up to the local spending cap of ${ceiling} gems (${left} left)`,
+          `Sin presupuesto en el chat: Yomi cobra según sus reglas habituales, hasta el límite de gasto local de ${ceiling} gemas (quedan ${left})`,
+          `Sem orçamento no chat: o Yomi cobra pelas regras normais, até o limite de gastos local de ${ceiling} gemas (restam ${left})`,
+        ),
+      );
   }
 
   /** The server's switches: off, too old, or back on. */
@@ -823,15 +910,88 @@ export class Relay {
     return null;
   }
 
-  /** Gems the relay may still spend: the budget's rest, never past the local ceiling. */
-  private left(): number {
-    const { billing, allowance } = this.state.data;
-    const budget = billing.mode === 'paid' ? billing.budget - billing.spent : 0;
-    return Math.min(budget, this.options.maxSpend - allowance.spent);
+  /** No cap at all: no budget in the chat and no `--max-spend`. Measuring is bookkeeping then. */
+  private uncapped(): boolean {
+    return this.state.data.billing.mode === 'open' && this.options.maxSpend === null;
   }
 
+  /** Free replies only: `/budget off`, or no budget under `--max-spend 0`. */
+  private freeOnly(): boolean {
+    const mode = this.state.data.billing.mode;
+    return mode === 'free' || (mode === 'open' && this.options.maxSpend === 0);
+  }
+
+  /**
+   * Gems the relay may still spend: the budget's rest (none under free-only, no limit without
+   * one), never past the local ceiling. Finite exactly when some cap is set (or free-only).
+   */
+  private left(): number {
+    const billing = this.state.data.billing;
+    const budget =
+      billing.mode === 'paid'
+        ? billing.budget - billing.spent
+        : billing.mode === 'open'
+          ? Infinity
+          : 0;
+    return Math.min(budget, this.ceilingLeft());
+  }
+
+  /** What is left under `--max-spend`; Infinity without one (never printed). */
   private ceilingLeft(): number {
-    return this.options.maxSpend - this.state.data.allowance.spent;
+    const ceiling = this.options.maxSpend;
+    return ceiling === null ? Infinity : ceiling - this.state.data.allowance.spent;
+  }
+
+  /** The local ceiling, not the budget, is what limits now: a budget cannot lift it. */
+  private ceilingLimits(): boolean {
+    if (this.options.maxSpend === null) return false;
+    const billing = this.state.data.billing;
+    return billing.mode !== 'paid' || this.ceilingLeft() < billing.budget - billing.spent;
+  }
+
+  private rerunCommand(): string {
+    return this.options.rerunCommand ?? 'yomi relay --telegram';
+  }
+
+  /** How to leave free-only (or its pause): under `--max-spend 0` only the computer can. */
+  private leaveHint(): string {
+    return this.options.maxSpend === 0
+      ? this.texts.restartHint(this.rerunCommand())
+      : this.texts.budgetNoneHint;
+  }
+
+  /**
+   * Why spending stopped: the local ceiling (which no `/budget` lifts), else the budget. A
+   * budget's pause that a lower ceiling caused before a restart stays the owner's to lift, but
+   * says so: the budget itself still has room.
+   */
+  private exhaustedText(): string {
+    const ceiling = this.options.maxSpend;
+    if (ceiling === 0)
+      return this.texts.budgetTooHigh(0, 0, this.texts.restartHint(this.rerunCommand()));
+    if (ceiling !== null && this.ceilingLeft() <= 0)
+      return this.texts.ceilingExhausted(
+        this.state.data.allowance.spent,
+        ceiling,
+        this.rerunCommand(),
+      );
+    const billing = this.state.data.billing;
+    if (billing.mode === 'paid' && billing.spent < billing.budget)
+      return this.texts.budgetPausedByCeiling(billing.budget - billing.spent);
+    return this.texts.budgetExhausted(billing.spent);
+  }
+
+  /** Not enough left for the next reply, naming the limit that is short. */
+  private shortText(price: number, left: number): string {
+    return this.ceilingLimits()
+      ? this.texts.ceilingShort(price, left)
+      : this.texts.budgetShort(price, left);
+  }
+
+  /** A send whose cost nothing could measure: the total shown is a lower bound from now on. */
+  private countUnmeasured() {
+    const allowance = this.state.data.allowance;
+    this.state.update({ allowance: { ...allowance, unmeasured: allowance.unmeasured + 1 } });
   }
 
   private async priceAndBalance(): Promise<string> {
@@ -842,8 +1002,17 @@ export class Relay {
   }
 
   private budgetLine(): string {
-    const { mode, budget, spent } = this.state.data.billing;
-    return this.texts.budgetLine(mode, budget, spent, this.ceilingLeft(), this.options.maxSpend);
+    const { billing, allowance } = this.state.data;
+    return this.texts.budgetLine({
+      mode: billing.mode,
+      freeOnly: this.freeOnly(),
+      budget: billing.budget,
+      spent: billing.spent,
+      total: allowance.spent,
+      ceiling: this.options.maxSpend,
+      ceilingLeft: this.ceilingLeft(),
+      unmeasured: allowance.unmeasured,
+    });
   }
 
   private async showPrice() {
@@ -869,20 +1038,23 @@ export class Relay {
     if (
       /^(off|free|0|关|免费)$/i.test(argument) // i18n-ignore
     ) {
-      // A charged "free" reply stays paused: free-only is what failed.
+      // A charged "free" reply stays paused: free-only is what failed. The owner's only "spend
+      // nothing" switch in the chat: it is kept even before the server supports free-only (then
+      // nothing is sent, and the answer says how to go on).
       this.state.update({
         billing: { mode: 'free', budget: 0, spent: 0, setAt: Date.now() },
         billingPause: this.state.data.billingPause === 'budget' ? '' : this.state.data.billingPause,
       });
-      return void (await this.say(this.texts.budgetOff));
+      return void (await this.say(this.texts.budgetOff(this.policy.freeOnly, this.leaveHint())));
     }
+    if (
+      /^(none|unlimited|不限)$/i.test(argument) // i18n-ignore
+    )
+      return this.budgetNone();
     const amount = Number(argument);
     if (!Number.isInteger(amount) || amount <= 0 || amount > 1_000_000)
       return void (await this.say(this.texts.budgetUsage));
-    if (amount > this.ceilingLeft())
-      return void (await this.say(
-        this.texts.budgetTooHigh(this.ceilingLeft(), this.options.maxSpend),
-      ));
+    if (amount > this.ceilingLeft()) return void (await this.say(this.tooHigh()));
     const nonce = randomBytes(4).toString('hex');
     const ref = await this.ask({
       id: nonce,
@@ -894,6 +1066,58 @@ export class Relay {
       layout: 'row',
     });
     if (ref) this.buttons.set(nonce, { kind: 'budget', amount, ref });
+  }
+
+  private tooHigh(): string {
+    return this.texts.budgetTooHigh(
+      this.ceilingLeft(),
+      this.options.maxSpend ?? 0,
+      this.texts.restartHint(this.rerunCommand()),
+    );
+  }
+
+  /**
+   * `/budget none`: no budget, Yomi charges by its normal rules (within `--max-spend` when set).
+   * Lifting a budget or free-only widens spending, so it is confirmed like `/budget <amount>`;
+   * already without one, nothing widens. Under a spent (or 0) local ceiling it changes nothing.
+   */
+  private async budgetNone() {
+    const ceiling = this.options.maxSpend;
+    if (ceiling === 0) return void (await this.say(this.tooHigh()));
+    if (ceiling !== null && this.ceilingLeft() <= 0)
+      return void (await this.say(this.exhaustedText()));
+    if (this.state.data.billing.mode === 'open') return this.noBudget();
+    const nonce = randomBytes(4).toString('hex');
+    const ref = await this.ask({
+      id: nonce,
+      prompt:
+        this.texts.budgetNoneAsk(ceiling === null ? null : this.ceilingLeft()) +
+        '\n' +
+        (await this.priceAndBalance()),
+      options: [
+        { id: 'y', label: this.texts.budgetNoneConfirm },
+        { id: 'n', label: this.texts.cancel },
+      ],
+      layout: 'row',
+    });
+    if (ref) this.buttons.set(nonce, { kind: 'budget', amount: null, ref });
+  }
+
+  private async noBudget() {
+    this.state.update({
+      billing: { mode: 'open', budget: 0, spent: 0, setAt: Date.now() },
+      billingPause: '',
+    });
+    this.log(
+      tr(
+        '主人选择不设预算：按 Yomi 的正常规则扣费',
+        'The owner chose no budget: Yomi charges by its normal rules',
+        'El dueño eligió no tener presupuesto: Yomi cobra según sus reglas habituales',
+        'O dono escolheu não ter orçamento: o Yomi cobra pelas regras normais',
+      ),
+    );
+    const ceiling = this.options.maxSpend;
+    await this.say(this.texts.budgetNone(ceiling === null ? null : this.ceilingLeft()));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -948,15 +1172,16 @@ export class Relay {
     if (button.kind === 'budget') {
       if (choice !== 'y') return void (await this.say(this.texts.budgetCancelled));
       // Spending may have gone on since the prompt: the ceiling is checked again.
-      if (button.amount > this.ceilingLeft())
-        return void (await this.say(
-          this.texts.budgetTooHigh(this.ceilingLeft(), this.options.maxSpend),
-        ));
+      if (button.amount === null && this.options.maxSpend !== null && this.ceilingLeft() <= 0)
+        return void (await this.say(this.exhaustedText()));
+      if (button.amount !== null && button.amount > this.ceilingLeft())
+        return void (await this.say(this.tooHigh()));
       const character = this.state.data.character;
       const seen = character ? this.priceShown.has(character.npcId) : false;
       this.priceShown.clear();
       this.imagePriceShown.clear();
       if (character && seen) this.priceShown.add(character.npcId);
+      if (button.amount === null) return this.noBudget();
       this.state.update({
         billing: { mode: 'paid', budget: button.amount, spent: 0, setAt: Date.now() },
         billingPause: '',
@@ -1021,9 +1246,9 @@ export class Relay {
     }
     switch (this.state.data.billingPause) {
       case 'budget':
-        return this.texts.budgetExhausted(this.state.data.billing.spent);
+        return this.exhaustedText();
       case 'freeCharged':
-        return this.texts.paused(this.texts.budgetUsage);
+        return this.texts.paused(this.leaveHint());
     }
     return '';
   }
@@ -1041,60 +1266,128 @@ export class Relay {
       return void (await this.say(this.texts.channelPaused(this.channel.displayName, pause)));
     await this.afterBooking();
     if (this.turn) return void (await this.say(this.texts.busy));
-    if (this.job) return void (await this.say(this.texts.imageBusy));
+    // Without a cap only a picture still being made holds a reply back, not its landing charge.
+    const job = this.job;
+    if (job && !(job.record.told && this.uncapped()))
+      return void (await this.say(this.imageWaitText(job.record)));
     const blocked = this.pausedText();
     if (blocked) return void (await this.say(blocked));
     const character = this.state.data.character;
     if (!character) return void (await this.say(this.texts.noCharacter));
-    // An image whose cost is still open is settled first: it is charged on delivery.
-    const open = await this.settleImage();
+    if (job) {
+      // Its follower stops before the reply goes, not beside it: concluding meanwhile, it could
+      // read the balance before the reply's charge lands and lose that cost. The reply rides along
+      // the image's measurement; a later send (or the next start) settles the picture.
+      job.stop.abort();
+      await job.done;
+    }
+    // An image whose cost is still open is settled first: it is charged on delivery. Without a cap
+    // a reply goes anyway and rides along the image's measurement.
+    const open = await this.settleImage(true);
     if (open) return void (await this.say(open));
-    // What earlier sends cost is booked before anything more is spent.
-    if (!(await this.settlePending())) return void (await this.say(this.texts.walletUnavailable));
+    const riding = this.keptImage() !== null;
+    const uncapped = this.uncapped();
+    // What earlier sends cost is booked before anything more is spent; without a cap that is
+    // bookkeeping, and an unreadable balance blocks nothing (the reading comes later).
+    if (!riding && !(await this.settlePending())) {
+      if (!uncapped) return void (await this.say(this.texts.walletUnavailable));
+      this.log(
+        tr(
+          '读不到余额：之前的花费稍后再核对；没有设花费上限，这条照常发送',
+          "Can't read the balance: the earlier cost is checked later; there is no spending cap, so this message goes anyway",
+          'No se puede leer el saldo: el costo anterior se verificará más tarde; no hay límite de gasto, así que este mensaje se envía igual',
+          'Não foi possível ler o saldo: o custo anterior será conferido depois; não há limite de gastos, então esta mensagem é enviada mesmo assim',
+        ),
+      );
+    }
     const afterSettling = this.pausedText();
     if (afterSettling) return void (await this.say(afterSettling));
     const billing = this.state.data.billing;
+    const freeOnly = this.freeOnly();
     let consumptionMode: number;
     let maxCost: number | undefined;
     let price: number | null = null;
-    if (billing.mode === 'free') {
+    if (freeOnly) {
       // Without the server's word that FreeOnly is honoured, any message may be charged.
-      if (!this.policy.freeOnly) return void (await this.say(this.texts.freeOnlyUnsupported));
+      if (!this.policy.freeOnly)
+        return void (await this.say(this.texts.freeOnlyUnsupported(this.leaveHint())));
       consumptionMode = ConsumptionMode.freeOnly;
+    } else if (uncapped) {
+      // Yomi charges by its normal rules, whatever the policy offers; too few gems is the
+      // server's refusal, said in the chat (`refused`).
+      consumptionMode = ConsumptionMode.allowPaid;
     } else {
       const left = this.left();
       if (left <= 0) {
         this.state.update({ billingPause: 'budget' });
-        return void (await this.say(this.texts.budgetExhausted(billing.spent)));
+        return void (await this.say(this.exhaustedText()));
       }
       price = await this.replyPrice(character.npcId);
-      // An unknown price is "not free": without the server's cap it could overrun the budget.
+      // An unknown price is "not free": without the server's cap it could overrun the cap.
       if (price === null && !this.policy.spendCap)
         return void (await this.say(this.texts.priceUnknown));
-      if (price !== null && price > left)
-        return void (await this.say(this.texts.budgetShort(price, left)));
+      if (price !== null && price > left) return void (await this.say(this.shortText(price, left)));
       consumptionMode = ConsumptionMode.allowPaid;
       if (this.policy.spendCap) maxCost = left;
     }
     await this.notice(character, false);
-    const before = await this.balance();
-    // A paid send needs something to measure its cost against.
-    if (before === null && billing.mode === 'paid')
+    // Riding along an image's measurement, this reply takes no reading of its own.
+    const before = riding ? null : await this.balance();
+    // A paid send under a cap needs something to measure its cost against.
+    if (before === null && !riding && !uncapped && !freeOnly)
       return void (await this.say(this.texts.walletUnavailable));
     if (billing.mode === 'paid' && !this.priceShown.has(character.npcId)) {
       await this.say(this.texts.priceLine(price) + this.texts.balanceLine(before));
       this.priceShown.add(character.npcId);
     }
-    if (before === null)
+    const mode: BillingMode = freeOnly ? 'free' : billing.mode;
+    const pending = this.state.data.pending;
+    let ownPending = false;
+    if (riding) {
+      // The image's measurement (taken before it) holds this reply's cost too.
+      if (pending) this.state.update({ pending: { ...pending, extra: true, capped: false } });
       this.log(
         tr(
-          '读不到余额：这条只用免费额度的回复无法核对是否扣费',
-          "Can't read the balance: can't check whether this free-messages-only reply was charged",
-          'No se puede leer el saldo: no se puede verificar si se cobró esta respuesta en modo solo mensajes gratis',
-          'Não foi possível ler o saldo: não é possível conferir se esta resposta no modo só mensagens grátis foi cobrada',
+          '上一张图片的花费还没结算：没有设花费上限，这条照常发送，花费和图片的一起核对',
+          "The last image's cost is not settled yet: there is no spending cap, so this message goes anyway and its cost is checked with the image's",
+          'El costo de la última imagen aún no se liquidó: no hay límite de gasto, así que este mensaje se envía igual y su costo se verifica junto con el de la imagen',
+          'O custo da última imagem ainda não foi finalizado: não há limite de gastos, então esta mensagem é enviada mesmo assim e o custo dela é conferido com o da imagem',
         ),
       );
-    else this.state.update({ pending: { before, mode: billing.mode, price, at: Date.now() } });
+    } else if (before === null) {
+      if (pending) {
+        // Without a cap: the earlier send's reading is still to come and measures this one too.
+        this.state.update({ pending: { ...pending, mode: 'open', price: null, capped: false } });
+        this.log(
+          tr(
+            '读不到余额：这条的花费和之前的一起核对',
+            "Can't read the balance: this message's cost is checked together with the earlier one",
+            'No se puede leer el saldo: el costo de este mensaje se verifica junto con el anterior',
+            'Não foi possível ler o saldo: o custo desta mensagem é conferido junto com o anterior',
+          ),
+        );
+      } else
+        this.log(
+          freeOnly
+            ? tr(
+                '读不到余额：这条只用免费额度的回复无法核对是否扣费',
+                "Can't read the balance: can't check whether this free-messages-only reply was charged",
+                'No se puede leer el saldo: no se puede verificar si se cobró esta respuesta en modo solo mensajes gratis',
+                'Não foi possível ler o saldo: não é possível conferir se esta resposta no modo só mensagens grátis foi cobrada',
+              )
+            : tr(
+                '读不到余额：这条的花费量不出来；没有设花费上限，照常发送',
+                "Can't read the balance: this message's cost can't be measured; there is no spending cap, so it goes anyway",
+                'No se puede leer el saldo: no se puede medir el costo de este mensaje; no hay límite de gasto, así que se envía igual',
+                'Não foi possível ler o saldo: o custo desta mensagem não pode ser medido; não há limite de gastos, então ela é enviada mesmo assim',
+              ),
+        );
+    } else {
+      // A pending charge is replaced only once settled: this reading settles it first.
+      if (pending) await this.settlePending(before);
+      this.state.update({ pending: { before, mode, price, at: Date.now(), capped: !uncapped } });
+      ownPending = true;
+    }
     const presenter = this.channel.presenter({
       to: event.chatId,
       context: event.context,
@@ -1111,8 +1404,11 @@ export class Relay {
       presenter,
       lastSeq: 0,
       settled: false,
-      mode: billing.mode,
+      mode,
       booked: false,
+      ownPending,
+      settles: !riding,
+      unmeasured: !ownPending && !this.state.data.pending,
       finished: null,
       watchdog: null,
     };
@@ -1129,8 +1425,9 @@ export class Relay {
         maxCostDiamonds: maxCost,
       });
     } catch (error) {
-      // Refused for sure: nothing was charged. Unknown: the pending charge is settled later.
-      if (!unknownOutcome(error)) this.state.update({ pending: null });
+      // Refused for sure: nothing was charged. Unknown: the pending charge is settled later. A
+      // measurement this send only joined still holds earlier costs: it stays.
+      if (!unknownOutcome(error) && ownPending) this.state.update({ pending: null });
       this.turn = null;
       this.early.clear();
       await presenter.stop().catch(() => undefined);
@@ -1151,11 +1448,17 @@ export class Relay {
     if (answer.assistantMid) this.ownMids.add(answer.assistantMid);
     if (this.ownMids.size > 1000) this.ownMids = new Set([...this.ownMids].slice(-500));
     if (answer.chargedDiamonds !== null) {
-      // The server says what it took: booked now, so a stop or restart cannot lose it.
-      this.state.update({ pending: null });
+      // The server says what it took: booked now, so a stop or restart cannot lose it. A
+      // measurement this send only joined keeps the earlier costs: this charge leaves its drop.
+      const joined = this.state.data.pending;
+      if (ownPending) this.state.update({ pending: null });
+      else if (joined)
+        this.state.update({
+          pending: { ...joined, before: joined.before - answer.chargedDiamonds },
+        });
       turn.booked = true;
       await this.book(answer.chargedDiamonds, turn.mode);
-    }
+    } else if (turn.unmeasured) this.countUnmeasured();
     for (const notice of answer.notices) await this.say(notice);
     this.armWatchdog(turn);
     const early = this.early.get(answer.streamId) ?? [];
@@ -1181,11 +1484,18 @@ export class Relay {
         case 'membership':
           return void (await this.say(this.texts.membership));
         case 'freeExhausted':
-          return void (await this.say(this.texts.freeExhausted(...(await this.priceParts()))));
+          return void (await this.say(
+            this.texts.freeExhausted(...(await this.priceParts()), this.leaveHint()),
+          ));
         case 'spendCap': {
+          // Only a capped send names a cap; one without a cap is told what the server said.
+          if (this.uncapped())
+            return void (await this.say(
+              this.texts.refused(error.dialog?.content || error.message),
+            ));
           const character = this.state.data.character;
           const price = character ? await this.replyPrice(character.npcId) : null;
-          return void (await this.say(this.texts.budgetShort(price ?? 0, this.left())));
+          return void (await this.say(this.shortText(price ?? 0, Math.max(0, this.left()))));
         }
         case 'rateLimited':
           return void (await this.say(
@@ -1252,9 +1562,12 @@ export class Relay {
         this.unexpected(error),
       );
     } else if (event.type === StreamEventType.error) {
+      // Too few gems found while replying is said in the relay's words, not the server's.
+      const code = event.error?.code ?? '';
+      const gems = code === 'INSUFFICIENT_GEMS' || INSUFFICIENT_GEMS.has(Number(code));
       this.failTurn(
         turn,
-        event.error?.message ?? '',
+        gems ? this.texts.insufficientGems : this.texts.replyFailed(event.error?.message ?? ''),
         event.message?.content.paragraphs ?? [],
       ).catch((error) => this.unexpected(error));
     }
@@ -1320,7 +1633,8 @@ export class Relay {
     });
   }
 
-  private async failTurn(turn: Turn, detail: string, paragraphs: readonly ImParagraph[]) {
+  /** `told`: why it failed, in the relay's words. */
+  private async failTurn(turn: Turn, told: string, paragraphs: readonly ImParagraph[]) {
     if (turn.settled) return;
     turn.settled = true;
     await this.finishTurn(turn, async () => {
@@ -1329,8 +1643,8 @@ export class Relay {
         const refs = await turn.presenter.finish(paragraphs, this.texts.emptyReply);
         for (const ref of refs)
           this.state.rememberReply(this.channel.persistId(ref), turn.assistantMid);
-        await this.say(this.texts.replyFailed(detail));
-      } else await turn.presenter.stop(this.texts.replyFailed(detail));
+        await this.say(told);
+      } else await turn.presenter.stop(told);
     });
   }
 
@@ -1360,7 +1674,7 @@ export class Relay {
       );
     }
     try {
-      if (!turn.booked && !(await this.settlePending()))
+      if (!turn.booked && turn.settles && !(await this.settlePending()))
         this.log(
           tr(
             '暂时读不到余额：这条回复的花费会在下一条发送前核对',
@@ -1399,39 +1713,57 @@ export class Relay {
   }
 
   /**
-   * Books the pending send's cost from the balance now: the drop, if any. A balance that rose
-   * meanwhile (a top-up) hides the cost, so the quoted price is booked instead (or, unknown, the
-   * rest of the budget). False when the balance cannot be read: it stays pending.
+   * Books the pending send's cost from the balance now (`reading`, else read here): the drop, if
+   * any. A balance that rose meanwhile (a top-up) hides the cost: for a send made under a cap the
+   * quoted price is booked instead (or, unknown, the rest of what may be spent, its bound then);
+   * for one made without a cap (`capped` false), even if a budget was set since, it is counted as
+   * unmeasured. False when the balance cannot be read: it stays pending.
    */
-  private async settlePending(): Promise<boolean> {
+  private async settlePending(reading?: number): Promise<boolean> {
     const pending = this.state.data.pending;
     if (!pending) return true;
-    const now = await this.balance();
+    const now = reading ?? (await this.balance());
     if (now === null) return false;
     this.state.update({ pending: null });
     const drop = pending.before - now;
     if (drop >= 0) await this.book(drop, pending.mode);
-    else if (pending.mode === 'paid') {
+    else if (pending.mode !== 'free' && !this.uncapped() && pending.capped !== false) {
       const estimate = pending.price ?? Math.max(0, this.left());
       this.log(
         tr(
-          `余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入预算`,
-          `The balance went up during this reply, so the cost can't be measured: counting ${estimate} gems against the budget`,
-          `El saldo aumentó durante esta respuesta, así que no se puede medir el costo: se descuentan ${estimate} gemas del presupuesto`,
-          `O saldo aumentou durante esta resposta, então o custo não pode ser medido: ${estimate} gemas serão descontadas do orçamento`,
+          `余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入`,
+          `The balance went up during this reply, so the cost can't be measured: counting ${estimate} gems as spent`,
+          `El saldo aumentó durante esta respuesta, así que no se puede medir el costo: se cuentan ${estimate} gemas como gastadas`,
+          `O saldo aumentou durante esta resposta, então o custo não pode ser medido: ${estimate} gemas serão contadas como gastas`,
         ),
       );
       await this.book(estimate, pending.mode);
+    } else if (pending.mode !== 'free') {
+      this.log(
+        tr(
+          '余额在这期间增加了（充值？），这次的花费量不出来',
+          'The balance went up meanwhile (a top-up?), so this cost cannot be measured',
+          'El saldo aumentó mientras tanto (¿una recarga?), así que este costo no se puede medir',
+          'O saldo aumentou nesse meio-tempo (uma recarga?), então este custo não pode ser medido',
+        ),
+      );
+      this.countUnmeasured();
+      await this.book(pending.price ?? 0, pending.mode);
     }
     return true;
   }
 
-  /** Counts `amount` gems against the budget and the local ceiling; pauses when either is spent. */
-  private async book(amount: number, mode: 'free' | 'paid') {
+  /**
+   * Counts `amount` gems in the running total, against the budget and the local ceiling when they
+   * are set; pauses when one is spent. A "free" send that was charged pauses under free-only and
+   * under a budget (which it was never meant to touch); without a budget it is counted like any.
+   */
+  private async book(amount: number, mode: BillingMode) {
     if (amount <= 0) return;
     const allowance = this.state.data.allowance;
-    this.state.update({ allowance: { ...allowance, spent: allowance.spent + amount } });
-    if (mode === 'free') {
+    const total = allowance.spent + amount;
+    this.state.update({ allowance: { ...allowance, spent: total } });
+    if (mode === 'free' && (this.freeOnly() || this.state.data.billing.mode === 'paid')) {
       this.log(
         tr(
           `只用免费额度时被扣了 ${amount} 钻石，relay 暂停`,
@@ -1441,23 +1773,56 @@ export class Relay {
         ),
       );
       this.state.update({ billingPause: 'freeCharged' });
-      await this.say(this.texts.freeCharged(amount));
+      await this.say(this.texts.freeCharged(amount, this.leaveHint()));
       return;
     }
     const billing = this.state.data.billing;
-    const spent = billing.spent + amount;
-    this.state.update({ billing: { ...billing, spent } });
+    const ceiling = this.options.maxSpend;
+    const ceilingLeft = Math.max(0, this.ceilingLeft());
+    if (billing.mode === 'paid') {
+      const spent = billing.spent + amount;
+      this.state.update({ billing: { ...billing, spent } });
+      this.log(
+        ceiling === null
+          ? tr(
+              `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机没有设上限）`,
+              `This reply cost ${amount} gems (budget ${billing.budget}, used ${spent}; no local spending cap)`,
+              `Esta respuesta costó ${amount} gemas (presupuesto ${billing.budget}, usadas ${spent}; sin límite de gasto local)`,
+              `Esta resposta custou ${amount} gemas (orçamento ${billing.budget}, usadas ${spent}; sem limite de gastos local)`,
+            )
+          : tr(
+              `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机还可花 ${ceilingLeft}）`,
+              `This reply cost ${amount} gems (budget ${billing.budget}, used ${spent}; ${ceilingLeft} left under the local spending cap)`,
+              `Esta respuesta costó ${amount} gemas (presupuesto ${billing.budget}, usadas ${spent}; quedan ${ceilingLeft} dentro del límite de gasto local)`,
+              `Esta resposta custou ${amount} gemas (orçamento ${billing.budget}, usadas ${spent}; restam ${ceilingLeft} dentro do limite de gastos local)`,
+            ),
+      );
+      if (this.left() <= 0) {
+        this.state.update({ billingPause: 'budget' });
+        await this.say(this.exhaustedText());
+      }
+      return;
+    }
+    // No budget: the running total, and the local ceiling when one is set. Nothing in the chat:
+    // a cost line after every reply would only be noise.
     this.log(
-      tr(
-        `这条回复花了 ${amount} 钻石（预算 ${billing.budget}，已用 ${spent}；本机还可花 ${Math.max(0, this.ceilingLeft())}）`,
-        `This reply cost ${amount} gems (budget ${billing.budget}, used ${spent}; ${Math.max(0, this.ceilingLeft())} left under the local spending cap)`,
-        `Esta respuesta costó ${amount} gemas (presupuesto ${billing.budget}, usadas ${spent}; quedan ${Math.max(0, this.ceilingLeft())} dentro del límite de gasto local)`,
-        `Esta resposta custou ${amount} gemas (orçamento ${billing.budget}, usadas ${spent}; restam ${Math.max(0, this.ceilingLeft())} dentro do limite de gastos local)`,
-      ),
+      ceiling === null
+        ? tr(
+            `扣了 ${amount} 钻石（通过 relay 累计 ${total}；没有设花费上限）`,
+            `Charged ${amount} gems (${total} spent through the relay in total; no spending cap)`,
+            `Se cobraron ${amount} gemas (${total} gastadas a través del relay en total; sin límite de gasto)`,
+            `Foram cobradas ${amount} gemas (${total} gastas pelo relay no total; sem limite de gastos)`,
+          )
+        : tr(
+            `扣了 ${amount} 钻石（通过 relay 累计 ${total}；本机上限还可花 ${ceilingLeft}）`,
+            `Charged ${amount} gems (${total} spent through the relay in total; ${ceilingLeft} left under the local spending cap)`,
+            `Se cobraron ${amount} gemas (${total} gastadas a través del relay en total; quedan ${ceilingLeft} dentro del límite de gasto local)`,
+            `Foram cobradas ${amount} gemas (${total} gastas pelo relay no total; restam ${ceilingLeft} dentro do limite de gastos local)`,
+          ),
     );
-    if (this.left() <= 0) {
+    if (ceiling !== null && this.ceilingLeft() <= 0) {
       this.state.update({ billingPause: 'budget' });
-      await this.say(this.texts.budgetExhausted(spent));
+      await this.say(this.exhaustedText());
     }
   }
 
@@ -1483,7 +1848,8 @@ export class Relay {
     if (action === 'forget') {
       if (!kept) return void (await this.say(this.texts.imageNothingToResume));
       // An accepted task is charged when it is delivered: only its own end may settle it.
-      if (kept.taskId) return void (await this.say(this.texts.imageForgetAccepted));
+      if (kept.taskId)
+        return void (await this.say(this.texts.imageForgetAccepted(!this.uncapped())));
       // Only an unknown outcome goes; its pending charge is still settled before the next send.
       this.keepImage(null);
       this.log(
@@ -1494,9 +1860,9 @@ export class Relay {
           'O dono parou de acompanhar a última solicitação de imagem com resultado desconhecido',
         ),
       );
-      return void (await this.say(this.texts.imageForgotten));
+      return void (await this.say(this.texts.imageForgotten(!this.uncapped())));
     }
-    if (this.job) return void (await this.say(this.texts.imageBusy));
+    if (this.job) return void (await this.say(this.imageWaitText(this.job.record)));
     const blocked = this.pausedText();
     if (blocked) return void (await this.say(blocked));
     if (action === 'resume') {
@@ -1517,7 +1883,7 @@ export class Relay {
       } catch (error) {
         if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
           return this.signedOut();
-        return void (await this.say(this.texts.imageConfigUnavailable));
+        return void (await this.say(this.texts.imageConfigUnavailable(!this.uncapped())));
       }
       const money = await this.imageMoney(kept.npcId, cost, worst, true);
       if (money.refusal) return void (await this.say(money.refusal));
@@ -1558,7 +1924,7 @@ export class Relay {
           'Não foi possível ler as configurações de geração de imagem',
         ),
       );
-      return void (await this.say(this.texts.imageConfigUnavailable));
+      return void (await this.say(this.texts.imageConfigUnavailable(!this.uncapped())));
     }
     if (!config.enabled) return void (await this.say(this.texts.imageDisabled));
     const anchor = await this.imageAnchor(event, character.npcId);
@@ -1629,10 +1995,12 @@ export class Relay {
 
   /**
    * The money checks before an image is asked for, as for a reply: earlier costs booked first, a
-   * priced image only under a confirmed budget that covers it, and only with a balance that pays
-   * for it. One shown as free may still be charged its full price (`worst`: the free images are a
-   * snapshot), so that must fit what this relay may still spend; an unknown worst case refuses.
-   * `refusal` says why not ('' when it may go); `before` is the balance to measure from.
+   * priced image never under free-only and, under a cap, only when it covers it, and only with a
+   * balance that pays for it. One shown as free may still be charged its full price (`worst`: the
+   * free images are a snapshot), so under a cap that must fit what this relay may still spend; an
+   * unknown worst case refuses. Without a cap Yomi charges by its normal rules: an unreadable
+   * balance blocks nothing (the image is then booked by its task). `refusal` says why not ('' when
+   * it may go); `before` is the balance to measure from.
    */
   private async imageMoney(
     npcId: string,
@@ -1641,30 +2009,58 @@ export class Relay {
     replay = false,
   ): Promise<{ refusal: string; before: number | null }> {
     const no = (refusal: string) => ({ refusal, before: null });
-    if (worst === null) return no(this.texts.imageConfigUnavailable);
+    const uncapped = this.uncapped();
+    if (worst === null && !uncapped) return no(this.texts.imageConfigUnavailable(true));
     // A resend keeps the first send's pending charge: it is the same image, booked once at its end.
-    if (!replay && !(await this.settlePending())) return no(this.texts.walletUnavailable);
+    if (!replay && !(await this.settlePending())) {
+      if (!uncapped) return no(this.texts.walletUnavailable);
+      this.log(
+        tr(
+          '读不到余额：之前的花费稍后再核对；没有设花费上限，照常生图',
+          "Can't read the balance: the earlier cost is checked later; there is no spending cap, so the image is requested anyway",
+          'No se puede leer el saldo: el costo anterior se verificará más tarde; no hay límite de gasto, así que la imagen se pide igual',
+          'Não foi possível ler o saldo: o custo anterior será conferido depois; não há limite de gastos, então a imagem é solicitada mesmo assim',
+        ),
+      );
+    }
     const paused = this.pausedText();
     if (paused) return no(paused);
-    if (cost <= 0 && worst > this.ceilingLeft())
+    if (cost <= 0 && worst !== null && worst > this.ceilingLeft())
       return no(this.texts.imageFreeOverCeiling(worst, this.ceilingLeft()));
-    const billing = this.state.data.billing;
     if (cost > 0) {
-      if (billing.mode !== 'paid') return no(this.texts.imageNeedsBudget(cost));
-      const left = this.left();
-      if (left <= 0) {
-        this.state.update({ billingPause: 'budget' });
-        return no(this.texts.budgetExhausted(billing.spent));
+      if (this.freeOnly()) return no(this.texts.imageNeedsBudget(cost, this.leaveHint()));
+      if (!uncapped) {
+        const left = this.left();
+        if (left <= 0) {
+          this.state.update({ billingPause: 'budget' });
+          return no(this.exhaustedText());
+        }
+        if (cost > left)
+          return no(
+            this.ceilingLimits()
+              ? this.texts.imageCeilingShort(cost, left)
+              : this.texts.imageBudgetShort(cost, left),
+          );
       }
-      if (cost > left) return no(this.texts.imageBudgetShort(cost, left));
     }
     const before = await this.balance();
-    // Nothing on the server keeps an image free (no free-only mode as for replies): every image,
-    // free or not, needs a balance to measure its cost against.
-    if (before === null) return no(this.texts.walletUnavailable);
+    // Nothing on the server keeps an image free (no free-only mode as for replies): under a cap
+    // every image, free or not, needs a balance to measure its cost against.
+    if (before === null) {
+      if (!uncapped) return no(this.texts.walletUnavailable);
+      this.log(
+        tr(
+          '读不到余额：这张图片的花费按它的任务记录核对',
+          "Can't read the balance: this image's cost is checked from its task",
+          'No se puede leer el saldo: el costo de esta imagen se verifica a partir de su tarea',
+          'Não foi possível ler o saldo: o custo desta imagem é conferido pela tarefa dela',
+        ),
+      );
+    }
     if (cost > 0) {
       // A resend that was accepted the first time costs nothing more; one that was not is refused.
-      if (before < cost && !replay) return no(this.texts.imageGemsShort(cost, before));
+      if (before !== null && before < cost && !replay)
+        return no(this.texts.imageGemsShort(cost, before));
       if (!this.imagePriceShown.has(npcId)) {
         await this.say(this.texts.imagePriceLine(cost) + this.texts.balanceLine(before));
         this.imagePriceShown.add(npcId);
@@ -1681,19 +2077,26 @@ export class Relay {
    * been accepted, so the request and its pending charge stay.
    */
   private async requestImage(record: ImageRecord, before: number | null, replay = false) {
+    // A resend keeps the first send's pending charge (measured from before that send). A new
+    // measurement starts only when none is open: one that is (only without a cap) began before
+    // this image and would take its charge too, so the image is then booked by its task alone.
+    const pending = this.state.data.pending;
+    const kept = replay && record.measured !== false ? pending : null;
+    const fresh = !kept && !pending && before !== null && !(replay && record.measured === false);
+    record.measured = Boolean(kept) || fresh;
     this.keepImage(record);
-    // An image shown as free that is charged anyway pauses the relay, budget or not. A resend
-    // keeps the first send's pending charge (measured from before that send).
-    const kept = replay ? this.state.data.pending : null;
+    // An image shown as free that is charged anyway pauses the relay under free-only and under a
+    // budget (`book`).
     if (kept && record.price > 0 && kept.mode === 'free')
       this.state.update({ pending: { ...kept, mode: record.mode, price: record.price } });
-    else if (!kept && before !== null)
+    else if (fresh && before !== null)
       this.state.update({
         pending: {
           before,
           mode: record.price > 0 ? record.mode : 'free',
           price: record.price,
           at: Date.now(),
+          capped: !this.uncapped(),
         },
       });
     let answer;
@@ -1717,12 +2120,14 @@ export class Relay {
         return void (await this.say(
           this.texts.imageReplayRefused(
             refusal && refusal.message !== refusal.code ? refusal.message : (refusal?.code ?? ''),
+            !this.uncapped(),
           ),
         ));
       }
       if (refusal || signedOut) {
         this.keepImage(null);
-        this.state.update({ pending: null });
+        // Only its own measurement goes: one it did not start still holds earlier costs.
+        if (record.measured) this.state.update({ pending: null });
         if (refusal) return this.imageRefused(refusal);
         return this.signedOut();
       }
@@ -1785,26 +2190,37 @@ export class Relay {
    * A kept image is settled before anything else is sent: '' when nothing is open (any more),
    * else why nothing is sent now. Its pending charge is booked only once the task has ended and,
    * within its 180 s window, once a delivered priced picture's charge has landed (after /stop or
-   * a timeout too): until then the task is followed again and nothing is sent.
+   * a timeout too): until then the task is followed again and nothing is sent. Without a cap a
+   * reply (`forReply`) does not wait for the measurement: an unknown outcome, an unreadable task
+   * or a charge still landing let it go, riding along the image's measurement (`chat`); a
+   * picture still being made is waited for all the same, one at a time.
    */
-  private async settleImage(): Promise<string> {
+  private async settleImage(forReply = false): Promise<string> {
     const record = this.keptImage();
     if (!record) return '';
-    if (this.job) return this.texts.imageBusy;
-    if (!record.taskId) return this.texts.imageKeptUnknown;
+    if (this.job) return this.imageWaitText(this.job.record);
+    const along = forReply && this.uncapped();
+    if (!record.taskId) return along ? '' : this.texts.imageKeptUnknown(!this.uncapped());
     let task: ChatImageTask;
     try {
       task = await getChatImageTask(this.gateway, record.taskId);
     } catch (error) {
       if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
         throw error;
-      return this.texts.imageUnchecked;
+      return along ? '' : this.texts.imageUnchecked;
     }
     const window = this.options.imageTimeoutMs ?? CHAT_IMAGE_TIMEOUT_MS;
     const patient = Date.now() < record.at + window;
     if (await this.concludeImage(record, task, new Map(), patient)) return '';
+    // Delivered, its charge still landing: a later send (or the next start) settles it.
+    if (along && record.told) return '';
     this.startImageJob(record);
-    return record.told ? this.texts.imageSettling : this.texts.imageBusy;
+    return this.imageWaitText(record);
+  }
+
+  /** Why nothing new goes while an image is followed: still being made, or its charge landing. */
+  private imageWaitText(record: ImageRecord): string {
+    return record.told ? this.texts.imageSettling(!this.uncapped()) : this.texts.imageBusy;
   }
 
   private startImageJob(record: ImageRecord): ImageJob {
@@ -1950,12 +2366,16 @@ export class Relay {
   /**
    * Books a settled image by what its task says, not by the balance: another `yomi` process
    * spending or a top-up meanwhile would distort a drop. Charged: its price (a free one charged
-   * anyway: the full price, which pauses the relay). Not charged, refunded or failed: nothing. Any
-   * other state is measured from the balance as before. A drop that disagrees is logged.
+   * anyway: the full price, which pauses the relay under free-only or a budget). Not charged,
+   * refunded or failed: nothing. Any other state is measured from the balance as before. A drop
+   * that disagrees is logged. Without a cap two things differ: an image that had no measurement of
+   * its own (`measured` false) is booked by its task alone and taken out of the measurement that
+   * was open (which began before it); and replies that rode along its measurement (`extra`) get
+   * the rest of the drop.
    */
   private async settleImageCharge(record: ImageRecord, task: ChatImageTask) {
     const pending = this.state.data.pending;
-    if (!pending) return;
+    const mode: BillingMode = record.price > 0 ? record.mode : 'free';
     const billing = task.billing;
     const known =
       billing === ImageBilling.charged
@@ -1967,6 +2387,27 @@ export class Relay {
             billing === ImageBilling.chargeFailed
           ? 0
           : null;
+    if (record.measured === false) {
+      if (known === null) {
+        // Inside the open measurement's drop, it is booked with it; without one it is lost.
+        if (!pending) {
+          this.countUnmeasured();
+          this.log(
+            tr(
+              '这张图片的花费量不出来（读不到余额，任务也没有记录）',
+              "This image's cost can't be measured (the balance was unreadable and the task does not say)",
+              'No se puede medir el costo de esta imagen (el saldo no se pudo leer y la tarea no lo indica)',
+              'O custo desta imagem não pode ser medido (não foi possível ler o saldo e a tarefa não informa)',
+            ),
+          );
+        }
+        return;
+      }
+      if (pending) this.state.update({ pending: { ...pending, before: pending.before - known } });
+      await this.book(known, mode);
+      return;
+    }
+    if (!pending) return;
     if (known === null) {
       if (!(await this.settlePending()))
         this.log(
@@ -1975,6 +2416,29 @@ export class Relay {
             "Can't read the balance right now: this image's cost will be checked before the next send",
             'No se puede leer el saldo en este momento: el costo de esta imagen se verificará antes del próximo envío',
             'Não foi possível ler o saldo agora: o custo desta imagem será conferido antes do próximo envio',
+          ),
+        );
+      return;
+    }
+    if (pending.extra) {
+      // Replies rode along: the image is booked by its task, the rest of the drop is theirs.
+      this.state.update({
+        pending: {
+          before: pending.before - known,
+          mode: 'open',
+          price: null,
+          at: pending.at,
+          capped: false,
+        },
+      });
+      await this.book(known, mode);
+      if (!(await this.settlePending()))
+        this.log(
+          tr(
+            '暂时读不到余额：图片期间发出的消息的花费会在下一条发送前核对',
+            "Can't read the balance right now: the cost of the messages sent during the image will be checked before the next send",
+            'No se puede leer el saldo en este momento: el costo de los mensajes enviados durante la imagen se verificará antes del próximo envío',
+            'Não foi possível ler o saldo agora: o custo das mensagens enviadas durante a imagem será conferido antes do próximo envio',
           ),
         );
       return;

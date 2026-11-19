@@ -54,7 +54,8 @@ export type RelayCommandOptions = {
   pair: boolean;
   forget: boolean;
   characterId: string;
-  maxSpend: number;
+  /** The local spending cap (`--max-spend`); null: none, Yomi charges by its normal rules. */
+  maxSpend: number | null;
   allowFileStore: boolean;
   installService: boolean;
   uninstallService: boolean;
@@ -173,7 +174,8 @@ export function relayServiceArgs(
   const args = ['relay', ...lead, '--env', env.name];
   if (env.lane) args.push('--lane', env.lane);
   if (options.allowFileStore) args.push('--allow-file-store');
-  args.push('--max-spend', String(options.maxSpend));
+  // Only a cap the owner chose: without one the service runs uncapped, as the foreground relay.
+  if (options.maxSpend !== null) args.push('--max-spend', String(options.maxSpend));
   if (options.characterId) args.push('--character', options.characterId);
   args.push(...trail);
   // Confirmed when the service was installed; a service has nobody to ask.
@@ -291,6 +293,55 @@ function credentialsRunning(holder: Holder, flag: string): string {
     `${command} está en ejecución${pid ? ` (proceso ${pid})` : ''}: espera a que termine y luego ${flag ? `usa ${flag}` : 'inicia el relay'}.`,
     `${command} está em execução${pid ? ` (processo ${pid})` : ''}: espere terminar e depois ${flag ? `use ${flag}` : 'inicie o relay'}.`,
   );
+}
+
+/**
+ * The local spending cap in words, for the terminal and the service's installation (nobody
+ * watches a service: what it may spend is said when it is installed). `install`: the advice
+ * names --install-service.
+ */
+function capLine(maxSpend: number | null, install: boolean): string {
+  if (maxSpend === null)
+    return install
+      ? tr(
+          '没有本机花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示（要设上限，加 --max-spend <数量> 重新安装，或在聊天里用 /budget <数量>）。',
+          'No local spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat (to set a cap, install again with --max-spend <amount>, or use /budget <amount> in the chat).',
+          'Sin límite de gasto local: Yomi cobra según sus reglas habituales, y si el saldo no alcanza se avisa en el chat (para fijar un límite, vuelve a instalar con --max-spend <cantidad> o usa /budget <cantidad> en el chat).',
+          'Sem limite de gastos local: o Yomi cobra pelas regras normais, e saldo baixo é avisado no chat (para definir um limite, instale de novo com --max-spend <quantidade> ou use /budget <quantidade> no chat).',
+        )
+      : tr(
+          '没有本机花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示（要设上限：--max-spend <数量>，或在聊天里用 /budget <数量>）。',
+          'No local spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat (to set a cap: --max-spend <amount>, or /budget <amount> in the chat). ',
+          'Sin límite de gasto local: Yomi cobra según sus reglas habituales, y si el saldo no alcanza se avisa en el chat (para fijar un límite: --max-spend <cantidad>, o /budget <cantidad> en el chat). ',
+          'Sem limite de gastos local: o Yomi cobra pelas regras normais, e saldo baixo é avisado no chat (para definir um limite: --max-spend <quantidade>, ou /budget <quantidade> no chat). ',
+        );
+  if (maxSpend === 0)
+    return install
+      ? tr(
+          '本机花费上限 0：relay 不花钻石，只用免费额度，服务端支持之前一条也不发。要按 Yomi 的正常规则扣费，去掉 --max-spend 重新安装。',
+          'Local spending cap: 0, so relay spends no gems: free replies only, and nothing is sent until the server supports them. To let Yomi charge by its normal rules, install again without --max-spend.',
+          'Límite de gasto local: 0, así que relay no gasta gemas: solo respuestas gratis, y no se envía nada hasta que el servidor las admita. Para que Yomi cobre según sus reglas habituales, vuelve a instalar sin --max-spend.',
+          'Limite de gastos local: 0, então o relay não gasta gemas: só respostas grátis, e nada é enviado até o servidor oferecer suporte a elas. Para o Yomi cobrar pelas regras normais, instale de novo sem --max-spend.',
+        )
+      : tr(
+          '本机花费上限 0：relay 不花钻石，只用免费额度，服务端支持之前一条也不发。要按 Yomi 的正常规则扣费，去掉 --max-spend 启动（后台服务：重新安装）。',
+          'Local spending cap: 0, so relay spends no gems: free replies only, and nothing is sent until the server supports them. Start without --max-spend to let Yomi charge by its normal rules (a background service: install it again). ',
+          'Límite de gasto local: 0, así que relay no gasta gemas: solo respuestas gratis, y no se envía nada hasta que el servidor las admita. Inicia sin --max-spend para que Yomi cobre según sus reglas habituales (un servicio en segundo plano: vuelve a instalarlo). ',
+          'Limite de gastos local: 0, então o relay não gasta gemas: só respostas grátis, e nada é enviado até o servidor oferecer suporte a elas. Inicie sem --max-spend para o Yomi cobrar pelas regras normais (um serviço em segundo plano: instale-o de novo). ',
+        );
+  return install
+    ? tr(
+        `本机允许 relay 最多花 ${maxSpend} 钻石（累计）。`,
+        `Local spending cap: relay may spend up to ${maxSpend} gems in total on this machine.`,
+        `Límite de gasto local: relay puede gastar hasta ${maxSpend} gemas en total en este equipo.`,
+        `Limite de gastos local: o relay pode gastar até ${maxSpend} gemas no total nesta máquina.`,
+      )
+    : tr(
+        `本机允许 relay 最多花 ${maxSpend} 钻石（累计；--reset-spend 重新计算）。`,
+        `Local spending cap: relay may spend up to ${maxSpend} gems in total on this machine (--reset-spend starts the count over). `,
+        `Límite de gasto local: relay puede gastar hasta ${maxSpend} gemas en total en este equipo (--reset-spend reinicia el conteo). `,
+        `Limite de gastos local: o relay pode gastar até ${maxSpend} gemas no total nesta máquina (--reset-spend zera a contagem). `,
+      );
 }
 
 /** A channel's name inside Chinese text: set apart by spaces when it is in Latin letters. */
@@ -547,6 +598,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
         `Serviço em segundo plano instalado e iniciado: ${plan.path}`,
       ),
     );
+    say(io, capLine(options.maxSpend, true));
     say(
       io,
       paint(
@@ -655,19 +707,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       paint(
         io,
         'dim',
-        (options.maxSpend
-          ? tr(
-              `本机允许 relay 最多花 ${options.maxSpend} 钻石（累计；--reset-spend 重新计算）。`,
-              `Local spending cap: relay may spend up to ${options.maxSpend} gems in total on this machine (--reset-spend starts the count over). `,
-              `Límite de gasto local: relay puede gastar hasta ${options.maxSpend} gemas en total en este equipo (--reset-spend reinicia el conteo). `,
-              `Limite de gastos local: o relay pode gastar até ${options.maxSpend} gemas no total nesta máquina (--reset-spend zera a contagem). `,
-            )
-          : tr(
-              '本机不允许 relay 花钻石（要允许，用 --max-spend <数量> 启动）。服务端支持「只用免费额度」之前，这样不会发出任何消息。',
-              'Local spending cap: 0, so relay spends no gems (to allow spending, start with --max-spend <amount>). Until the server supports "free messages only", no messages are sent in this setup. ',
-              'Límite de gasto local: 0, así que relay no gasta gemas (para permitir el gasto, inicia con --max-spend <cantidad>). Hasta que el servidor admita "solo mensajes gratis", con esta configuración no se envía ningún mensaje. ',
-              'Limite de gastos local: 0, então o relay não gasta gemas (para permitir gastos, inicie com --max-spend <quantidade>). Até o servidor oferecer suporte a "só mensagens grátis", nenhuma mensagem é enviada nesta configuração. ',
-            )) +
+        capLine(options.maxSpend, false) +
           tr(
             'Ctrl+C 停止。',
             'Press Ctrl+C to stop.',

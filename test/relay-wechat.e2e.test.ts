@@ -289,7 +289,7 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     const pairedAt = state.data.owner!.pairedAt;
     state.update({
       billing: { mode: 'paid', budget: 30, spent: 4, setAt: 1 },
-      allowance: { maxSpend: 50, spent: 12, since: 2 },
+      allowance: { maxSpend: 50, spent: 12, since: 2, unmeasured: 0 },
       pending: { before: 99, mode: 'paid', price: 3, at: 3 },
       channel: { ...state.data.channel, expiredCount: 2, pausedUntil: Date.now() + 60_000 },
     });
@@ -310,12 +310,13 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     expect(other.terminal.out).toContain('扫码的微信号现在是这个 relay 的主人');
     const fresh = stateOf('q7_other@im.wechat').data;
     expect(fresh.owner!.userId).toBe('q7_other@im.wechat');
-    expect(fresh.billing.mode).toBe('free');
+    // A new scanner starts with no budget: Yomi charges by its normal rules.
+    expect(fresh.billing.mode).toBe('open');
     expect(fresh.pending).toBeNull();
     // Back to the first owner, without its money state (the tests below chat with it).
     stateOf(wx.owner).update({
-      billing: { mode: 'free', budget: 0, spent: 0, setAt: 0 },
-      allowance: { maxSpend: 0, spent: 0, since: 0 },
+      billing: { mode: 'open', budget: 0, spent: 0, setAt: 0 },
+      allowance: { maxSpend: null, spent: 0, since: 0, unmeasured: 0 },
       pending: null,
     });
     const back = await startLogin();
@@ -771,7 +772,7 @@ describe('the relay over WeChat', () => {
   it("reads iLink's uint64 message ids exactly: two messages in one batch are both answered", async () => {
     await start();
     try {
-      const helps = () => texts().filter((text) => text.includes('/budget [数量|off]')).length;
+      const helps = () => texts().filter((text) => text.includes('/budget [数量|none|off]')).length;
       const before = helps();
       // Ids 1 apart past 2^62: as JS numbers they would be one id, and the second a "replay".
       wx.userSends('/help', { from: owner });

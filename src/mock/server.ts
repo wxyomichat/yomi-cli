@@ -854,7 +854,8 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
    * conversation stream (type 1, purpose Normal, so left out): chunks of cumulative reviewed
    * paragraphs beside the raw text and thinking a client must never show, then the final message,
    * which history gets too. A text with SILENT streams nothing (the reply lands in history after
-   * 300 ms), FAIL fails after one chunk, SLOW takes 12 chunks 120 ms apart.
+   * 300 ms), FAIL fails after one chunk (NOGEMS too, as a reply that ran out of gems), SLOW takes
+   * 12 chunks 120 ms apart.
    */
   const startTurn = (chat: MockChat, text: string) => {
     const npc = npcs().get(chat.npcId)!;
@@ -873,7 +874,8 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       later(complete, 300);
       return turn;
     }
-    const failing = text.includes('FAIL');
+    const noGems = text.includes('NOGEMS');
+    const failing = text.includes('FAIL') || noGems;
     const slow = text.includes('SLOW');
     const parts = slow ? 12 : 3;
     const chunks = failing ? 1 : parts;
@@ -903,7 +905,9 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       () => {
         const seq = chunks + 1;
         if (failing) {
-          const error = { code: 'GENERATION_FAILED', message: '模型开小差了' };
+          const error = noGems
+            ? { code: 'INSUFFICIENT_GEMS', message: 'insufficient gems' }
+            : { code: 'GENERATION_FAILED', message: '模型开小差了' };
           pushChat({ ...base, type: StreamEventType.error, seq, error });
           return;
         }

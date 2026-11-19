@@ -400,7 +400,7 @@ describe('the QQ relay', () => {
     await next();
     await chatted('1');
     await chatted('haha 2');
-    expect(first.state.data.billing.mode).toBe('free');
+    expect(first.state.data.billing.mode).toBe('open');
     next = expectNew(/已设置预算 10 钻石/);
     // A Chinese keyboard's full-width colon and digit.
     qq.userSends(OWNER, `${code}：１`);

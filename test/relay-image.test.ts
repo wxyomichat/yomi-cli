@@ -320,7 +320,10 @@ describe('/image in the relay', () => {
 
   afterAll(stop);
 
-  it('asks for nothing paid without a budget; with one it shows the price and books the charge', async () => {
+  it('asks for nothing paid on free replies only; with a budget it shows the price and books the charge', async () => {
+    const off = expectNew(/^已改为只用免费额度。$/);
+    tg.userSends(owner, '/budget off');
+    await off();
     images().config.freeLeft = 0;
     const creates = images().creates.length;
     const gems = mock.state.gems;
@@ -819,5 +822,245 @@ describe('/image in the relay', () => {
     await said(/放弃之后的一句/);
     await tg.waitFor(() => !busy() && state.data.pending === null);
     expect(state.data.billing.spent).toBe(spent);
+  });
+
+  /** No free reply left with this character: the next replies cost 5 gems each. */
+  function paidReplies() {
+    mock.state.chatFreeLimit = mock.state.chats.get(npc)!.freeUsed;
+  }
+
+  it('without a cap asks for a priced picture with no budget: price shown, booked in the total', async () => {
+    await stop();
+    await start({ maxSpend: null });
+    tg.userSends(owner, '/budget none');
+    const ask = await tg.waitFor(() =>
+      [...tg.messages(owner.id)]
+        .reverse()
+        .find(
+          (message) =>
+            message.text.startsWith('确认取消聊天里的钻石上限吗') && message.reply_markup,
+        ),
+    );
+    const none = expectNew(/^已取消预算：按 Yomi 的正常规则扣费。/);
+    const keyboard = ask.reply_markup as { inline_keyboard: { callback_data: string }[][] };
+    tg.press(owner, owner.id, ask.message_id, keyboard.inline_keyboard[0][0].callback_data);
+    await none();
+    expect(state.data.billing.mode).toBe('open');
+    images().config.freeLeft = 0;
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    const price = expectNew(/^生成一张图片 8 钻石（图片送达时扣费）。当前余额 \d+ 钻石。$/);
+    const started = expectNew(/正在生成图片（8 钻石，送达时扣费）/);
+    const photo = expectPhoto();
+    tg.userSends(owner, '/image');
+    await price();
+    await started();
+    await photo();
+    await tg.waitFor(() => !busy() && kept() === null && state.data.pending === null);
+    expect(state.data.allowance.spent).toBe(total + 8);
+    expect(mock.state.gems).toBe(gems - 8);
+  });
+
+  it('without a cap books a picture shown as free but charged anyway, with no pause', async () => {
+    images().config.freeLeft = 1;
+    images().stepMs = 300;
+    const total = state.data.allowance.spent;
+    const charged = () => tg.messages(owner.id).filter((message) => /仍被扣了/.test(message.text));
+    const before = charged().length;
+    const started = expectNew(/正在生成图片（免费）/);
+    images().chargeFreeNext = true;
+    tg.userSends(owner, '/image');
+    await started();
+    await tg.waitFor(() => !busy() && kept() === null && state.data.pending === null);
+    images().stepMs = 60;
+    expect(state.data.allowance.spent).toBe(total + 8);
+    expect(state.data.billingPause).toBe('');
+    expect(charged()).toHaveLength(before);
+  });
+
+  it('without a cap still asks for a picture when the balance cannot be read, booked by its task', async () => {
+    images().config.freeLeft = 0;
+    const total = state.data.allowance.spent;
+    const creates = images().creates.length;
+    mock.state.walletFailures = 2;
+    const photo = expectPhoto();
+    tg.userSends(owner, '/image');
+    await photo();
+    await tg.waitFor(() => !busy() && kept() === null);
+    expect(images().creates.length).toBe(creates + 1);
+    expect(state.data.pending).toBeNull();
+    expect(state.data.allowance.spent).toBe(total + 8);
+  });
+
+  it('without a cap says when the gems are short and keeps relaying', async () => {
+    images().config.freeLeft = 0;
+    const gems = mock.state.gems;
+    const creates = images().creates.length;
+    mock.state.gems = 5;
+    const short = expectNew(/^钻石不足：生成一张图片需要 8 钻石，当前余额 5。/);
+    tg.userSends(owner, '/image');
+    await short();
+    expect(images().creates.length).toBe(creates);
+    mock.state.gems = gems;
+    images().failNext = { base_resp: { status_code: 40201, status_msg: 'insufficient gems' } };
+    const refused = expectNew(/^钻石不足，没有生成图片，也没有扣费/);
+    tg.userSends(owner, '/image');
+    await refused();
+    expect(state.data.billingPause).toBe('');
+    expect(kept()).toBeNull();
+    tg.userSends(owner, '生图被拒之后');
+    await said(/生图被拒之后/);
+    await tg.waitFor(() => !busy());
+  });
+
+  it('without a cap books an open reply charge and a picture requested meanwhile once each', async () => {
+    paidReplies();
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    tg.userSends(owner, 'SLOW 余额读不到的回复');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    // The reading after the reply fails: its 5 gems stay pending.
+    mock.state.walletFailures = 2;
+    await said(/余额读不到的回复/);
+    await tg.waitFor(() => !busy());
+    const open = state.data.pending;
+    expect(open).not.toBeNull();
+    // Still unreadable when the picture is asked for: it is booked by its task, beside the reply's.
+    images().config.freeLeft = 0;
+    mock.state.walletFailures = 2;
+    const photo = expectPhoto();
+    tg.userSends(owner, '/image');
+    await photo();
+    await tg.waitFor(() => !busy() && kept() === null);
+    expect(state.data.allowance.spent).toBe(total + 8);
+    expect(state.data.pending?.before).toBe(open!.before - 8);
+    mock.state.chatFreeLimit = 1000;
+    tg.userSends(owner, '之后免费的一句');
+    await said(/之后免费的一句/);
+    await tg.waitFor(() => !busy() && state.data.pending === null);
+    expect(state.data.allowance.spent).toBe(total + 13);
+    expect(mock.state.gems).toBe(gems - 13);
+  });
+
+  it("without a cap a reply goes while a picture's charge is landing, and both are booked once", async () => {
+    images().config.freeLeft = 0;
+    images().stepMs = 500;
+    images().chargeLagMs = 1500;
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    const started = expectNew(/正在生成图片（8 钻石，送达时扣费）/);
+    tg.userSends(owner, '/image');
+    await started();
+    const record = kept()!;
+    const stopped = expectNew(/已停止等待这张图片/);
+    tg.userSends(owner, '/stop');
+    await stopped();
+    await tg.waitFor(() => lastTask(record.requestId).delivery === 2);
+    expect(lastTask(record.requestId).billing).toBe(0);
+    // Delivered, its charge not landed: the reply goes anyway (a paid one), riding along.
+    paidReplies();
+    const sent = sends().length;
+    const photo = expectPhoto();
+    tg.userSends(owner, '图片结算前的一句');
+    await photo();
+    await said(/图片结算前的一句/);
+    expect(sends().length).toBe(sent + 1);
+    await tg.waitFor(() => !busy());
+    expect(kept()?.requestId).toBe(record.requestId);
+    expect(state.data.pending?.extra).toBe(true);
+    expect(state.data.allowance.spent).toBe(total);
+    // The charge lands; the next message settles the picture by its task and the reply by the rest.
+    await tg.waitFor(() => lastTask(record.requestId).billing === 2);
+    images().chargeLagMs = 0;
+    images().stepMs = 60;
+    mock.state.chatFreeLimit = 1000;
+    tg.userSends(owner, '结算后的一句');
+    await said(/结算后的一句/);
+    await tg.waitFor(() => !busy() && kept() === null && state.data.pending === null);
+    expect(state.data.allowance.spent).toBe(total + 13);
+    expect(mock.state.gems).toBe(gems - 13);
+  });
+
+  it('without a cap a reply right after delivery goes while the charge lands, with no /stop', async () => {
+    images().config.freeLeft = 0;
+    images().chargeLagMs = 1500;
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    const photo = expectPhoto();
+    tg.userSends(owner, '/image');
+    await photo();
+    const record = kept()!;
+    // Delivered and told; its follower still waits for the charge.
+    await tg.waitFor(() => (kept() as { told?: boolean } | null)?.told === true);
+    expect(busy()).toBe(true);
+    expect(lastTask(record.requestId).billing).toBe(0);
+    paidReplies();
+    const sent = sends().length;
+    const waiting = () =>
+      tg.messages(owner.id).filter((message) => /^上一张图片(还在生成|已经送达)/.test(message.text))
+        .length;
+    const refusals = waiting();
+    tg.userSends(owner, '送达后马上说的一句');
+    await said(/送达后马上说的一句/);
+    expect(sends().length).toBe(sent + 1);
+    expect(waiting()).toBe(refusals);
+    await tg.waitFor(() => !busy());
+    expect(kept()?.requestId).toBe(record.requestId);
+    expect(state.data.pending?.extra).toBe(true);
+    // The charge lands; the next message books the picture by its task and the reply by the rest.
+    await tg.waitFor(() => lastTask(record.requestId).billing === 2);
+    images().chargeLagMs = 0;
+    mock.state.chatFreeLimit = 1000;
+    tg.userSends(owner, '图片结算之后');
+    await said(/图片结算之后/);
+    await tg.waitFor(() => !busy() && kept() === null && state.data.pending === null);
+    expect(state.data.allowance.spent).toBe(total + 13);
+    expect(mock.state.gems).toBe(gems - 13);
+  });
+
+  it('without a cap an unknown image outcome holds pictures back, not the chat, and says so', async () => {
+    // A free picture whose answer is lost: its outcome is unknown, and it costs nothing.
+    images().config.freeLeft = 1;
+    images().loseNextAnswer = true;
+    const unknown = expectNew(/没能确认生图请求的结果/);
+    tg.userSends(owner, '/image');
+    await unknown();
+    expect(kept()?.taskId).toBe('');
+    const held = expectNew(
+      /^上一次生图请求的结果还不确定，在它有结果之前不会发起新的生图（聊天照常）。/,
+    );
+    tg.userSends(owner, '/image');
+    await held();
+    const sent = sends().length;
+    tg.userSends(owner, '结果未知时照常聊');
+    await said(/结果未知时照常聊/);
+    expect(sends().length).toBe(sent + 1);
+    await tg.waitFor(() => !busy());
+    const forgotten = expectNew(/^已放弃追踪上一次的生图请求。.*没有计入 relay 的累计花费。$/);
+    tg.userSends(owner, '/image forget');
+    await forgotten();
+    tg.userSends(owner, '放弃之后照常聊');
+    await said(/放弃之后照常聊/);
+    await tg.waitFor(() => !busy() && state.data.pending === null);
+  });
+
+  it('with only a local cap, a priced picture goes within it and is refused past it', async () => {
+    await stop();
+    await start({ maxSpend: 5 });
+    images().config.freeLeft = 0;
+    const creates = images().creates.length;
+    const short = expectNew(/^本机上限还可花 5 钻石，不够生成一张图片（8 钻石）。/);
+    tg.userSends(owner, '/image');
+    await short();
+    expect(images().creates.length).toBe(creates);
+    await stop();
+    await start({ maxSpend: 200 });
+    const total = state.data.allowance.spent;
+    const photo = expectPhoto();
+    tg.userSends(owner, '/image');
+    await photo();
+    await tg.waitFor(() => !busy() && kept() === null && state.data.pending === null);
+    expect(state.data.allowance.spent).toBe(total + 8);
+    expect(state.data.billing.mode).toBe('open');
   });
 });

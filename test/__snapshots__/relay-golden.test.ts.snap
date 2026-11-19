@@ -21,7 +21,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
           },
           {
             "command": "budget",
-            "description": "设置可花的钻石上限",
+            "description": "可选的钻石上限",
           },
           {
             "command": "image",
@@ -151,7 +151,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
           },
           "parse_mode": "HTML",
           "text": "每条回复约 5 钻石（以实际扣费为准）。当前余额 500 钻石。生成图片目前免费。
-当前不花钻石（只用免费额度）。本机上限 50 钻石，还可花 50。",
+聊天里没有设预算，按 Yomi 的正常规则扣费，不超过本机上限。本机上限 50 钻石，还可花 50。",
         },
       },
       {

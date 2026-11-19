@@ -882,7 +882,7 @@ describe('the core on any channel', () => {
     await next();
     await chatted(fake, relay, '1');
     await chatted(fake, relay, 'haha 2');
-    expect(state.data.billing.mode).toBe('free');
+    expect(state.data.billing.mode).toBe('open');
     next = fake.expect(/已设置预算 10 钻石/);
     fake.say(`${code} 1`);
     await next();
@@ -908,7 +908,7 @@ describe('the core on any channel', () => {
     await expired();
     await second.idle();
     expect(sends()).toHaveLength(before);
-    expect(two.state.data.billing.mode).toBe('free');
+    expect(two.state.data.billing.mode).toBe('open');
     expect(second.texts()).not.toContainEqual(expect.stringMatching(/已设置预算/));
   });
 
@@ -1161,12 +1161,73 @@ describe('the core on any channel', () => {
         ['callback_query_id'],
       ]);
       expect(answers[0].params.text).toBe('这个按钮已过期。');
-      expect(state.data.billing.mode).toBe('free');
+      expect(state.data.billing.mode).toBe('open');
     } finally {
       controller.abort();
       expect(await done).toBeNull();
       await tg.close();
     }
+  });
+
+  it('relays WeChat in production on a confirmed channel with no features and no cap: Yomi charges as usual', async () => {
+    const policy = mock.state.relayPolicy;
+    const freeLimit = mock.state.chatFreeLimit;
+    const gems = mock.state.gems;
+    // The server enables WeChat and echoes it, but offers no feature at all.
+    mock.state.relayPolicy = { enabled: true, channel: 'wechat', features: {} };
+    try {
+      const fake = new FakeChannel({ kind: 'wechat', scope: 'fake:wx-open' });
+      const { relay, state, logs } = await start(fake, {
+        requireServerPolicy: true,
+        maxSpend: null,
+      });
+      expect(logs).toContain(
+        '没有设花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示；通过 relay 已花 0 钻石',
+      );
+      // Past the free replies: charged by the normal rules, no budget asked for.
+      mock.state.chatFreeLimit = 0;
+      mock.state.gems = 12;
+      await chatted(fake, relay, '不设上限的一句');
+      expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
+      expect(sends().at(-1)!.body.max_cost_diamonds).toBeUndefined();
+      await waitFor(() => state.data.allowance.spent === 5 && state.data.pending === null);
+      expect(mock.state.gems).toBe(7);
+      // No cost line in the chat; the terminal has it.
+      expect(fake.texts()).not.toContainEqual(expect.stringMatching(/钻石/));
+      expect(logs).toContain('扣了 5 钻石（通过 relay 累计 5；没有设花费上限）');
+      // Too few gems: said in the chat, the relay keeps running, nothing is paused.
+      mock.state.gems = 3;
+      let next = fake.expect(/^钻石不足，请在 Yomi App 或网页充值后再发。$/);
+      fake.say('钻石不够了');
+      await next();
+      expect(state.data.billingPause).toBe('');
+      expect(state.data.pending).toBeNull();
+      // After a top-up the next message simply goes.
+      mock.state.gems = 50;
+      await chatted(fake, relay, '充值之后');
+      await waitFor(() => state.data.allowance.spent === 10 && state.data.pending === null);
+      next = fake.expect(
+        /^没有设花费上限：按 Yomi 的正常规则扣费。通过 relay 已花 10 钻石。\n用法/,
+      );
+      fake.say('/budget');
+      await next();
+    } finally {
+      mock.state.relayPolicy = policy;
+      mock.state.chatFreeLimit = freeLimit;
+      mock.state.gems = gems;
+    }
+  });
+
+  it('says a reply that ran out of gems in its own words, on QQ, and keeps relaying', async () => {
+    const fake = new FakeChannel({ scope: 'fake:qq-nogems' });
+    const { relay, state } = await start(fake, { maxSpend: null });
+    const next = fake.expect(/^钻石不足，请在 Yomi App 或网页充值后再发。$/);
+    fake.say('NOGEMS 说到一半');
+    await next();
+    expect(fake.texts()).not.toContainEqual(expect.stringMatching(/insufficient gems/));
+    await waitFor(() => !busy(relay));
+    expect(state.data.billingPause).toBe('');
+    await chatted(fake, relay, '接着聊');
   });
 
   it('keeps an unconfirmed channel off when the sign-in comes back', async () => {

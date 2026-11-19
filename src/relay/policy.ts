@@ -5,10 +5,11 @@ import { VERSION } from '../core/version.js';
 import { type ChannelKind, channelName } from './channels/types.js';
 
 /**
- * What the server says about relays (`relay/get_policy`). Until
- * the server has the route, every capability is off and the relay takes the strictest path:
- * messages may be charged, so a budget is needed before the first one; the relay shows its own AI
- * notice; a send is never repeated.
+ * What the server says about relays (`relay/get_policy`). Until the server has the route, every
+ * capability is off and the relay assumes none of them: free-only sends nothing (FreeOnly is not
+ * known to be honoured), a cap (a budget or `--max-spend`) needs a known price (no server-side
+ * cap), the relay shows its own AI notice, and a send is never repeated. Without a cap (the default) none of that holds a
+ * message back: Yomi charges by its normal rules.
  */
 export type RelayPolicy = {
   /** False: relays are switched off for this account or region; `message` says why. */

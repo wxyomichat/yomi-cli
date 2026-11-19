@@ -229,7 +229,7 @@ describe("each channel's names", () => {
     pair: false,
     forget: false,
     characterId: '',
-    maxSpend: 0,
+    maxSpend: null,
     allowFileStore: false,
     installService: false,
     uninstallService: false,
@@ -281,7 +281,15 @@ describe("each channel's names", () => {
 
   it("give each channel its service, with Telegram's arguments as they always were", () => {
     const telegram = channelSetup('telegram');
+    // No cap chosen: none written, so the service runs uncapped like the foreground relay.
     expect(relayServiceArgs(prod, telegram, options)).toEqual([
+      'relay',
+      '--telegram',
+      '--env',
+      'prod',
+      '--confirm-prod',
+    ]);
+    expect(relayServiceArgs(prod, telegram, { ...options, maxSpend: 0 })).toEqual([
       'relay',
       '--telegram',
       '--env',
@@ -318,8 +326,6 @@ describe("each channel's names", () => {
       'qq',
       '--env',
       'prod',
-      '--max-spend',
-      '0',
       '--confirm-prod',
     ]);
     const args = relayServiceArgs(prod, channelSetup('wechat'), {
@@ -503,6 +509,37 @@ describe('the flow every channel runs', () => {
     expect(policyAgents(from)).toEqual([[expect.stringMatching(/ relay-qq$/), 'qq']]);
     // Not production: it runs on the defaults and says the server has not confirmed QQ.
     expect(result.err).toContain('服务端没有确认这个通道（QQ）');
+  });
+
+  it('says the spending cap at the start: none by default, 0 is free replies only, else the amount', async () => {
+    paired('qq');
+    const base = ['relay', '--channel', 'qq', '--allow-file-store'];
+    const none = await run(base);
+    expect(none.code).toBe(0);
+    expect(none.out).toContain(
+      '没有本机花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示（要设上限：--max-spend <数量>，或在聊天里用 /budget <数量>）。',
+    );
+    expect(none.out).not.toContain('一条也不发');
+    expect(none.err).toContain('没有设花费上限：按 Yomi 的正常规则扣费');
+    const zero = await run([...base, '--max-spend', '0']);
+    expect(zero.code).toBe(0);
+    expect(zero.out).toContain('本机花费上限 0：relay 不花钻石，只用免费额度');
+    expect(zero.err).toContain('只用免费额度（不花钻石）');
+    const capped = await run([...base, '--max-spend', '30']);
+    expect(capped.out).toContain('本机允许 relay 最多花 30 钻石（累计；--reset-spend 重新计算）。');
+    expect(capped.err).toContain('不超过本机上限 30 钻石');
+    const bad = await run([...base, '--max-spend', '1.5']);
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain('--max-spend 必须是 0–1000000 的整数（钻石）');
+    setEnv({ YOMI_LANG: 'en' });
+    try {
+      const en = await run(base);
+      expect(en.out).toContain(
+        'No local spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat',
+      );
+    } finally {
+      setEnv({ YOMI_LANG: 'zh-Hans' });
+    }
   });
 
   it('starts WeChat only with --experimental and an owner from --login, marked experimental', async () => {

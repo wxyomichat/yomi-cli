@@ -83,6 +83,18 @@ const saidNext = (chatId: number, pattern: RegExp) => {
     8000,
   );
 };
+/** Like `saidNext`, armed now and awaited later: for an answer that may come before the await. */
+const expectNext = (chatId: number, pattern: RegExp) => {
+  const seen = new Set(tg.messages(chatId).map((message) => message.message_id));
+  return () =>
+    tg.waitFor(
+      () =>
+        tg
+          .messages(chatId)
+          .find((message) => !seen.has(message.message_id) && pattern.test(message.text)),
+      8000,
+    );
+};
 const sends = () =>
   mock.state.requests.filter((request) => request.path === 'conversation/send_message');
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -293,8 +305,14 @@ describe('the relay', () => {
     expect(tg.draft(owner.id)).toBeNull();
     // The relay's own AI notice (the server does not inject one yet).
     expect(texts(owner.id).join('\n')).toMatch(/AI 角色.*可能不适合部分未成年人/s);
+    // No budget in the chat, --max-spend 50: Yomi's normal charging, within the local cap.
     const send = sends().at(-1)!.body;
-    expect(send).toMatchObject({ entity_type: 1, consumption_mode: 0, text: '今天天气怎么样' });
+    expect(send).toMatchObject({
+      entity_type: 1,
+      consumption_mode: 1,
+      max_cost_diamonds: 50,
+      text: '今天天气怎么样',
+    });
     expect(String(send.client_request_id)).toMatch(/^[0-9a-f-]{36}$/);
   });
 
@@ -323,6 +341,8 @@ describe('the relay', () => {
   });
 
   it('stops at the end of the free replies, with the price and no charge', async () => {
+    tg.userSends(owner, '/budget off');
+    await saidNext(owner.id, /^已改为只用免费额度。$/);
     const gems = mock.state.gems;
     // Every free reply with this character is used now.
     mock.state.chatFreeLimit = mock.state.chats.get(MOCK_NPCS.single)!.freeUsed;
@@ -330,6 +350,7 @@ describe('the relay', () => {
     const answer = await said(owner.id, /免费额度已用完/);
     expect(answer.text).toContain('约 5 钻石');
     expect(answer.text).toContain(`余额 ${gems} 钻石`);
+    expect(answer.text).toContain('发送 /budget none 按 Yomi 的正常规则扣费');
     expect(answer.text).not.toMatch(/https?:/);
     expect(mock.state.gems).toBe(gems);
   });
@@ -362,7 +383,7 @@ describe('the relay', () => {
     await tg.waitFor(() => texts(owner.id).filter((text) => /预算已用完/.test(text)).length >= 2);
     expect(sends().length).toBe(before);
     tg.userSends(owner, '/budget off');
-    await said(owner.id, /改回只用免费额度/);
+    await saidNext(owner.id, /^已改为只用免费额度。$/);
     expect(state.data.billingPause).toBe('');
   });
 
@@ -385,7 +406,7 @@ describe('the relay', () => {
     expect(state.data.billingPause).toBe('');
     mock.state.chatFreeLimit = 1000;
     tg.userSends(owner, '/budget off');
-    await said(owner.id, /改回只用免费额度/);
+    await saidNext(owner.id, /^已改为只用免费额度。$/);
   });
 
   async function confirmBudget(amount: number) {
@@ -439,32 +460,63 @@ describe('the relay', () => {
     await said(owner.id, /上限内的一句/);
     await tg.waitFor(() => state.data.allowance.spent === 5);
     const before = sends().length;
+    // The local cap is what is short: the answer names it, not the budget.
     tg.userSends(owner, '超出本机上限');
-    await said(owner.id, /剩余预算 2 钻石，不够下一条回复/);
+    await said(owner.id, /本机上限还可花 2 钻石，不够下一条回复（约 5 钻石）/);
     expect(sends().length).toBe(before);
     await stop();
     await start({ maxSpend: 0 });
     // Earlier tests left the same answers in the chat: wait for this relay's own, or the stop
     // below comes before it read the message and the next relay (another limit) answers it.
     tg.userSends(owner, '不许花了');
-    await saidNext(owner.id, /预算已用完/);
+    await saidNext(owner.id, /本机不允许花钻石（--max-spend 0）。请在电脑上去掉 --max-spend/);
     expect(sends().length).toBe(before);
     await stop();
+    // A budget's pause is the owner's to lift, a higher --max-spend or not; it says the local
+    // cap caused it and the budget still has room (20, 15 spent).
     await start();
+    tg.userSends(owner, '还是暂停');
+    await saidNext(
+      owner.id,
+      /^relay 之前因本机花费上限暂停（预算还剩 5 钻石）。用 \/budget .*设置新的预算，或发送 \/budget none/,
+    );
+    expect(sends().length).toBe(before);
     tg.userSends(owner, '/budget off');
-    await saidNext(owner.id, /改回只用免费额度/);
+    await saidNext(owner.id, /^已改为只用免费额度。$/);
     mock.state.chatFreeLimit = 1000;
   });
 
-  it('sends nothing before a budget while the server has not confirmed free-only', async () => {
+  it('sends nothing free-only while the server has not confirmed it; /budget none goes on, confirmed', async () => {
     await stop();
     const policy = mock.state.relayPolicy;
     mock.state.relayPolicy = null;
     await start();
     const before = sends().length;
     tg.userSends(owner, '默认策略');
-    await said(owner.id, /没设预算前一条也不发/);
+    await saidNext(
+      owner.id,
+      /^服务端还没有确认支持「只用免费额度」，所以只用免费额度时一条也不发。发送 \/budget none/,
+    );
     expect(sends().length).toBe(before);
+    // Lifting free-only widens spending: asked first, like a budget.
+    tg.userSends(owner, '/budget none');
+    const ask = await saidNext(
+      owner.id,
+      /^确认取消聊天里的钻石上限吗？.*不超过本机上限（还可花 \d+ 钻石）/,
+    );
+    const keyboard = ask.reply_markup as {
+      inline_keyboard: { text: string; callback_data: string }[][];
+    };
+    expect(keyboard.inline_keyboard[0].map((button) => button.text)).toEqual(['不设上限', '取消']);
+    expect(state.data.billing.mode).toBe('free');
+    tg.press(owner, owner.id, ask.message_id, keyboard.inline_keyboard[0][0].callback_data);
+    await saidNext(owner.id, /^已取消预算：按 Yomi 的正常规则扣费，不超过本机上限/);
+    expect(state.data.billing.mode).toBe('open');
+    // No policy at all, and a cap: the price is known, so it goes (without max_cost_diamonds).
+    tg.userSends(owner, '没有策略也能发');
+    await said(owner.id, /没有策略也能发/);
+    expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
+    expect(sends().at(-1)!.body.max_cost_diamonds).toBeUndefined();
     await stop();
     mock.state.relayPolicy = policy;
     await start();
@@ -631,5 +683,367 @@ describe('the relay', () => {
     const mine = tg.calls.slice(calls);
     expect(mine.some((call) => call.method === 'sendMessageDraft')).toBe(false);
     expect(mine.some((call) => call.method === 'editMessageText')).toBe(true);
+  });
+
+  /** Waits until the relay is idle and nothing is left to measure (the reply's cost is booked). */
+  const settled = () => tg.waitFor(() => !relayBusy() && state.data.pending === null);
+
+  it('without a cap forwards everything: Yomi charges as usual, the chat stays quiet, /budget shows the total', async () => {
+    await stop();
+    await start({ maxSpend: null });
+    tg.userSends(owner, '/budget none');
+    await saidNext(owner.id, /^已取消预算：按 Yomi 的正常规则扣费。钻石不足时会在这里提示。$/);
+    expect(state.data.billing.mode).toBe('open');
+    expect(logs).toContain(
+      '没有设花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示；通过 relay 已花 0 钻石',
+    );
+    noFreeReplies();
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    const shown = texts(owner.id).length;
+    tg.userSends(owner, '不设上限也能聊');
+    await said(owner.id, /不设上限也能聊/);
+    expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
+    expect(sends().at(-1)!.body.max_cost_diamonds).toBeUndefined();
+    await settled();
+    expect(state.data.allowance.spent).toBe(total + 5);
+    expect(mock.state.gems).toBe(gems - 5);
+    // The reply only: no price line, no cost line.
+    expect(texts(owner.id).slice(shown).join('\n')).not.toMatch(/钻石/);
+    expect(logs).toContain(`扣了 5 钻石（通过 relay 累计 ${total + 5}；没有设花费上限）`);
+    tg.userSends(owner, '/budget');
+    await saidNext(
+      owner.id,
+      new RegExp(
+        `^没有设花费上限：按 Yomi 的正常规则扣费。通过 relay 已花 ${total + 5} 钻石。\n用法`,
+      ),
+    );
+  });
+
+  it('without a cap relays with no server policy, and with one that offers no feature', async () => {
+    const policy = mock.state.relayPolicy;
+    try {
+      for (const next of [null, { enabled: true, features: {} }]) {
+        await stop();
+        mock.state.relayPolicy = next;
+        await start({ maxSpend: null });
+        const before = sends().length;
+        const text = `策略 ${next ? '没有功能' : '没有'} 也照发`;
+        tg.userSends(owner, text);
+        await said(owner.id, new RegExp(text));
+        expect(sends().length).toBe(before + 1);
+        expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
+        await settled();
+      }
+    } finally {
+      await stop();
+      mock.state.relayPolicy = policy;
+      await start({ maxSpend: null });
+    }
+  });
+
+  it('without a cap says when the gems are not enough, keeps running, and sends again after a top-up', async () => {
+    noFreeReplies();
+    const gems = mock.state.gems;
+    mock.state.gems = 3;
+    const before = sends().length;
+    tg.userSends(owner, '钻石只剩三个');
+    await saidNext(owner.id, /^钻石不足，请在 Yomi App 或网页充值后再发。$/);
+    expect(state.data.billingPause).toBe('');
+    expect(state.data.pending).toBeNull();
+    mock.state.nextSendFailure = {
+      relay_error: 'INSUFFICIENT_GEMS',
+      base_resp: { status_code: 1504019999, status_msg: 'not enough gems' },
+    };
+    tg.userSends(owner, '还是不够');
+    await saidNext(owner.id, /^钻石不足，请在 Yomi App 或网页充值后再发。$/);
+    expect(sends().length).toBe(before + 2);
+    expect(state.data.billingPause).toBe('');
+    // Topped up in the app: the next message simply goes, nothing to lift.
+    mock.state.gems = gems;
+    tg.userSends(owner, '充值好了');
+    await said(owner.id, /充值好了/);
+    await settled();
+    expect(mock.state.gems).toBe(gems - 5);
+  });
+
+  it('without a cap an unreadable balance blocks nothing, and two replies are booked once each', async () => {
+    noFreeReplies();
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    tg.userSends(owner, 'SLOW 读不到余额也照发');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    // The reading after this reply fails: its charge stays pending.
+    mock.state.walletFailures = 2;
+    await said(owner.id, /读不到余额也照发/);
+    await tg.waitFor(() => !relayBusy());
+    expect(state.data.pending).not.toBeNull();
+    expect(state.data.allowance.spent).toBe(total);
+    // Nothing readable before the next one either: it goes, measured together with the first.
+    mock.state.walletFailures = 4;
+    tg.userSends(owner, '第二条也照发');
+    await said(owner.id, /第二条也照发/);
+    await settled();
+    expect(state.data.allowance.spent).toBe(total + 10);
+    expect(mock.state.gems).toBe(gems - 10);
+    expect(logs).toContain('读不到余额：这条的花费和之前的一起核对');
+  });
+
+  it('without a cap a reported charge inside a joined measurement is not booked twice', async () => {
+    noFreeReplies();
+    const gems = mock.state.gems;
+    const total = state.data.allowance.spent;
+    tg.userSends(owner, 'SLOW 先量不出来');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    mock.state.walletFailures = 2;
+    await said(owner.id, /先量不出来/);
+    await tg.waitFor(() => !relayBusy());
+    expect(state.data.pending).not.toBeNull();
+    // The second send's answer says what it cost: booked now, and taken out of the open drop.
+    mock.state.walletFailures = 4;
+    mock.state.reportCharge = true;
+    try {
+      tg.userSends(owner, '服务端报了花费');
+      await said(owner.id, /服务端报了花费/);
+      await tg.waitFor(() => !relayBusy());
+    } finally {
+      mock.state.reportCharge = false;
+    }
+    expect(state.data.allowance.spent).toBe(total + 5);
+    expect(state.data.pending).not.toBeNull();
+    // The next reading books what is left of the first: 5, not 10.
+    mock.state.chatFreeLimit = 1000;
+    tg.userSends(owner, '免费的一条');
+    await said(owner.id, /免费的一条/);
+    await settled();
+    expect(state.data.allowance.spent).toBe(total + 10);
+    expect(mock.state.gems).toBe(gems - 10);
+  });
+
+  it('without a cap a refused send keeps the earlier charge it joined', async () => {
+    noFreeReplies();
+    const total = state.data.allowance.spent;
+    tg.userSends(owner, 'SLOW 还没核对');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    mock.state.walletFailures = 2;
+    await said(owner.id, /还没核对/);
+    await tg.waitFor(() => !relayBusy());
+    const open = state.data.pending;
+    expect(open).not.toBeNull();
+    mock.state.walletFailures = 4;
+    mock.state.nextSendFailure = {
+      base_resp: { status_code: 1504011011, status_msg: 'insufficient gems' },
+    };
+    tg.userSends(owner, '被拒的一条');
+    await saidNext(owner.id, /^钻石不足/);
+    await tg.waitFor(() => !relayBusy());
+    expect(state.data.pending?.before).toBe(open!.before);
+    mock.state.chatFreeLimit = 1000;
+    tg.userSends(owner, '之后的免费一条');
+    await said(owner.id, /之后的免费一条/);
+    await settled();
+    expect(state.data.allowance.spent).toBe(total + 5);
+  });
+
+  it('without a cap counts a send nothing could measure, and /budget says the total may be higher', async () => {
+    noFreeReplies();
+    const unmeasured = state.data.allowance.unmeasured;
+    mock.state.walletFailures = 2;
+    tg.userSends(owner, '完全量不出来');
+    await said(owner.id, /完全量不出来/);
+    await settled();
+    expect(state.data.allowance.unmeasured).toBe(unmeasured + 1);
+    expect(logs).toContain('读不到余额：这条的花费量不出来；没有设花费上限，照常发送');
+    tg.userSends(owner, '/budget');
+    await saidNext(
+      owner.id,
+      new RegExp(`另有 ${unmeasured + 1} 次发送的花费没能量出，实际花费可能更多。`),
+    );
+  });
+
+  it('/budget none lifts a spent budget once confirmed; /budget off without free-only support says how to go on', async () => {
+    await confirmBudget(5);
+    noFreeReplies();
+    const exhausted = expectNext(
+      owner.id,
+      /^预算已用完（已花 5 钻石），relay 已暂停。.*\/budget none/,
+    );
+    tg.userSends(owner, '花完预算');
+    await said(owner.id, /花完预算/);
+    await exhausted();
+    expect(state.data.billingPause).toBe('budget');
+    tg.userSends(owner, '/budget none');
+    const ask = await saidNext(owner.id, /^确认取消聊天里的钻石上限吗？/);
+    const keyboard = ask.reply_markup as { inline_keyboard: { callback_data: string }[][] };
+    tg.press(owner, owner.id, ask.message_id, keyboard.inline_keyboard[0][0].callback_data);
+    await saidNext(owner.id, /^已取消预算/);
+    expect(state.data.billingPause).toBe('');
+    tg.userSends(owner, '取消预算之后');
+    await said(owner.id, /取消预算之后/);
+    await settled();
+    // A policy without free_only: /budget off still switches, and says nothing goes until then.
+    const policy = mock.state.relayPolicy;
+    await stop();
+    mock.state.relayPolicy = { enabled: true, features: {} };
+    try {
+      await start({ maxSpend: null });
+      tg.userSends(owner, '/budget off');
+      await saidNext(owner.id, /^已改为只用免费额度。服务端还没有确认.*\/budget none/);
+      expect(state.data.billing.mode).toBe('free');
+      const before = sends().length;
+      tg.userSends(owner, '只用免费额度');
+      await saidNext(owner.id, /^服务端还没有确认支持「只用免费额度」/);
+      expect(sends().length).toBe(before);
+      tg.userSends(owner, '/budget none');
+      const again = await saidNext(owner.id, /^确认取消聊天里的钻石上限吗？/);
+      const buttons = again.reply_markup as { inline_keyboard: { callback_data: string }[][] };
+      tg.press(owner, owner.id, again.message_id, buttons.inline_keyboard[0][0].callback_data);
+      await saidNext(owner.id, /^已取消预算/);
+    } finally {
+      await stop();
+      mock.state.relayPolicy = policy;
+      await start({ maxSpend: null });
+    }
+  });
+
+  it('the local cap alone pauses in its own words; /budget none does not lift it, a restart without it does', async () => {
+    await stop();
+    await start({ maxSpend: 5 });
+    noFreeReplies();
+    const spent = expectNext(
+      owner.id,
+      /^本机花费上限已用完（5\/5 钻石），relay 已暂停。.*--install-service/,
+    );
+    tg.userSends(owner, '本机上限内');
+    await said(owner.id, /本机上限内/);
+    expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
+    await spent();
+    expect(state.data.billingPause).toBe('budget');
+    const before = sends().length;
+    tg.userSends(owner, '/budget none');
+    await saidNext(owner.id, /^本机花费上限已用完/);
+    expect(state.data.billingPause).toBe('budget');
+    tg.userSends(owner, '上限用完了');
+    await saidNext(owner.id, /^本机花费上限已用完/);
+    expect(sends().length).toBe(before);
+    await stop();
+    await start({ maxSpend: null });
+    expect(state.data.billingPause).toBe('');
+    tg.userSends(owner, '去掉上限之后');
+    await said(owner.id, /去掉上限之后/);
+    await settled();
+  });
+
+  it('with only a local cap, a balance that rose during a reply still counts its price', async () => {
+    await stop();
+    await start({ maxSpend: 50 });
+    noFreeReplies();
+    const total = state.data.allowance.spent;
+    tg.userSends(owner, 'SLOW 充值中的回复');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    // Topped up during the reply: the drop hides its cost, so the quoted price is counted.
+    mock.state.gems += 100;
+    await said(owner.id, /充值中的回复/);
+    await settled();
+    expect(state.data.allowance.spent).toBe(total + 5);
+    expect(logs).toContain('余额在这条回复期间增加了，无法量出花费：按 5 钻石计入');
+  });
+
+  it('--max-spend 0 without a budget is free replies only, and says so where only the computer helps', async () => {
+    await stop();
+    mock.state.chatFreeLimit = 1000;
+    await start({ maxSpend: 0 });
+    tg.userSends(owner, '零上限的一句');
+    await said(owner.id, /零上限的一句/);
+    expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 0 });
+    expect(sends().at(-1)!.body.max_cost_diamonds).toBeUndefined();
+    tg.userSends(owner, '/budget none');
+    await saidNext(owner.id, /^本机不允许花钻石（--max-spend 0）。请在电脑上去掉 --max-spend/);
+    expect(state.data.billing.mode).toBe('open');
+    const policy = mock.state.relayPolicy;
+    await stop();
+    mock.state.relayPolicy = { enabled: true, features: {} };
+    try {
+      await start({ maxSpend: 0 });
+      const before = sends().length;
+      tg.userSends(owner, '零上限没有免费模式');
+      await saidNext(
+        owner.id,
+        /^服务端还没有确认支持「只用免费额度」.*去掉 --max-spend.*yomi relay --telegram --install-service/,
+      );
+      expect(sends().length).toBe(before);
+    } finally {
+      await stop();
+      mock.state.relayPolicy = policy;
+    }
+  });
+
+  it('restarts with an old saved state: the old default opens up, its pause holds only under --max-spend 0', async () => {
+    // A file from before budgets were optional: free-only by default, paused by a charged reply.
+    state.update({
+      billing: { mode: 'free', budget: 0, spent: 0, setAt: 0 },
+      billingPause: 'freeCharged',
+      pending: null,
+    });
+    await start({ maxSpend: 0 });
+    expect(state.data.billing.mode).toBe('open');
+    expect(state.data.billingPause).toBe('freeCharged');
+    const before = sends().length;
+    tg.userSends(owner, '旧服务');
+    await saidNext(owner.id, /^relay 已暂停：请在电脑上去掉 --max-spend/);
+    expect(sends().length).toBe(before);
+    await stop();
+    await start({ maxSpend: null });
+    expect(state.data.billingPause).toBe('');
+    tg.userSends(owner, '新的默认');
+    await said(owner.id, /新的默认/);
+    await settled();
+  });
+
+  it('a cap spent under an earlier --max-spend does not hold a restart on free replies only', async () => {
+    await stop();
+    // Spent under --max-spend 10 with no budget; the next start asks for free replies only.
+    state.update({
+      billing: { mode: 'open', budget: 0, spent: 0, setAt: 0 },
+      billingPause: 'budget',
+      allowance: { maxSpend: 10, spent: 10, since: Date.now(), unmeasured: 0 },
+      pending: null,
+    });
+    mock.state.chatFreeLimit = 1000;
+    await start({ maxSpend: 0 });
+    expect(state.data.billingPause).toBe('');
+    const before = sends().length;
+    tg.userSends(owner, '换成只用免费额度');
+    await said(owner.id, /换成只用免费额度/);
+    expect(sends().length).toBe(before + 1);
+    expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 0 });
+    await settled();
+  });
+
+  it('without a cap a reply the balance could not measure is not counted against a budget set after it', async () => {
+    await stop();
+    await start({ maxSpend: null });
+    expect(state.data.billing.mode).toBe('open');
+    noFreeReplies();
+    tg.userSends(owner, 'SLOW 预算之前的回复');
+    await tg.waitFor(() => tg.draft(owner.id)?.text);
+    // The reading after the reply fails: its cost stays pending, taken without a cap.
+    mock.state.walletFailures = 2;
+    await said(owner.id, /预算之前的回复/);
+    await tg.waitFor(() => !relayBusy());
+    expect(state.data.pending).toMatchObject({ mode: 'open', price: null, capped: false });
+    // A top-up hides that cost, and a budget is set before the next message.
+    mock.state.gems += 1000;
+    await confirmBudget(60);
+    mock.state.chatFreeLimit = 1000;
+    const unmeasured = state.data.allowance.unmeasured;
+    const before = sends().length;
+    tg.userSends(owner, '预算之后的回复');
+    await said(owner.id, /预算之后的回复/);
+    await settled();
+    expect(sends().length).toBe(before + 1);
+    expect(state.data.billing).toMatchObject({ mode: 'paid', budget: 60, spent: 0 });
+    expect(state.data.billingPause).toBe('');
+    expect(state.data.allowance.unmeasured).toBe(unmeasured + 1);
   });
 });

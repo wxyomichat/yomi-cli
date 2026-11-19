@@ -15,6 +15,7 @@ import { PairingCode } from '../src/relay/pairing.js';
 import { unknownOutcome } from '../src/relay/relay.js';
 import { installService, servicePlan, uninstallService } from '../src/relay/service.js';
 import { forgetRelayStates, RelayState, relayStatePath } from '../src/relay/state.js';
+import { type BudgetStatus, relayTexts } from '../src/relay/texts.js';
 
 const narration = (text: string) => ({
   type: ParagraphType.narration,
@@ -201,13 +202,14 @@ describe('the relay state', () => {
     expect(state.bindAccount('7300000000000000101')).toBe(false);
     expect(state.data.billing).toEqual(paid);
     expect(state.bindAccount('7300000000000000999')).toBe(true);
-    expect(state.data.billing.mode).toBe('free');
+    // No budget: Yomi charges by its normal rules until the new owner sets one.
+    expect(state.data.billing.mode).toBe('open');
     expect(state.data.billingPause).toBe('');
     expect(state.data.replies).toEqual([]);
     state.update({ billing: paid, replies: [[2, '8']] });
     state.resetOwner();
     expect(state.data.owner).toBeNull();
-    expect(state.data.billing.mode).toBe('free');
+    expect(state.data.billing.mode).toBe('open');
     expect(state.data.replies).toEqual([]);
   });
 
@@ -222,6 +224,47 @@ describe('the relay state', () => {
     state.update({ allowance: { ...state.data.allowance, spent: 30 } });
     state.useAllowance(80, false);
     expect(state.data.allowance).toMatchObject({ maxSpend: 80, spent: 0 });
+    // Taking the ceiling away is this computer's decision too: the total starts over, once.
+    state.update({ allowance: { ...state.data.allowance, spent: 20, unmeasured: 2 } });
+    state.useAllowance(null, false);
+    expect(state.data.allowance).toMatchObject({ maxSpend: null, spent: 0, unmeasured: 0 });
+    state.update({ allowance: { ...state.data.allowance, spent: 15 } });
+    state.useAllowance(null, false);
+    expect(state.data.allowance).toMatchObject({ maxSpend: null, spent: 15 });
+  });
+
+  it('reads a file from before budgets were optional: only the default nobody chose opens up', () => {
+    const { path, state } = fresh();
+    state.save();
+    const read = (stored: object) => {
+      writeFileSync(path, JSON.stringify({ version: 1, botId: '7000000001', ...stored }));
+      return new RelayState(path, '7000000001', 'test').data;
+    };
+    // The old default (free-only, never set): no budget now. A pause stays for the relay to
+    // weigh against its --max-spend (an old service's 0 keeps it).
+    const old = read({
+      billing: { mode: 'free', budget: 0, spent: 0, setAt: 0 },
+      allowance: { maxSpend: 0, spent: 5, since: 9 },
+      billingPause: 'freeCharged',
+    });
+    expect(old.billing.mode).toBe('open');
+    expect(old.billingPause).toBe('freeCharged');
+    expect(old.allowance).toEqual({ maxSpend: 0, spent: 5, since: 9, unmeasured: 0 });
+    // An explicit /budget off stays free-only; a budget stays a budget, with its pause.
+    expect(read({ billing: { mode: 'free', budget: 0, spent: 0, setAt: 7 } }).billing.mode).toBe(
+      'free',
+    );
+    const kept = read({ billing: paid, billingPause: 'budget' });
+    expect(kept.billing).toEqual(paid);
+    expect(kept.billingPause).toBe('budget');
+    // No billing at all reads as no budget; a fresh state has no local ceiling.
+    expect(read({}).billing.mode).toBe('open');
+    expect(fresh().state.data.allowance).toEqual({
+      maxSpend: null,
+      spent: 0,
+      since: 0,
+      unmeasured: 0,
+    });
   });
 
   it("reads an older file: only money pauses carry over; --forget removes this environment's files", () => {
@@ -254,5 +297,41 @@ describe('send outcomes', () => {
     expect(unknownOutcome(new ApiError(-1, 'HTTP 502', null, 'x', 502))).toBe(true);
     expect(unknownOutcome(new ApiError(-1, 'HTTP 400', null, 'x', 400))).toBe(false);
     expect(unknownOutcome(new ApiError(1504011011, 'gems', null, 'x', 0))).toBe(false);
+  });
+});
+
+describe('the money status texts', () => {
+  const status = (unmeasured: number): BudgetStatus => ({
+    mode: 'open',
+    freeOnly: false,
+    budget: 0,
+    spent: 0,
+    total: 12,
+    ceiling: null,
+    ceilingLeft: Infinity,
+    unmeasured,
+  });
+
+  it('counts one unmeasured send in the singular and more in the plural', () => {
+    const cases: [string, string, string][] = [
+      [
+        'en',
+        'The cost of 1 send could not be measured',
+        'The cost of 2 sends could not be measured',
+      ],
+      ['es', 'No se pudo medir el costo de 1 envío,', 'No se pudo medir el costo de 2 envíos,'],
+      [
+        'pt',
+        'Não foi possível medir o custo de 1 envio,',
+        'Não foi possível medir o custo de 2 envios,',
+      ],
+      ['zh', '另有 1 次发送的花费没能量出', '另有 2 次发送的花费没能量出'],
+    ];
+    for (const [language, one, two] of cases) {
+      const texts = relayTexts(language);
+      expect(texts.budgetLine(status(1))).toContain(one);
+      expect(texts.budgetLine(status(2))).toContain(two);
+      expect(texts.budgetLine(status(0))).not.toMatch(/measured|medir|另有/);
+    }
   });
 });

@@ -485,9 +485,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     telegram   你在 @BotFather 建的 Telegram bot，回复流式显示（--telegram 等同 --channel telegram）
     qq         你自己在 QQ 开放平台（q.qq.com）建的 QQ bot，只用私聊（仅限个人使用）
     wechat     微信 ClawBot（iLink），扫码登录（实验功能，仅限个人使用；要加 --experimental）
-  只服务配对过的本人。默认不花钻石：付费要先在聊天里用 /budget 设预算并确认（Telegram 点按钮，
-  QQ 和微信回复确认码），累计不超过本机的 --max-spend。服务端支持「只用免费额度」之前，没设预算
-  不会发出任何消息。详见 docs/relay.md、docs/relay-qq.md、docs/relay-wechat.md。
+  只服务配对过的本人。默认不设花费上限：和在 App 里一样按 Yomi 的正常规则扣费，钻石不足时会在聊天
+  里提示，relay 继续运行。上限都是可选的：本机的 --max-spend（累计花费，聊天里不能重置；0 表示只用
+  免费额度），以及聊天里的 /budget <数量>（Telegram 点按钮确认，QQ 和微信回复确认码）。
+  详见 docs/relay.md、docs/relay-qq.md、docs/relay-wechat.md。
   --set-token           Telegram：设置或更换 bot token（终端里输入，不显示；或配合 --token-stdin）
   --set-app             QQ：设置 bot 的 AppID 和 AppSecret（AppSecret 不显示；或配合 --token-stdin）
   --login               微信：用手机微信扫码登录，扫码的人就是主人（只能在终端里）
@@ -497,8 +498,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --experimental        使用微信通道时必须加
   --pair                重新配对（Telegram、QQ：会显示新的配对码）
   --character ID        启动时使用的角色
-  --max-spend 数量      本机允许 relay 累计花的钻石上限，默认 0：不花钻石
-  --reset-spend         重新计算本机上限的累计花费
+  --max-spend 数量      可选的本机花费上限：relay 在这台电脑上累计最多花的钻石（默认不设上限；
+                        0：只用免费额度）
+  --reset-spend         重新计算 relay 的累计花费（有没有上限都适用）
   --allow-file-store    没有系统钥匙串时，允许把凭证和会话存成 0600 文件
   --install-service     安装为后台服务（macOS launchd / Linux systemd --user），需先配对（微信：先登录）
   --uninstall-service   停止并删除后台服务
@@ -515,10 +517,11 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     qq         Your own QQ bot from the QQ Open Platform (q.qq.com), private chat only (personal use only)
     wechat     WeChat ClawBot (iLink), signed in with a QR code (experimental, personal use only; needs
                --experimental)
-  Serves only the paired owner. Spends no gems by default: paying needs a budget set with /budget in the chat
-  and confirmed (a button in Telegram, a typed code in QQ and WeChat), and the total never goes over the local
-  spending cap (--max-spend). Until the server supports "free messages only", nothing is sent without a
-  budget. See docs/relay.md, docs/relay-qq.md and docs/relay-wechat.md.
+  Serves only the paired owner. By default there is no spending cap: Yomi charges by its normal rules, as in
+  the app, and when the balance is too low the relay says so in the chat and keeps running. Optional caps:
+  --max-spend on this computer (a running total nothing in the chat resets; 0 means free replies only) and
+  /budget <amount> in the chat (confirmed with a button in Telegram, a typed code in QQ and WeChat). See
+  docs/relay.md, docs/relay-qq.md and docs/relay-wechat.md.
   --set-token           Telegram: set or replace the bot token (typed in the terminal, hidden; or with --token-stdin)
   --set-app             QQ: set the bot's AppID and AppSecret (the AppSecret hidden; or both with --token-stdin)
   --login               WeChat: sign in by scanning a QR code with WeChat on your phone; whoever scans it is the
@@ -529,8 +532,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --experimental        Required for the WeChat channel
   --pair                Pair again (Telegram, QQ: shows a new pairing code)
   --character ID        The character to start with
-  --max-spend amount    Local spending cap: the gems relay may spend in total on this machine, default 0 (no gems)
-  --reset-spend         Reset the total counted against the local spending cap
+  --max-spend amount    Optional local spending cap: the most gems relay may spend in total on this machine
+                        (default: no cap; 0: free replies only)
+  --reset-spend         Start the relay's running spending total over (with or without a cap)
   --allow-file-store    Without a system keychain, allow keeping the credentials and session in a 0600 file
   --install-service     Install as a background service (macOS launchd / Linux systemd --user); pair first
                         (WeChat: sign in first)
@@ -550,10 +554,11 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                personal)
     wechat     WeChat ClawBot (iLink), con inicio de sesión por código QR (experimental, solo para uso
                personal; requiere --experimental)
-  Solo atiende al dueño vinculado. Por defecto no gasta gemas: para pagar hay que fijar un presupuesto con
-  /budget en el chat y confirmarlo (con un botón en Telegram, con un código escrito en QQ y WeChat), y el total
-  nunca supera el límite de gasto local (--max-spend). Hasta que el servidor admita "solo mensajes gratis", no
-  se envía nada sin presupuesto. Consulta docs/relay.md, docs/relay-qq.md y docs/relay-wechat.md.
+  Solo atiende al dueño vinculado. Por defecto no hay límite de gasto: Yomi cobra según sus reglas habituales,
+  como en la app, y cuando el saldo no alcanza el relay lo avisa en el chat y sigue funcionando. Límites
+  opcionales: --max-spend en este equipo (un total acumulado que nada en el chat reinicia; 0 significa solo
+  respuestas gratis) y /budget <cantidad> en el chat (se confirma con un botón en Telegram y con un código
+  escrito en QQ y WeChat). Consulta docs/relay.md, docs/relay-qq.md y docs/relay-wechat.md.
   --set-token           Telegram: configura o reemplaza el token del bot (se escribe en la terminal, oculto; o con --token-stdin)
   --set-app             QQ: configura el AppID y el AppSecret del bot (el AppSecret oculto; o ambos con --token-stdin)
   --login               WeChat: inicia sesión escaneando un código QR con WeChat en tu teléfono; quien lo escanea
@@ -564,8 +569,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --experimental        Obligatorio para el canal de WeChat
   --pair                Vincula de nuevo (Telegram, QQ: muestra un código de vinculación nuevo)
   --character ID        El personaje con el que empezar
-  --max-spend cantidad  Límite de gasto local: las gemas que relay puede gastar en total en este equipo, por defecto 0 (sin gemas)
-  --reset-spend         Reinicia el total acumulado contra el límite de gasto local
+  --max-spend cantidad  Límite de gasto local opcional: el máximo de gemas que relay puede gastar en total en
+                        este equipo (por defecto: sin límite; 0: solo respuestas gratis)
+  --reset-spend         Reinicia el total acumulado de gasto del relay (con o sin límite)
   --allow-file-store    Sin llavero del sistema, permite guardar las credenciales y la sesión en un archivo 0600
   --install-service     Instala como servicio en segundo plano (macOS launchd / Linux systemd --user); vincula
                         primero (WeChat: inicia sesión primero)
@@ -585,10 +591,11 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                pessoal)
     wechat     WeChat ClawBot (iLink), com login por código QR (experimental, somente para uso pessoal;
                exige --experimental)
-  Atende só o dono pareado. Por padrão não gasta gemas: para pagar é preciso definir um orçamento com /budget
-  no chat e confirmá-lo (com um botão no Telegram, com um código digitado no QQ e no WeChat), e o total nunca
-  passa do limite de gastos local (--max-spend). Até o servidor oferecer suporte a "só mensagens grátis", nada
-  é enviado sem orçamento. Veja docs/relay.md, docs/relay-qq.md e docs/relay-wechat.md.
+  Atende só o dono pareado. Por padrão não há limite de gastos: o Yomi cobra pelas regras normais, como no
+  app, e quando o saldo fica baixo o relay avisa no chat e continua funcionando. Limites opcionais:
+  --max-spend neste computador (um total acumulado que nada no chat zera; 0 significa só respostas grátis) e
+  /budget <quantidade> no chat (confirmado com um botão no Telegram e com um código digitado no QQ e no
+  WeChat). Veja docs/relay.md, docs/relay-qq.md e docs/relay-wechat.md.
   --set-token           Telegram: define ou troca o token do bot (digitado no terminal, oculto; ou com --token-stdin)
   --set-app             QQ: define o AppID e o AppSecret do bot (o AppSecret oculto; ou ambos com --token-stdin)
   --login               WeChat: entra escaneando um código QR com o WeChat no celular; quem escaneia é o dono
@@ -599,8 +606,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --experimental        Obrigatório para o canal do WeChat
   --pair                Pareia novamente (Telegram, QQ: mostra um novo código de pareamento)
   --character ID        O personagem inicial
-  --max-spend quantia   Limite de gastos local: as gemas que o relay pode gastar no total nesta máquina, padrão 0 (sem gemas)
-  --reset-spend         Zera o total contado no limite de gastos local
+  --max-spend quantia   Limite de gastos local opcional: o máximo de gemas que o relay pode gastar no total
+                        nesta máquina (padrão: sem limite; 0: só respostas grátis)
+  --reset-spend         Zera o total acumulado de gastos do relay (com ou sem limite)
   --allow-file-store    Sem Keychain do sistema, permite guardar as credenciais e a sessão em um arquivo 0600
   --install-service     Instala como serviço em segundo plano (macOS launchd / Linux systemd --user); pareie
                         antes (WeChat: entre antes)
@@ -832,8 +840,9 @@ function whole(value: unknown, label: string, min: number, max: number): number 
   return parsed;
 }
 
-function gems(value: unknown): number {
-  if (value === undefined) return 0;
+/** `--max-spend`: null when absent (no local cap), else 0 to 1,000,000 (0: free replies only). */
+function gems(value: unknown): number | null {
+  if (value === undefined) return null;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 1_000_000)
     throw new UsageError(
