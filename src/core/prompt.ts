@@ -2,9 +2,10 @@ import { tr } from './i18n.js';
 import type { Io } from './ui.js';
 
 /**
- * Reads a secret (a Telegram bot token): typed at a terminal without echo, or the first line of a
- * piped stdin (`--token-stdin`). Never from argv or the environment, where `ps`, shell history and
- * child processes would see it.
+ * Reads what a person types for the CLI: a secret (a Telegram bot token, a QQ AppSecret) without
+ * echo, or a visible line (a QQ AppID, the digits a phone shows), at a terminal; or lines of a
+ * piped stdin (`--token-stdin`). Never from argv or the environment, where `ps`, shell history
+ * and child processes would see it. Ctrl+C and Ctrl+D at the terminal cancel.
  */
 export class SecretInputCancelled extends Error {
   constructor() {
@@ -21,15 +22,39 @@ type RawInput = NodeJS.ReadableStream & {
 
 const MAX_LENGTH = 4096;
 
+/** A secret: typed without echo, or the first line of a piped stdin. */
 export function readSecret(
   io: Io,
   prompt: string,
   options: { fromStdin: boolean },
 ): Promise<string> {
+  return readTyped(io, prompt, options, false);
+}
+
+/** A visible line: typed with echo, or the first line of a piped stdin. */
+export function readLine(
+  io: Io,
+  prompt: string,
+  options: { fromStdin: boolean } = { fromStdin: false },
+): Promise<string> {
+  return readTyped(io, prompt, options, true);
+}
+
+/** The first `count` lines of stdin, trimmed ('' for a line the input ended before). */
+export function readLines(io: Io, count: number): Promise<string[]> {
+  return readStdinLines(io.stdin, count);
+}
+
+function readTyped(
+  io: Io,
+  prompt: string,
+  options: { fromStdin: boolean },
+  echo: boolean,
+): Promise<string> {
   const input = io.stdin as RawInput;
   if (!options.fromStdin && input.isTTY && typeof input.setRawMode === 'function') {
     io.stderr.write(prompt);
-    return readHidden(io, input);
+    return readRaw(io, input, echo);
   }
   if (!options.fromStdin && !io.interactive)
     return Promise.reject(
@@ -42,10 +67,11 @@ export function readSecret(
         ),
       ),
     );
-  return readFirstLine(input);
+  return readStdinLines(input, 1).then(([line]) => line);
 }
 
-function readHidden(io: Io, input: RawInput): Promise<string> {
+/** Keys one by one in raw mode, so Ctrl+C and Ctrl+D cancel; `echo` shows what is typed. */
+function readRaw(io: Io, input: RawInput, echo: boolean): Promise<string> {
   const setRaw = input.setRawMode!.bind(input);
   const wasRaw = Boolean(input.isRaw);
   setRaw(true);
@@ -65,15 +91,20 @@ function readHidden(io: Io, input: RawInput): Promise<string> {
         if (character === '\r' || character === '\n') return finish(null);
         if (character === '\u0003' || character === '\u0004')
           return finish(new SecretInputCancelled());
-        if (character === '\u007f' || character === '\b') value = value.slice(0, -1);
-        else if (character >= ' ' && value.length < MAX_LENGTH) value += character;
+        if (character === '\u007f' || character === '\b') {
+          if (echo && value) io.stderr.write('\b \b');
+          value = value.slice(0, -1);
+        } else if (character >= ' ' && value.length < MAX_LENGTH) {
+          value += character;
+          if (echo) io.stderr.write(character);
+        }
       }
     };
     input.on('data', onData);
   });
 }
 
-function readFirstLine(input: NodeJS.ReadableStream): Promise<string> {
+function readStdinLines(input: NodeJS.ReadableStream, count: number): Promise<string[]> {
   return new Promise((resolve, reject) => {
     let buffered = '';
     const done = (error: Error | null) => {
@@ -81,18 +112,23 @@ function readFirstLine(input: NodeJS.ReadableStream): Promise<string> {
       input.removeListener('end', onEnd);
       input.removeListener('error', onError);
       input.pause();
-      if (error) reject(error);
-      else resolve(buffered.split(/\r?\n/)[0].trim());
+      if (error) return reject(error);
+      const lines = buffered
+        .split(/\r?\n/)
+        .slice(0, count)
+        .map((line) => line.trim());
+      while (lines.length < count) lines.push('');
+      resolve(lines);
     };
     const onData = (chunk: Buffer | string) => {
       buffered += chunk.toString();
-      if (buffered.length > MAX_LENGTH)
+      if (buffered.length > MAX_LENGTH * count)
         done(
           new Error(
             tr('输入过长', 'Input too long', 'Entrada demasiado larga', 'Entrada longa demais'),
           ),
         );
-      else if (/\r?\n/.test(buffered)) done(null);
+      else if ((buffered.match(/\r?\n/g) ?? []).length >= count) done(null);
     };
     const onEnd = () => done(null);
     const onError = (error: Error) => done(error);

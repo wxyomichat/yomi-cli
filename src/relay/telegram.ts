@@ -1,4 +1,5 @@
 import { tr } from '../core/i18n.js';
+import { ChannelError, type ChannelErrorReason, type OutgoingFile } from './channels/types.js';
 
 /**
  * The Telegram Bot API (https://core.telegram.org/bots/api), the few methods the relay uses,
@@ -13,17 +14,33 @@ export const TELEGRAM_API = 'https://api.telegram.org';
 /** `<digits>:<35+ url-safe characters>`, as BotFather issues them. */
 export const BOT_TOKEN = /^[0-9]{5,16}:[A-Za-z0-9_-]{30,64}$/;
 
-export class TelegramError extends Error {
+/** What a Bot API error code means to a channel's caller. */
+function reasonOf(code: number): ChannelErrorReason {
+  if (code === 409) return 'conflict';
+  if (code === 401 || code === 404) return 'unauthorized';
+  if (code === 403) return 'blocked';
+  if (code === 429) return 'rateLimited';
+  if (code === 0 || code >= 500) return 'transient';
+  return 'other';
+}
+
+/** A failed Bot API call: the method, Telegram's `error_code` and `description`, never the token. */
+export class TelegramError extends ChannelError {
+  /** Telegram's `error_code` (HTTP-like), or 0 for a network failure. */
+  declare readonly code: number;
+
   constructor(
-    public readonly method: string,
-    /** Telegram's `error_code` (HTTP-like), or 0 for a network failure. */
-    public readonly code: number,
-    public readonly description: string,
+    method: string,
+    code: number,
+    description: string,
     /** Seconds to wait before the next request (429). */
     public readonly retryAfter = 0,
   ) {
-    super(`Telegram ${method}: ${code ? `${code} ` : ''}${description}`);
+    super('telegram', method, code, description, reasonOf(code), retryAfter * 1000);
     this.name = 'TelegramError';
+  }
+  get method(): string {
+    return this.operation;
   }
   /** Another getUpdates poller (or a webhook) uses this bot. */
   get conflict() {
@@ -85,7 +102,7 @@ export type TelegramUpdate = {
 export type InlineKeyboard = { inline_keyboard: { text: string; callback_data: string }[][] };
 
 /** A file to upload: its bytes, media type and file name. */
-export type TelegramFile = { bytes: Buffer; mime: string; name: string };
+export type TelegramFile = OutgoingFile;
 
 /** `PhotoSize`: one of the sizes Telegram keeps of a photo. */
 export type TelegramPhotoSize = {

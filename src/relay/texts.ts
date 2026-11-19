@@ -1,8 +1,23 @@
+import type { PauseReason } from './channels/types.js';
+
 /**
- * What the relay says in Telegram, in the CLI's language (`YOMI_LANG` / `LANG`: zh-Hans or en).
- * Plain text: the caller escapes it for HTML. No links to buy gems (Telegram allows only Stars for
- * digital goods in bots), only "top up in the app or on the web".
+ * What the relay says in the chat, in the CLI's language (`YOMI_LANG` / `LANG`: zh, en, es, pt).
+ * Plain text: the channel escapes it for its format. No links to buy gems on any channel
+ * (Telegram allows only Stars for digital goods in bots), only "top up in the app or on the web".
+ * A text that differs by channel takes what differs (its name, whether it quotes messages, the
+ * command that starts it); Telegram's arguments give the texts it always had.
  */
+
+/**
+ * A channel's name inside Chinese text: an ASCII name ("Telegram", "QQ") is set off by a space
+ * where it meets Chinese characters, as the table writes Latin words; 微信 is not. The relay's
+ * own Chinese log lines use it too.
+ */
+export function spaced(name: string, side: 'before' | 'after' | 'both' = 'before'): string {
+  if (!/^[\x21-\x7e]/.test(name)) return name;
+  if (side === 'both') return ` ${name} `;
+  return side === 'before' ? ` ${name}` : `${name} `;
+}
 
 const zh = {
   aiNotice: (name: string) =>
@@ -10,15 +25,17 @@ const zh = {
   paired: (bot: string) =>
     `已配对：这个 bot 现在只为你转发消息。用 /character 选择角色，/help 查看命令。（${bot}）`,
   badCode: '配对码不对或已过期，请看电脑终端上显示的配对码。',
-  help: [
-    '直接发文字，就会转给当前角色。',
-    '/character [ID] 查看或切换角色',
-    '/price 每条回复的价格、余额和预算',
-    '/budget [数量|off] 设置可花的钻石上限（默认只用免费额度）',
-    '/image 根据最近一条回复生成一张图片（回复角色的某条消息再发，则根据那一条）',
-    '/report 举报最近一条回复或角色',
-    '/stop 停止转发当前回复（不退费）',
-  ].join('\n'),
+  /** `quotes`: the chat can answer a message (Telegram), so /image can name one. */
+  help: (quotes: boolean) =>
+    [
+      '直接发文字，就会转给当前角色。',
+      '/character [ID] 查看或切换角色',
+      '/price 每条回复的价格、余额和预算',
+      '/budget [数量|off] 设置可花的钻石上限（默认只用免费额度）',
+      `/image 根据最近一条回复生成一张图片${quotes ? '（回复角色的某条消息再发，则根据那一条）' : ''}`,
+      '/report 举报最近一条回复或角色',
+      '/stop 停止转发当前回复（不退费）',
+    ].join('\n'),
   noCharacter: '还没有选择角色：发送 /character 加角色 ID。',
   characterIs: (name: string, id: string) => `当前角色：${name}（ID ${id}）`,
   characterSet: (name: string) => `已切换到「${name}」。`,
@@ -79,18 +96,37 @@ const zh = {
   // Session
   signedOut: 'Yomi 登录已失效，relay 已暂停。请在电脑上运行 yomi login，完成后会自动恢复。',
   resumed: 'Yomi 登录已恢复，可以继续聊天。',
-  otherAccount: '电脑上登录的 Yomi 账号变了，relay 已停止。请重新运行 yomi relay --telegram。',
+  otherAccount: (command: string) =>
+    `电脑上登录的 Yomi 账号变了，relay 已停止。请重新运行 ${command}。`,
   paused: (reason: string) => `relay 已暂停：${reason}`,
   // Report
   reportPick: '选择举报原因（只收集，不代表已处理）：',
   reportCharacter: '举报这个角色',
-  reportNothing: '没有可以举报的回复：回复这条消息或在回复出现后再试。',
+  reportNothing: (quotes: boolean) =>
+    `没有可以举报的回复：${quotes ? '回复这条消息或在回复出现后再试' : '请在回复出现后再试'}。`,
   reportDone: '已提交，谢谢反馈。',
   reportFailed: '提交失败，请稍后再试。',
   expired: '这个按钮已过期。',
+  // Questions answered by typing (channels without buttons)
+  askChoose: (code: string) => `回复「${code} 1」这样的「代码 序号」来选择（10 分钟内有效）。`,
+  askExpired: '这个选择已过期，请重新发送命令。',
+  askInvalid: '没有这个选项。',
+  // Channels
+  queuedHeader: (count: number) => `你不在时的消息（${count} 条）：`,
+  contentRefused: (channel: string) =>
+    `${spaced(channel, 'after')}按内容规则拒绝了一条回复，它没有送达。多次被拒可能导致 bot 被封禁，所以一次运行中被拒 3 次后会暂停转发。`,
+  channelPaused: (channel: string, reason: PauseReason) =>
+    reason === 'contentRefused'
+      ? `转发已暂停：${spaced(channel, 'after')}拒绝了多条回复。请在电脑上重新启动 relay 后继续。`
+      : `${spaced(channel, 'after')}暂时不可用，这条消息没有转发（没有扣费）。`,
+  offlineNotReceived: (channel: string) =>
+    `relay 离线期间发给这个${spaced(channel)} bot 的消息没有收到，需要的话请重新发送。`,
+  replyUndelivered: (channel: string) =>
+    `有一条回复没能发到${spaced(channel)}，请在 Yomi App 或网页查看。`,
+  pairHint: '要使用这个 bot，请发送 /pair 加上电脑上显示的配对码。',
   // Images
-  imageUsage:
-    '用法：/image 根据最近一条回复生成图片；回复角色的某条消息再发 /image，则根据那一条。/image resume 继续上一次没有结果的生图；/image forget 放弃追踪一个结果未知的请求（已被受理的不能放弃）。',
+  imageUsage: (quotes: boolean) =>
+    `用法：/image 根据最近一条回复生成图片${quotes ? '；回复角色的某条消息再发 /image，则根据那一条' : ''}。/image resume 继续上一次没有结果的生图；/image forget 放弃追踪一个结果未知的请求（已被受理的不能放弃）。`,
   imageDisabled: '当前对话暂不支持生图。',
   imageConfigUnavailable:
     '暂时读不到生图的价格（不代表免费），为了不超出预算，没有发起生图。请稍后再试。',
@@ -137,8 +173,8 @@ const zh = {
   imageSkipped: '这段对话已被删除，图片没有送达。',
   imageRefused: (detail: string) => `没有生成图片${detail ? `：${detail}` : ''}。这次没有扣费。`,
   imageGems: '钻石不足，没有生成图片，也没有扣费。请在 Yomi App 或网页充值。',
-  imageForwardFailed:
-    '图片已经生成并保存在 Yomi 对话里，但没能转发到 Telegram：请在 Yomi App 或网页查看。',
+  imageForwardFailed: (channel: string) =>
+    `图片已经生成并保存在 Yomi 对话里，但没能转发到${spaced(channel)}：请在 Yomi App 或网页查看。`,
   imageCaption: (name: string) => `「${name}」的图片`,
   imageRefunded: '上一张没有生成成功的图片，扣的钻石已经退回。',
   imageBilling: (state: ImageBillingNote) =>
@@ -163,15 +199,16 @@ const en: RelayTexts = {
   paired: (bot) =>
     `Paired: this bot now relays your messages only. Pick a character with /character; /help lists commands. (${bot})`,
   badCode: 'That pairing code is wrong or expired. Use the code shown in your terminal.',
-  help: [
-    'Send text and it goes to the current character.',
-    '/character [ID] show or switch the character',
-    '/price price per reply, balance and budget',
-    '/budget [amount|off] gems the relay may spend (default: free replies only)',
-    '/image make a picture of the last reply (or of the reply you answer with it)',
-    '/report report the last reply or the character',
-    '/stop stop relaying the current reply (no refund)',
-  ].join('\n'),
+  help: (quotes) =>
+    [
+      'Send text and it goes to the current character.',
+      '/character [ID] show or switch the character',
+      '/price price per reply, balance and budget',
+      '/budget [amount|off] gems the relay may spend (default: free replies only)',
+      `/image make a picture of the last reply${quotes ? ' (or of the reply you answer with it)' : ''}`,
+      '/report report the last reply or the character',
+      '/stop stop relaying the current reply (no refund)',
+    ].join('\n'),
   noCharacter: 'No character yet: send /character with a character ID.',
   characterIs: (name, id) => `Current character: ${name} (ID ${id})`,
   characterSet: (name) => `Switched to "${name}".`,
@@ -239,17 +276,34 @@ const en: RelayTexts = {
   signedOut:
     'Your Yomi sign-in expired; the relay is paused. Run yomi login on your computer and it resumes by itself.',
   resumed: 'Yomi sign-in is back; you can continue.',
-  otherAccount:
-    'A different Yomi account is signed in on the computer; the relay stopped. Run yomi relay --telegram again.',
+  otherAccount: (command) =>
+    `A different Yomi account is signed in on the computer; the relay stopped. Run ${command} again.`,
   paused: (reason) => `The relay is paused: ${reason}`,
   reportPick: 'Pick a reason (collected for review; not a promise of action):',
   reportCharacter: 'Report this character',
-  reportNothing: 'Nothing to report yet: reply to a message, or try after a reply arrives.',
+  reportNothing: (quotes) =>
+    `Nothing to report yet: ${quotes ? 'reply to a message, or try' : 'try'} after a reply arrives.`,
   reportDone: 'Sent. Thanks for the feedback.',
   reportFailed: "Couldn't send it; try again later.",
   expired: 'This button has expired.',
-  imageUsage:
-    "Usage: /image makes a picture of the last reply; answer one of the character's replies with /image to use that one. /image resume continues the last picture that has no result yet; /image forget stops tracking a request whose outcome is unknown (an accepted one can't be dropped).",
+  askChoose: (code) =>
+    `Reply with the code and a number, like "${code} 1", to choose (valid for 10 minutes).`,
+  askExpired: 'That choice has expired; send the command again.',
+  askInvalid: 'That is not one of the options.',
+  queuedHeader: (count) => `While you were away (${count}):`,
+  contentRefused: (channel) =>
+    `${channel} refused a reply under its content rules; it was not delivered. Repeated refusals can get the bot banned, so relaying pauses after 3 in one run.`,
+  channelPaused: (channel, reason) =>
+    reason === 'contentRefused'
+      ? `Relaying is paused: ${channel} refused several replies. Restart the relay on the computer to continue.`
+      : `${channel} is unavailable for now; this message was not relayed (not charged).`,
+  offlineNotReceived: (channel) =>
+    `Messages sent to this ${channel} bot while the relay was off never reached it; send them again if needed.`,
+  replyUndelivered: (channel) =>
+    `A reply could not be delivered to ${channel}; read it in the Yomi app or on the web.`,
+  pairHint: 'To use this bot, send /pair followed by the code shown on the computer.',
+  imageUsage: (quotes) =>
+    `Usage: /image makes a picture of the last reply${quotes ? "; answer one of the character's replies with /image to use that one" : ''}. /image resume continues the last picture that has no result yet; /image forget stops tracking a request whose outcome is unknown (an accepted one can't be dropped).`,
   imageDisabled: "Images aren't available in this chat.",
   imageConfigUnavailable:
     "Can't read the price of an image right now (that does not mean free), so no image was requested. Try again shortly.",
@@ -302,8 +356,8 @@ const en: RelayTexts = {
     `No picture was made${detail ? `: ${detail}` : ''}. Nothing was charged.`,
   imageGems:
     'Not enough gems: no picture was made and nothing was charged. Top up in the Yomi app or on the web.',
-  imageForwardFailed:
-    "The picture was made and is in the Yomi chat, but couldn't be forwarded to Telegram: see it in the Yomi app or on the web.",
+  imageForwardFailed: (channel) =>
+    `The picture was made and is in the Yomi chat, but couldn't be forwarded to ${channel}: see it in the Yomi app or on the web.`,
   imageCaption: (name) => `A picture from "${name}"`,
   imageRefunded: 'The gems for the picture that failed are back in your balance.',
   imageBilling: (state) =>
@@ -324,15 +378,16 @@ const es: RelayTexts = {
     `Vinculado: este bot ahora solo transmite tus mensajes. Elige un personaje con /character; /help muestra los comandos. (${bot})`,
   badCode:
     'Ese código de vinculación es incorrecto o expiró. Usa el código que aparece en tu terminal.',
-  help: [
-    'Envía texto y llegará al personaje actual.',
-    '/character [ID] ver o cambiar el personaje',
-    '/price precio por respuesta, saldo y presupuesto',
-    '/budget [cantidad|off] gemas que el relay puede gastar (por defecto: solo respuestas gratis)',
-    '/image generar una imagen de la última respuesta (o de la respuesta a la que contestes con este comando)',
-    '/report reportar la última respuesta o el personaje',
-    '/stop dejar de transmitir la respuesta actual (sin reembolso)',
-  ].join('\n'),
+  help: (quotes) =>
+    [
+      'Envía texto y llegará al personaje actual.',
+      '/character [ID] ver o cambiar el personaje',
+      '/price precio por respuesta, saldo y presupuesto',
+      '/budget [cantidad|off] gemas que el relay puede gastar (por defecto: solo respuestas gratis)',
+      `/image generar una imagen de la última respuesta${quotes ? ' (o de la respuesta a la que contestes con este comando)' : ''}`,
+      '/report reportar la última respuesta o el personaje',
+      '/stop dejar de transmitir la respuesta actual (sin reembolso)',
+    ].join('\n'),
   noCharacter: 'Aún no hay personaje: envía /character con el ID de un personaje.',
   characterIs: (name, id) => `Personaje actual: ${name} (ID ${id})`,
   characterSet: (name) => `Cambiaste a "${name}".`,
@@ -404,18 +459,34 @@ const es: RelayTexts = {
   signedOut:
     'Tu sesión de Yomi expiró; el relay está en pausa. Ejecuta yomi login en tu computadora y se reanudará solo.',
   resumed: 'Se restableció tu sesión de Yomi; puedes continuar.',
-  otherAccount:
-    'Otra cuenta de Yomi inició sesión en la computadora; el relay se detuvo. Vuelve a ejecutar yomi relay --telegram.',
+  otherAccount: (command) =>
+    `Otra cuenta de Yomi inició sesión en la computadora; el relay se detuvo. Vuelve a ejecutar ${command}.`,
   paused: (reason) => `El relay está en pausa: ${reason}`,
   reportPick: 'Elige un motivo (se recopila para revisión; no garantiza que se tome una medida):',
   reportCharacter: 'Reportar este personaje',
-  reportNothing:
-    'Aún no hay nada que reportar: responde a un mensaje o inténtalo cuando llegue una respuesta.',
+  reportNothing: (quotes) =>
+    `Aún no hay nada que reportar: ${quotes ? 'responde a un mensaje o inténtalo' : 'inténtalo'} cuando llegue una respuesta.`,
   reportDone: 'Enviado. Gracias por tus comentarios.',
   reportFailed: 'No se pudo enviar; inténtalo más tarde.',
   expired: 'Este botón expiró.',
-  imageUsage:
-    'Uso: /image genera una imagen de la última respuesta; responde a una de las respuestas del personaje con /image para usar esa. /image resume continúa la última imagen que todavía no tiene resultado; /image forget deja de seguir una solicitud con resultado desconocido (una ya aceptada no se puede descartar).',
+  askChoose: (code) =>
+    `Responde con el código y un número, como "${code} 1", para elegir (válido durante 10 minutos).`,
+  askExpired: 'Esa opción expiró; vuelve a enviar el comando.',
+  askInvalid: 'Esa no es una de las opciones.',
+  queuedHeader: (count) => `Mientras no estabas (${count}):`,
+  contentRefused: (channel) =>
+    `${channel} rechazó una respuesta por sus reglas de contenido; no se entregó. Los rechazos repetidos pueden hacer que bloqueen el bot, así que el relay se pausa después de 3 en una misma ejecución.`,
+  channelPaused: (channel, reason) =>
+    reason === 'contentRefused'
+      ? `El relay está en pausa: ${channel} rechazó varias respuestas. Reinicia el relay en la computadora para continuar.`
+      : `${channel} no está disponible por ahora; este mensaje no se transmitió (no se cobró).`,
+  offlineNotReceived: (channel) =>
+    `Los mensajes enviados a este bot de ${channel} mientras el relay estaba desconectado nunca le llegaron; envíalos de nuevo si hace falta.`,
+  replyUndelivered: (channel) =>
+    `No se pudo entregar una respuesta en ${channel}; léela en la app de Yomi o en la web.`,
+  pairHint: 'Para usar este bot, envía /pair seguido del código que aparece en la computadora.',
+  imageUsage: (quotes) =>
+    `Uso: /image genera una imagen de la última respuesta${quotes ? '; responde a una de las respuestas del personaje con /image para usar esa' : ''}. /image resume continúa la última imagen que todavía no tiene resultado; /image forget deja de seguir una solicitud con resultado desconocido (una ya aceptada no se puede descartar).`,
   imageDisabled: 'Las imágenes no están disponibles en este chat.',
   imageConfigUnavailable:
     'No se puede leer el precio de una imagen en este momento (eso no significa que sea gratis), así que no se pidió ninguna imagen. Inténtalo de nuevo en un momento.',
@@ -470,8 +541,8 @@ const es: RelayTexts = {
     `No se generó ninguna imagen${detail ? `: ${detail}` : ''}. No se cobró nada.`,
   imageGems:
     'No tienes suficientes gemas: no se generó ninguna imagen y no se cobró nada. Recarga en la app de Yomi o en la web.',
-  imageForwardFailed:
-    'La imagen se generó y está en el chat de Yomi, pero no se pudo enviar a Telegram: mírala en la app de Yomi o en la web.',
+  imageForwardFailed: (channel) =>
+    `La imagen se generó y está en el chat de Yomi, pero no se pudo enviar a ${channel}: mírala en la app de Yomi o en la web.`,
   imageCaption: (name) => `Una imagen de "${name}"`,
   imageRefunded: 'Las gemas de la imagen que falló volvieron a tu saldo.',
   imageBilling: (state) =>
@@ -492,15 +563,16 @@ const pt: RelayTexts = {
     `Pareado: este bot agora só encaminha as suas mensagens. Escolha um personagem com /character; /help lista os comandos. (${bot})`,
   badCode:
     'Esse código de pareamento está errado ou expirou. Use o código mostrado no seu terminal.',
-  help: [
-    'Envie texto e ele vai para o personagem atual.',
-    '/character [ID] ver ou trocar o personagem',
-    '/price preço por resposta, saldo e orçamento',
-    '/budget [quantidade|off] gemas que o relay pode gastar (padrão: só respostas grátis)',
-    '/image gerar uma imagem da última resposta (ou da resposta à qual você responder com este comando)',
-    '/report denunciar a última resposta ou o personagem',
-    '/stop parar de encaminhar a resposta atual (sem reembolso)',
-  ].join('\n'),
+  help: (quotes) =>
+    [
+      'Envie texto e ele vai para o personagem atual.',
+      '/character [ID] ver ou trocar o personagem',
+      '/price preço por resposta, saldo e orçamento',
+      '/budget [quantidade|off] gemas que o relay pode gastar (padrão: só respostas grátis)',
+      `/image gerar uma imagem da última resposta${quotes ? ' (ou da resposta à qual você responder com este comando)' : ''}`,
+      '/report denunciar a última resposta ou o personagem',
+      '/stop parar de encaminhar a resposta atual (sem reembolso)',
+    ].join('\n'),
   noCharacter: 'Ainda não há personagem: envie /character com o ID de um personagem.',
   characterIs: (name, id) => `Personagem atual: ${name} (ID ${id})`,
   characterSet: (name) => `Você trocou para "${name}".`,
@@ -569,18 +641,34 @@ const pt: RelayTexts = {
   signedOut:
     'Seu login do Yomi expirou; o relay está pausado. Execute yomi login no seu computador e ele volta sozinho.',
   resumed: 'O login do Yomi foi restabelecido; você pode continuar.',
-  otherAccount:
-    'Outra conta do Yomi está conectada no computador; o relay parou. Execute yomi relay --telegram novamente.',
+  otherAccount: (command) =>
+    `Outra conta do Yomi está conectada no computador; o relay parou. Execute ${command} novamente.`,
   paused: (reason) => `O relay está pausado: ${reason}`,
   reportPick: 'Escolha um motivo (coletado para revisão; não é uma promessa de ação):',
   reportCharacter: 'Denunciar este personagem',
-  reportNothing:
-    'Ainda não há nada para denunciar: responda a uma mensagem ou tente depois que uma resposta chegar.',
+  reportNothing: (quotes) =>
+    `Ainda não há nada para denunciar: ${quotes ? 'responda a uma mensagem ou tente' : 'tente'} depois que uma resposta chegar.`,
   reportDone: 'Enviado. Obrigado pelo feedback.',
   reportFailed: 'Não foi possível enviar; tente novamente mais tarde.',
   expired: 'Este botão expirou.',
-  imageUsage:
-    'Uso: /image gera uma imagem da última resposta; responda a uma das respostas do personagem com /image para usar essa. /image resume continua a última imagem que ainda não tem resultado; /image forget para de acompanhar uma solicitação com resultado desconhecido (uma já aceita não pode ser descartada).',
+  askChoose: (code) =>
+    `Responda com o código e um número, como "${code} 1", para escolher (válido por 10 minutos).`,
+  askExpired: 'Essa opção expirou; envie o comando novamente.',
+  askInvalid: 'Essa não é uma das opções.',
+  queuedHeader: (count) => `Enquanto você estava fora (${count}):`,
+  contentRefused: (channel) =>
+    `O ${channel} recusou uma resposta pelas regras de conteúdo dele; ela não foi entregue. Recusas repetidas podem fazer o bot ser banido, então o relay pausa depois de 3 em uma mesma execução.`,
+  channelPaused: (channel, reason) =>
+    reason === 'contentRefused'
+      ? `O relay está pausado: o ${channel} recusou várias respostas. Reinicie o relay no computador para continuar.`
+      : `O ${channel} está indisponível no momento; esta mensagem não foi encaminhada (nada foi cobrado).`,
+  offlineNotReceived: (channel) =>
+    `As mensagens enviadas a este bot do ${channel} enquanto o relay estava offline nunca chegaram a ele; envie novamente se precisar.`,
+  replyUndelivered: (channel) =>
+    `Não foi possível entregar uma resposta no ${channel}; leia no app do Yomi ou na web.`,
+  pairHint: 'Para usar este bot, envie /pair seguido do código mostrado no computador.',
+  imageUsage: (quotes) =>
+    `Uso: /image gera uma imagem da última resposta${quotes ? '; responda a uma das respostas do personagem com /image para usar essa' : ''}. /image resume continua a última imagem que ainda não tem resultado; /image forget para de acompanhar uma solicitação com resultado desconhecido (uma já aceita não pode ser descartada).`,
   imageDisabled: 'Imagens não estão disponíveis neste chat.',
   imageConfigUnavailable:
     'Não foi possível ler o preço de uma imagem agora (isso não significa que seja grátis), então nenhuma imagem foi solicitada. Tente novamente daqui a pouco.',
@@ -634,8 +722,8 @@ const pt: RelayTexts = {
     `Nenhuma imagem foi gerada${detail ? `: ${detail}` : ''}. Nada foi cobrado.`,
   imageGems:
     'Gemas insuficientes: nenhuma imagem foi gerada e nada foi cobrado. Recarregue no app do Yomi ou na web.',
-  imageForwardFailed:
-    'A imagem foi gerada e está no chat do Yomi, mas não foi possível encaminhá-la para o Telegram: veja no app do Yomi ou na web.',
+  imageForwardFailed: (channel) =>
+    `A imagem foi gerada e está no chat do Yomi, mas não foi possível encaminhá-la para o ${channel}: veja no app do Yomi ou na web.`,
   imageCaption: (name) => `Uma imagem de "${name}"`,
   imageRefunded: 'As gemas da imagem que falhou voltaram para o seu saldo.',
   imageBilling: (state) =>

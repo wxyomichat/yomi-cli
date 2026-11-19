@@ -58,38 +58,63 @@ import {
   StreamEventType,
 } from '../im/thrift.js';
 import { walletBalance } from '../ugc/api.js';
-import { PairingCode } from './pairing.js';
-import { compareVersions, DEFAULT_POLICY, type RelayPolicy, relayPolicy } from './policy.js';
-import { ReplyPresenter } from './presenter.js';
-import { escapeHtml, renderReply } from './render.js';
-import { type RelayCharacter, type RelayState } from './state.js';
+import { TelegramChannel } from './channels/telegram.js';
 import {
-  type InlineKeyboard,
-  MAX_PHOTO_BYTES,
-  type TelegramBot,
-  type TelegramCallbackQuery,
-  TelegramError,
-  type TelegramFile,
-  type TelegramMessage,
-  type TelegramUpdate,
-} from './telegram.js';
-import { type ImageBillingNote, relayCommands, relayTexts, type RelayTexts } from './texts.js';
+  type AskRef,
+  type BotIdentity,
+  ChannelError,
+  type ChannelHost,
+  type InboundAnswer,
+  type InboundCommand,
+  type InboundEvent,
+  type InboundMessage,
+  type OutgoingFile,
+  type OutgoingText,
+  type PauseReason,
+  type Question,
+  type RelayChannel,
+  RelayStopped,
+  type ReplyContext,
+  type ReplyPresenter,
+} from './channels/types.js';
+import { PairingCode } from './pairing.js';
+import {
+  channelPolicy,
+  compareVersions,
+  DEFAULT_POLICY,
+  POLICY_REFETCH_MS,
+  type RelayPolicy,
+  relayPolicy,
+} from './policy.js';
+import { renderReply } from './render.js';
+import { type RelayCharacter, type RelayState } from './state.js';
+import { TelegramBot } from './telegram.js';
+import {
+  type ImageBillingNote,
+  relayCommands,
+  relayTexts,
+  type RelayTexts,
+  spaced,
+} from './texts.js';
 
 /**
- * `yomi relay --telegram`: the owner's private chat with their own bot ⇄ a published Yomi
- * character, through the same chat APIs as the app.
+ * `yomi relay`: the owner's private chat with their own bot (Telegram, QQ, WeChat: a
+ * `RelayChannel`) ⇄ a published Yomi character, through the same chat APIs as the app.
  *
  * - Only the paired owner is served (private chat, their user id, not a bot); anyone else is
  *   ignored before anything reaches Yomi, so strangers cost nothing. Groups are left.
  * - A reply is ours only if its `stream_id` came back from our own `send_message`: the account's
  *   other devices get the same pushes, and none of them is ever relayed.
  * - Only reviewed `paragraphs` are shown; a chunk's `text` and `thinking_content` never are.
- * - Money: no gems until the owner sets a budget (`/budget`, confirmed with a button), and never
- *   more than `--max-spend` on this computer, whose running total nothing from Telegram resets.
- *   Every send is measured: the server's `charged_diamonds`, else the balance before and after. A
- *   charge that could not be measured yet stays pending (across restarts) and is settled before the
- *   next send; when the balance cannot be read, nothing is sent. A spent budget pauses the relay,
- *   and so does a "free" reply that was charged. A send is never repeated.
+ * - Money: no gems until the owner sets a budget (`/budget`, confirmed with a button or a typed
+ *   code), and never more than `--max-spend` on this computer, whose running total nothing from
+ *   the chat resets. Every send is measured: the server's `charged_diamonds`, else the balance
+ *   before and after. A charge that could not be measured yet stays pending (across restarts) and
+ *   is settled before the next send; when the balance cannot be read, nothing is sent. A spent
+ *   budget pauses the relay, and so does a "free" reply that was charged. A send is never
+ *   repeated.
+ * - The channel only translates: its inbound events in, the core's sends out under its own reply
+ *   rules. Every rule about money, consent, policy and Yomi is here, the same on every channel.
  * - `/image` asks for a picture of a reply (one at a time, like a reply): free ones go without a
  *   budget, a priced one needs the budget and is measured like a reply. The request is kept before
  *   it is sent and resent only as the same request (`/image resume`); only a request whose outcome
@@ -114,11 +139,13 @@ export type RelayOptions = {
   /** Called when a spent or expired code is replaced (the terminal shows the new one). */
   onPairingCode?: (code: PairingCode) => void;
   replyTimeoutMs: number;
-  /** Minimum time between two Telegram calls in the chat. */
+  /** Minimum time between two Telegram calls in the chat (when a `TelegramBot` is given). */
   intervalMs: number;
   /** Messages older than this (sent while the relay was off) are not relayed. */
   staleMs: number;
+  /** Telegram's long poll (when a `TelegramBot` is given). */
   pollTimeoutSeconds: number;
+  /** Telegram drafts, else edits (when a `TelegramBot` is given). */
   drafts: boolean;
   language: string;
   log: (line: string) => void;
@@ -130,21 +157,25 @@ export type RelayOptions = {
   imageTimeoutMs?: number;
   /** Where a requested image is kept until its cost is settled; this account's state by default. */
   records?: LocalState;
+  /** The command that starts this relay again, for the owner (`yomi relay --telegram`). */
+  rerunCommand?: string;
+  /**
+   * QQ and WeChat relay only on a policy the server sent for them (production); without one
+   * every message is answered that the server switched them off (policy.ts `channelPolicy`).
+   */
+  requireServerPolicy?: boolean;
+  /** How long such a gated channel waits before an owner message asks the server again (60 s). */
+  policyRefetchMs?: number;
 };
 
-export class RelayStopped extends Error {
-  constructor(
-    readonly reason: 'conflict' | 'token' | 'otherAccount' | 'webhook',
-    message: string,
-  ) {
-    super(message);
-    this.name = 'RelayStopped';
-  }
-}
+// Moved to channels/types.ts with the reasons other channels add; imports from here keep working.
+export { RelayStopped };
 
 type Turn = {
   character: RelayCharacter;
-  chatId: number;
+  chatId: string;
+  /** The owner message it answers. */
+  context: ReplyContext;
   streamId: string;
   assistantMid: string;
   cid: string;
@@ -160,8 +191,9 @@ type Turn = {
 };
 
 /**
- * A requested image until its gems are settled, kept across restarts (one per bot). The request
- * is frozen before it is sent: a resend is the same `client_request_id` and the same body.
+ * A requested image until its gems are settled, kept across restarts (one per bot: per channel
+ * scope). The request is frozen before it is sent: a resend is the same `client_request_id` and
+ * the same body.
  */
 type ImageRecord = {
   requestId: string;
@@ -179,8 +211,8 @@ type ImageRecord = {
   price: number;
   /** What it costs if charged (the full price; a free one is charged this once the quota is gone). */
   worst: number;
-  /** The owner's chat it goes to. */
-  chatId: number;
+  /** The owner's chat it goes to (as the channel persists ids: a number for Telegram). */
+  chatId: number | string;
   /** The owner was told how it ended (the picture, or why there is none). */
   told: boolean;
   /** A refund was under way when the owner was told. */
@@ -209,10 +241,11 @@ const IMAGE_RECORDS = 'relay-chat-image';
 /** Pauses that come from the session or the server; worked out again on every start. */
 type Gate = '' | 'signedOut' | 'disabled' | 'tooOld';
 
+/** An open question (buttons, or a typed code), by its nonce. */
 type Button =
-  | { kind: 'budget'; amount: number; messageId: number }
-  | { kind: 'report'; npcId: string; mid: string; reasons: FeedbackReason[]; messageId: number }
-  | { kind: 'reportCharacter'; npcId: string; reasons: FeedbackReason[]; messageId: number };
+  | { kind: 'budget'; amount: number; ref: AskRef }
+  | { kind: 'report'; npcId: string; mid: string; reasons: FeedbackReason[]; ref: AskRef }
+  | { kind: 'reportCharacter'; npcId: string; reasons: FeedbackReason[]; ref: AskRef };
 
 /** Server notices the relay passes on whatever reply they follow (contract §5). */
 const NOTICE_SCENES = new Set([
@@ -222,21 +255,9 @@ const NOTICE_SCENES = new Set([
   'crisis_support',
 ]);
 const THREE_HOURS = 3 * 60 * 60 * 1000;
-const OFFSET_MAX_AGE = 6 * 24 * 60 * 60 * 1000;
 const PRICE_TTL = 5 * 60 * 1000;
-
-const sleep = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
+/** How long a stop waits for the open reply's presenter at shutdown before giving up on it. */
+const SHUTDOWN_STOP_MS = 3000;
 
 /**
  * Whether a failed send may still have been accepted (and charged): no answer at all, a timeout,
@@ -297,18 +318,52 @@ export class Relay {
   private stopReason: RelayStopped | null = null;
   private readonly abort = new AbortController();
   private readonly userId: string;
+  private readonly channel: RelayChannel;
+  /** What the channel may use of the relay, for the whole run. */
+  private readonly host: ChannelHost;
+  private identity: BotIdentity = { id: '', name: '', handle: '' };
+  /** The context of the latest owner message: every send to the owner names it. */
+  private replyTo: ReplyContext | null = null;
+  /** The channel asked for a pause (`host.pause`); null while it relays. */
+  private channelPause: { reason: PauseReason; until: number | null } | null = null;
+  /** The server has not confirmed this channel (production): asked again now and then. */
+  private policyGated = false;
+  private policyAt = 0;
 
+  /** `channel`: a `RelayChannel`, or a `TelegramBot` (made Telegram's channel with `options`). */
   constructor(
     private readonly gateway: Gateway,
-    private readonly bot: TelegramBot,
+    channel: RelayChannel | TelegramBot,
     private readonly state: RelayState,
     private readonly options: RelayOptions,
   ) {
+    this.channel =
+      channel instanceof TelegramBot
+        ? new TelegramChannel(channel, {
+            drafts: options.drafts,
+            intervalMs: options.intervalMs,
+            pollTimeoutSeconds: options.pollTimeoutSeconds,
+          })
+        : channel;
     this.texts = relayTexts(options.language);
     this.userId = gateway.requireCredential().userId;
     // One file per bot: a relay of another bot of this account saves its own copy whole.
     this.records =
-      options.records ?? new LocalState(`relay|${state.data.account}|${bot.id}`, this.userId);
+      options.records ??
+      new LocalState(`relay|${state.data.account}|${this.channel.scope}`, this.userId);
+    this.host = {
+      state,
+      store: state.channelStore(),
+      texts: this.texts,
+      language: options.language,
+      log: (line) => this.log(line),
+      // The relay's own: a change of Yomi account aborts this one, not the caller's.
+      signal: this.abort.signal,
+      staleMs: options.staleMs,
+      owner: () => this.ownerIds(),
+      pause: (reason, until) => this.pauseChannel(reason, until),
+      resume: () => this.resumeChannel(),
+    };
   }
 
   private log(line: string) {
@@ -325,29 +380,21 @@ export class Relay {
     } finally {
       signal.removeEventListener('abort', onAbort);
       const job = this.job;
-      this.shutdown();
+      // The open reply is stopped first, so what its presenter still sends reaches the channel
+      // before the channel lets go of what it holds.
+      await this.shutdown();
       // Nothing reaches the chat after the relay stopped.
       await job?.done;
+      await this.channel.close().catch(() => undefined);
     }
     if (this.stopReason) throw this.stopReason;
   }
 
   private async prepare() {
-    const me = await this.bot.getMe();
-    this.state.update({ botUsername: me.username ?? '' });
-    const webhook = await this.bot.call<{ url?: string }>('getWebhookInfo');
-    if (webhook.url)
-      throw new RelayStopped(
-        'webhook',
-        tr(
-          '这个 bot 设置了 webhook（正被别的服务使用）。relay 不会删除它：请为 relay 单独建一个 bot。',
-          'This bot has a webhook set (another service is using it). Relay will not delete it: please create a separate bot for relay.',
-          'Este bot tiene un webhook configurado (otro servicio lo está usando). Relay no lo eliminará: crea un bot aparte para relay.',
-          'Este bot tem um webhook configurado (outro serviço está usando). O relay não vai excluí-lo: crie um bot separado para o relay.',
-        ),
-      );
-    const commands = relayCommands(this.options.language);
-    await this.bot.setMyCommands(commands).catch(() => undefined);
+    this.identity = await this.channel.verify();
+    this.state.update({ botUsername: this.identity.handle });
+    await this.channel.connect(this.host);
+    await this.channel.setCommands(relayCommands(this.options.language)).catch(() => undefined);
     if (this.state.bindAccount(this.userId))
       this.log(
         tr(
@@ -358,8 +405,7 @@ export class Relay {
         ),
       );
     this.state.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
-    this.policy = await relayPolicy(this.gateway);
-    this.applyPolicy();
+    await this.readPolicy(true);
     if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
     const kept = this.keptImage();
     // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
@@ -439,68 +485,48 @@ export class Relay {
     );
   }
 
+  /**
+   * `relay/get_policy` for this channel. QQ and WeChat run only on a policy the server sent for
+   * them in production (`channelPolicy`); without one they are gated with the server-off text and
+   * the server is asked again later. Telegram runs on whatever was read, as it always has.
+   */
+  private async readPolicy(starting: boolean) {
+    this.policyAt = Date.now();
+    const kind = this.channel.kind;
+    const read = channelPolicy(
+      await relayPolicy(this.gateway, kind),
+      kind,
+      Boolean(this.options.requireServerPolicy),
+    );
+    // Still gated on a later read: nothing changed, nothing to say again.
+    if (!starting && read.gated) return;
+    this.policy = read.policy;
+    this.policyGated = read.gated;
+    if (read.warning) this.log(read.warning);
+    this.applyPolicy();
+  }
+
+  /** While the server has not confirmed this channel, an owner message asks again (60 s apart). */
+  private async refreshPolicy() {
+    if (!this.policyGated || this.gate !== 'disabled') return;
+    if (Date.now() - this.policyAt < (this.options.policyRefetchMs ?? POLICY_REFETCH_MS)) return;
+    await this.readPolicy(false);
+  }
+
+  /** The channel's events, one at a time; the channel releases what it held after each. */
   private async poll() {
-    const saved = this.state.data;
-    // Update ids restart at random after a quiet week: an old offset could skip new messages.
-    let offset = Date.now() - saved.offsetSavedAt < OFFSET_MAX_AGE ? saved.offset : 0;
-    let backoff = 1000;
-    while (!this.abort.signal.aborted && !this.stopReason) {
-      let updates: TelegramUpdate[];
+    for await (const event of this.channel.events()) {
       try {
-        updates = await this.bot.getUpdates(
-          offset,
-          this.options.pollTimeoutSeconds,
-          this.abort.signal,
-        );
-        backoff = 1000;
+        await this.handle(event);
       } catch (error) {
-        if (this.abort.signal.aborted) break;
-        if (error instanceof TelegramError && error.conflict)
-          throw new RelayStopped(
-            'conflict',
-            tr(
-              '另一个程序正在用这个 bot 收消息（Telegram 409）。同一个 bot 只能运行一个 relay。',
-              'Another program is receiving messages with this bot (Telegram 409). Only one relay can run per bot.',
-              'Otro programa está recibiendo mensajes con este bot (Telegram 409). Solo puede ejecutarse un relay por bot.',
-              'Outro programa está recebendo mensagens com este bot (Telegram 409). Só é possível executar um relay por bot.',
-            ),
-          );
-        if (error instanceof TelegramError && error.unauthorized)
-          throw new RelayStopped(
-            'token',
-            tr(
-              'Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 yomi relay --telegram --set-token 重新设置。',
-              'Telegram does not accept this bot token (it may have been reset in BotFather). Set it again with yomi relay --telegram --set-token.',
-              'Telegram no acepta este token de bot (puede que se haya restablecido en BotFather). Vuelve a configurarlo con yomi relay --telegram --set-token.',
-              'O Telegram não aceita este token de bot (ele pode ter sido redefinido no BotFather). Configure-o novamente com yomi relay --telegram --set-token.',
-            ),
-          );
-        this.log(
-          tr(
-            `Telegram 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
-            `Can't reach Telegram right now, retrying in ${Math.round(backoff / 1000)} s`,
-            `No se puede conectar con Telegram en este momento, se reintentará en ${Math.round(backoff / 1000)} s`,
-            `Não foi possível conectar ao Telegram agora, tentando novamente em ${Math.round(backoff / 1000)} s`,
-          ),
-        );
-        await sleep(backoff, this.abort.signal);
-        backoff = Math.min(backoff * 2, 30_000);
-        continue;
+        await this.unexpected(error);
       }
-      for (const update of updates) {
-        offset = update.update_id + 1;
-        this.state.update({ offset, offsetSavedAt: Date.now() });
-        try {
-          await this.handle(update);
-        } catch (error) {
-          await this.unexpected(error);
-        }
-        if (this.stopReason) break;
-      }
+      await this.channel.flush().catch(() => undefined);
+      if (this.stopReason || this.abort.signal.aborted) break;
     }
   }
 
-  private shutdown() {
+  private async shutdown() {
     this.connection?.stop();
     // The image's record stays: the next run follows it again.
     this.job?.stop.abort();
@@ -509,55 +535,48 @@ export class Relay {
     const turn = this.turn;
     if (turn) {
       if (turn.watchdog) clearTimeout(turn.watchdog);
-      // Its charge, if any, stays pending in the state and is settled on the next run.
-      turn.presenter.stop().catch(() => undefined);
+      // Its charge, if any, stays pending in the state and is settled on the next run. A stop
+      // that hangs is given up on: the relay must end.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        turn.presenter.stop().catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SHUTDOWN_STOP_MS);
+        }),
+      ]);
+      clearTimeout(timer);
     }
   }
 
   // -------------------------------------------------------------------------------------------
-  // Telegram updates
+  // The channel's events
 
-  private owns(userId: number | undefined, chatId: number | undefined): boolean {
+  /** The paired owner's ids as strings, null while unpaired. */
+  private ownerIds(): { userId: string; chatId: string } | null {
     const owner = this.state.data.owner;
+    return owner ? { userId: String(owner.userId), chatId: String(owner.chatId) } : null;
+  }
+
+  private owns(userId: string, chatId: string): boolean {
+    const owner = this.ownerIds();
     return Boolean(owner && userId === owner.userId && chatId === owner.chatId);
   }
 
-  private async handle(update: TelegramUpdate) {
-    const stopped = update.stopped_message_generation;
-    if (stopped) {
+  private async handle(event: InboundEvent) {
+    if (event.kind === 'stop') {
       const turn = this.turn;
       if (
         turn &&
-        stopped.chat.id === turn.chatId &&
-        String(stopped.draft_id) === String(turn.presenter.draftId)
+        event.streamRef &&
+        event.chatId === turn.chatId &&
+        event.streamRef === turn.presenter.streamRef
       )
         await this.stopTurn();
       return;
     }
-    if (update.my_chat_member) {
-      const { chat, new_chat_member: member } = update.my_chat_member;
-      // A relay lives in private chats only: added to a group, it leaves.
-      if (
-        chat.type !== 'private' &&
-        ['member', 'administrator', 'restricted'].includes(member.status)
-      ) {
-        this.log(
-          tr(
-            '有人把 bot 拉进了群，已退出',
-            'Someone added the bot to a group; it left',
-            'Alguien agregó el bot a un grupo; el bot salió',
-            'Alguém adicionou o bot a um grupo; ele saiu',
-          ),
-        );
-        await this.bot.leaveChat(chat.id).catch(() => undefined);
-      }
-      return;
-    }
-    if (update.callback_query) return this.callback(update.callback_query);
-    const message = update.message;
-    if (!message || message.chat.type !== 'private' || !message.from || message.from.is_bot) return;
-    if (!this.state.data.owner) return this.pair(message);
-    if (!this.owns(message.from.id, message.chat.id)) {
+    if (event.kind === 'answer') return this.answer(event);
+    if (!this.state.data.owner) return this.pair(event);
+    if (!this.owns(event.from.id, event.chatId)) {
       this.strangers += 1;
       if (this.strangers === 1 || this.strangers % 20 === 0)
         this.log(
@@ -570,23 +589,26 @@ export class Relay {
         );
       return;
     }
-    if (Date.now() - message.date * 1000 > this.options.staleMs)
+    this.replyTo = event.context;
+    await this.refreshPolicy();
+    if (Date.now() - event.sentAt > this.options.staleMs)
       return void (await this.say(this.texts.stale));
-    const text = message.text?.trim() ?? '';
-    if (!text) return void (await this.say(this.texts.textOnly));
-    if (text.startsWith('/')) return this.command(message, text);
-    return this.chat(message, text);
+    if (!event.text) return void (await this.say(this.texts.textOnly));
+    if (event.kind === 'command') return this.command(event);
+    return this.chat(event, event.text);
   }
 
-  private async pair(message: TelegramMessage) {
+  private async pair(event: InboundMessage | InboundCommand) {
+    // A channel whose owner is whoever logged in (WeChat) pairs on the computer, not in the chat.
+    if (this.channel.caps.pairing !== 'code') return;
     const code = this.options.pairing;
-    const match = /^\/(?:start|pair)(?:@\w+)?\s+(\S+)/.exec(message.text ?? '');
-    if (!code || !match || !message.from) return;
-    const result = code.check(match[1], message.from.id);
+    const match = /^\/(?:start|pair)(?:@\w+)?\s+(\S+)/.exec(event.rawText);
+    if (!code || !match) return;
+    const result = code.check(match[1], event.from.id);
     if (result === 'ignored') return;
     if (result !== 'ok') {
-      await this.bot
-        .sendMessage(message.chat.id, escapeHtml(this.texts.badCode))
+      await this.channel
+        .send(event.chatId, { text: this.texts.badCode }, event.context)
         .catch(() => undefined);
       // Only time replaces the code: wrong guesses by others never use up the owner's.
       if (result === 'expired') {
@@ -599,36 +621,40 @@ export class Relay {
     this.options.pairing = null;
     this.state.update({
       owner: {
-        userId: message.from.id,
-        chatId: message.chat.id,
-        name: message.from.first_name.slice(0, 64),
-        language: message.from.language_code ?? '',
+        userId: this.channel.persistId(event.from.id),
+        chatId: this.channel.persistId(event.chatId),
+        name: event.from.name.slice(0, 64),
+        language: event.from.language,
         pairedAt: Date.now(),
       },
     });
+    const name = this.channel.displayName;
+    const who = event.from.name;
+    const id = event.from.id;
     this.log(
       tr(
-        `已配对：Telegram 用户 ${message.from.first_name}（${message.from.id}）`,
-        `Paired: Telegram user ${message.from.first_name} (${message.from.id})`,
-        `Vinculado: usuario de Telegram ${message.from.first_name} (${message.from.id})`,
-        `Pareado: usuário do Telegram ${message.from.first_name} (${message.from.id})`,
+        `已配对：${spaced(name, 'after')}用户 ${who ? `${who}（${id}）` : id}`,
+        `Paired: ${name} user ${who ? `${who} (${id})` : id}`,
+        `Vinculado: usuario de ${name} ${who ? `${who} (${id})` : id}`,
+        `Pareado: usuário do ${name} ${who ? `${who} (${id})` : id}`,
       ),
     );
-    await this.say(this.texts.paired(`@${this.state.data.botUsername}`));
+    this.replyTo = event.context;
+    // The bot by its handle (Telegram), else its name, else the channel's: never an empty "()".
+    const handle = this.identity.handle;
+    await this.say(this.texts.paired(handle ? `@${handle}` : this.identity.name || name));
     const character = this.state.data.character;
     if (character) await this.say(this.texts.characterIs(character.name, character.npcId));
     else await this.say(this.texts.noCharacter);
   }
 
-  private async command(message: TelegramMessage, text: string) {
-    const [head, ...rest] = text.split(/\s+/);
-    const [name, target] = head.slice(1).split('@');
+  private async command(event: InboundCommand) {
+    const { target, argument } = event;
     if (target && target.toLowerCase() !== this.state.data.botUsername.toLowerCase()) return;
-    const argument = rest.join(' ').trim();
-    switch (name.toLowerCase()) {
+    switch (event.name.toLowerCase()) {
       case 'start':
       case 'help':
-        return void (await this.say(this.texts.help));
+        return void (await this.say(this.texts.help(this.channel.caps.quotes)));
       case 'character':
         if (!argument) {
           const character = this.state.data.character;
@@ -646,14 +672,65 @@ export class Relay {
       case 'budget':
         return this.budget(argument);
       case 'image':
-        return this.imageCommand(message, argument);
+        return this.imageCommand(event, argument);
       case 'report':
-        return this.report(message);
+        return this.report(event);
       case 'stop':
         return this.stopTurn();
       default:
         return void (await this.say(this.texts.unknownCommand));
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The channel's pauses
+
+  /** The channel must not relay for now: chat and new images are answered, commands still work. */
+  private pauseChannel(reason: PauseReason, until: number | null) {
+    const known = this.channelPause?.reason === reason;
+    this.channelPause = { reason, until };
+    if (known) return;
+    const name = this.channel.displayName;
+    this.log(
+      reason === 'contentRefused'
+        ? tr(
+            `${spaced(name, 'after')}多次按内容规则拒绝了回复，转发已暂停（重新启动 relay 后恢复）`,
+            `${name} refused several replies under its content rules: relaying is paused until the relay is restarted`,
+            `${name} rechazó varias respuestas por sus reglas de contenido: la transmisión queda en pausa hasta reiniciar el relay`,
+            `O ${name} recusou várias respostas pelas regras de conteúdo: o encaminhamento fica pausado até o relay ser reiniciado`,
+          )
+        : tr(
+            `${spaced(name, 'after')}暂时不可用，转发已暂停`,
+            `${name} is unavailable for now: relaying is paused`,
+            `${name} no está disponible por ahora: la transmisión queda en pausa`,
+            `O ${name} está indisponível por enquanto: o encaminhamento está pausado`,
+          ),
+    );
+  }
+
+  private resumeChannel() {
+    if (!this.channelPause) return;
+    this.channelPause = null;
+    const name = this.channel.displayName;
+    this.log(
+      tr(
+        `${spaced(name, 'after')}恢复转发`,
+        `Relaying through ${name} resumed`,
+        `Se reanudó la transmisión por ${name}`,
+        `O encaminhamento pelo ${name} foi retomado`,
+      ),
+    );
+  }
+
+  /** Why the channel is paused now; null when it relays (a pause whose time is up ends here). */
+  private channelPaused(): PauseReason | null {
+    const pause = this.channelPause;
+    if (!pause) return null;
+    if (pause.until !== null && Date.now() >= pause.until) {
+      this.resumeChannel();
+      return null;
+    }
+    return pause.reason;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -698,11 +775,14 @@ export class Relay {
     const cid = await conversationId(this.gateway, npcId).catch(() => 'unknown');
     if (cid !== '') return;
     const opening = openingOf(profile);
-    for (const html of renderReply(opening, {
-      characterName: character.name,
-      group: character.group,
-    }))
-      await this.sayHtml(html);
+    const { maxText, format } = this.channel.caps;
+    for (const text of renderReply(
+      opening,
+      { characterName: character.name, group: character.group },
+      maxText,
+      format,
+    ))
+      await this.sayFormatted(text);
     this.state.update({ greeted: [...greeted, npcId].slice(-200) });
   }
 
@@ -804,30 +884,25 @@ export class Relay {
         this.texts.budgetTooHigh(this.ceilingLeft(), this.options.maxSpend),
       ));
     const nonce = randomBytes(4).toString('hex');
-    const sent = await this.say(
-      this.texts.budgetAsk(amount) + '\n' + (await this.priceAndBalance()),
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: this.texts.budgetConfirm(amount), callback_data: `${nonce}:y` },
-              { text: this.texts.cancel, callback_data: `${nonce}:n` },
-            ],
-          ],
-        },
-      },
-    );
-    if (sent) this.buttons.set(nonce, { kind: 'budget', amount, messageId: sent.message_id });
+    const ref = await this.ask({
+      id: nonce,
+      prompt: this.texts.budgetAsk(amount) + '\n' + (await this.priceAndBalance()),
+      options: [
+        { id: 'y', label: this.texts.budgetConfirm(amount) },
+        { id: 'n', label: this.texts.cancel },
+      ],
+      layout: 'row',
+    });
+    if (ref) this.buttons.set(nonce, { kind: 'budget', amount, ref });
   }
 
   // -------------------------------------------------------------------------------------------
   // Reports
 
-  private async report(message: TelegramMessage) {
+  private async report(event: InboundCommand) {
     const character = this.state.data.character;
     if (!character) return void (await this.say(this.texts.noCharacter));
-    const replied = message.reply_to_message?.message_id;
-    const mid = replied ? this.state.replyMid(replied) : this.state.lastReplyMid;
+    const mid = event.replyTo ? this.state.replyMid(event.replyTo) : this.state.lastReplyMid;
     let reasons: FeedbackReason[] = [];
     if (mid) {
       try {
@@ -839,42 +914,37 @@ export class Relay {
       }
     }
     const nonce = randomBytes(4).toString('hex');
-    const keyboard: InlineKeyboard = {
-      inline_keyboard: [
-        ...reasons
-          .slice(0, 8)
-          .map((reason, index) => [{ text: reason.label, callback_data: `${nonce}:${index}` }]),
-        [{ text: this.texts.reportCharacter, callback_data: `${nonce}:c` }],
+    const ref = await this.ask({
+      id: nonce,
+      prompt: mid ? this.texts.reportPick : this.texts.reportNothing(this.channel.caps.quotes),
+      options: [
+        ...reasons.slice(0, 8).map((reason, index) => ({ id: String(index), label: reason.label })),
+        { id: 'c', label: this.texts.reportCharacter },
       ],
-    };
-    const sent = await this.say(mid ? this.texts.reportPick : this.texts.reportNothing, {
-      reply_markup: keyboard,
+      layout: 'column',
     });
-    if (sent)
-      this.buttons.set(nonce, {
-        kind: 'report',
-        npcId: character.npcId,
-        mid,
-        reasons,
-        messageId: sent.message_id,
-      });
+    if (ref) this.buttons.set(nonce, { kind: 'report', npcId: character.npcId, mid, reasons, ref });
   }
 
-  private async callback(query: TelegramCallbackQuery) {
-    const chatId = query.message?.chat.id;
-    if (!this.owns(query.from.id, chatId) || chatId === undefined) {
-      await this.bot.answerCallbackQuery(query.id).catch(() => undefined);
+  /**
+   * A button pressed (Telegram) or a code typed (QQ, WeChat). A question this run did not ask (one
+   * from before a restart included) has expired: answering it does nothing.
+   */
+  private async answer(event: InboundAnswer) {
+    if (!event.chatId || !this.owns(event.from.id, event.chatId)) {
+      await event.ack().catch(() => undefined);
       return;
     }
-    const [nonce, choice] = (query.data ?? '').split(':');
-    const button = this.buttons.get(nonce);
+    this.replyTo = event.context;
+    const button = this.buttons.get(event.questionId);
     if (!button) {
-      await this.bot.answerCallbackQuery(query.id, this.texts.expired).catch(() => undefined);
+      await event.ack('expired').catch(() => undefined);
       return;
     }
-    this.buttons.delete(nonce);
-    await this.bot.answerCallbackQuery(query.id).catch(() => undefined);
-    await this.bot.editMessageReplyMarkup(chatId, button.messageId, null).catch(() => undefined);
+    this.buttons.delete(event.questionId);
+    const choice = event.optionId;
+    await event.ack().catch(() => undefined);
+    await this.channel.closeQuestion(button.ref).catch(() => undefined);
     if (button.kind === 'budget') {
       if (choice !== 'y') return void (await this.say(this.texts.budgetCancelled));
       // Spending may have gone on since the prompt: the ceiling is checked again.
@@ -910,23 +980,20 @@ export class Relay {
         return void (await this.say(this.texts.reportFailed));
       }
       const next = randomBytes(4).toString('hex');
-      const sent = await this.say(this.texts.reportPick, {
-        reply_markup: {
-          inline_keyboard: reasons
-            .slice(0, 8)
-            .map((reason, index) => [{ text: reason.label, callback_data: `${next}:${index}` }]),
-        },
+      const ref = await this.ask({
+        id: next,
+        prompt: this.texts.reportPick,
+        options: reasons
+          .slice(0, 8)
+          .map((reason, index) => ({ id: String(index), label: reason.label })),
+        layout: 'column',
       });
-      if (sent)
-        this.buttons.set(next, {
-          kind: 'reportCharacter',
-          npcId: button.npcId,
-          reasons,
-          messageId: sent.message_id,
-        });
+      if (ref)
+        this.buttons.set(next, { kind: 'reportCharacter', npcId: button.npcId, reasons, ref });
       return;
     }
-    const reason = button.reasons[Number(choice)];
+    // No option named (a button without one) chooses nothing.
+    const reason = choice ? button.reasons[Number(choice)] : undefined;
     if (!reason) return;
     try {
       if (button.kind === 'report')
@@ -967,7 +1034,11 @@ export class Relay {
     if (finished) await finished.catch(() => undefined);
   }
 
-  private async chat(message: TelegramMessage, text: string) {
+  private async chat(event: InboundMessage, text: string) {
+    // A paused channel starts nothing: no price, balance or pending charge is touched.
+    const pause = this.channelPaused();
+    if (pause)
+      return void (await this.say(this.texts.channelPaused(this.channel.displayName, pause)));
     await this.afterBooking();
     if (this.turn) return void (await this.say(this.texts.busy));
     if (this.job) return void (await this.say(this.texts.imageBusy));
@@ -1024,15 +1095,16 @@ export class Relay {
         ),
       );
     else this.state.update({ pending: { before, mode: billing.mode, price, at: Date.now() } });
-    const presenter = new ReplyPresenter(this.bot, message.chat.id, {
+    const presenter = this.channel.presenter({
+      to: event.chatId,
+      context: event.context,
       render: { characterName: character.name, group: character.group },
-      intervalMs: this.options.intervalMs,
-      drafts: this.options.drafts,
       log: (line) => this.log(line),
     });
     const turn: Turn = {
       character,
-      chatId: message.chat.id,
+      chatId: event.chatId,
+      context: event.context,
       streamId: '',
       assistantMid: '',
       cid: '',
@@ -1242,8 +1314,9 @@ export class Relay {
     turn.settled = true;
     await this.finishTurn(turn, async () => {
       if (turn.presenter.isClosed) return;
-      const ids = await turn.presenter.finish(paragraphs, this.texts.emptyReply);
-      for (const id of ids) this.state.rememberReply(id, mid || turn.assistantMid);
+      const refs = await turn.presenter.finish(paragraphs, this.texts.emptyReply);
+      for (const ref of refs)
+        this.state.rememberReply(this.channel.persistId(ref), mid || turn.assistantMid);
     });
   }
 
@@ -1253,15 +1326,16 @@ export class Relay {
     await this.finishTurn(turn, async () => {
       if (turn.presenter.isClosed) return;
       if (paragraphs.length) {
-        const ids = await turn.presenter.finish(paragraphs, this.texts.emptyReply);
-        for (const id of ids) this.state.rememberReply(id, turn.assistantMid);
+        const refs = await turn.presenter.finish(paragraphs, this.texts.emptyReply);
+        for (const ref of refs)
+          this.state.rememberReply(this.channel.persistId(ref), turn.assistantMid);
         await this.say(this.texts.replyFailed(detail));
       } else await turn.presenter.stop(this.texts.replyFailed(detail));
     });
   }
 
   /**
-   * The end of a turn, whatever Telegram does: show it (a failure is logged), book what it cost,
+   * The end of a turn, whatever the channel does: show it (a failure is logged), book what it cost,
    * and only then accept the next message, so a send never overtakes the previous charge.
    */
   private finishTurn(turn: Turn, show: () => Promise<void>): Promise<void> {
@@ -1274,12 +1348,14 @@ export class Relay {
     try {
       await show();
     } catch (error) {
+      const name = this.channel.displayName;
+      const detail = error instanceof ChannelError ? `${error.operation} ${error.code}` : '';
       this.log(
         tr(
-          `回复发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
-          `Couldn't send the reply to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
-          `No se pudo enviar la respuesta a Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
-          `Não foi possível enviar a resposta ao Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `回复发到${spaced(name, 'both')}失败${detail ? `（${detail}）` : ''}`,
+          `Couldn't send the reply to ${name}${detail ? ` (${detail})` : ''}`,
+          `No se pudo enviar la respuesta a ${name}${detail ? ` (${detail})` : ''}`,
+          `Não foi possível enviar a resposta ao ${name}${detail ? ` (${detail})` : ''}`,
         ),
       );
     }
@@ -1305,7 +1381,7 @@ export class Relay {
     if (this.turn === turn) this.turn = null;
   }
 
-  /** `/stop` or the draft's Stop button: stop showing it; the server still finishes (and charges). */
+  /** `/stop` or the channel's Stop control: stop showing it; the server finishes (and charges). */
   private async stopTurn() {
     const turn = this.turn;
     if (!turn && this.job) return this.stopImage();
@@ -1389,18 +1465,18 @@ export class Relay {
   // Images
 
   private keptImage(): ImageRecord | null {
-    return this.records.record<ImageRecord>(IMAGE_RECORDS, this.bot.id);
+    return this.records.record<ImageRecord>(IMAGE_RECORDS, this.channel.scope);
   }
 
   private keepImage(record: ImageRecord | null) {
-    this.records.setRecord(IMAGE_RECORDS, this.bot.id, record);
+    this.records.setRecord(IMAGE_RECORDS, this.channel.scope, record);
   }
 
   /** `/image`, `/image resume`, `/image forget`. */
-  private async imageCommand(message: TelegramMessage, argument: string) {
+  private async imageCommand(event: InboundCommand, argument: string) {
     const action = argument.toLowerCase();
     if (action && action !== 'resume' && action !== 'forget')
-      return void (await this.say(this.texts.imageUsage));
+      return void (await this.say(this.texts.imageUsage(this.channel.caps.quotes)));
     await this.afterBooking();
     if (this.turn) return void (await this.say(this.texts.busy));
     const kept = this.keptImage();
@@ -1451,14 +1527,18 @@ export class Relay {
         true,
       );
     }
+    // A paused channel starts no new picture (one asked for before still resumes or is forgotten).
+    const pause = this.channelPaused();
+    if (pause)
+      return void (await this.say(this.texts.channelPaused(this.channel.displayName, pause)));
     if (kept) {
       const open = await this.settleImage();
       if (open) return void (await this.say(open));
     }
-    return this.newImage(message);
+    return this.newImage(event);
   }
 
-  private async newImage(message: TelegramMessage) {
+  private async newImage(event: InboundCommand) {
     const character = this.state.data.character;
     if (!character) return void (await this.say(this.texts.noCharacter));
     let config;
@@ -1481,7 +1561,7 @@ export class Relay {
       return void (await this.say(this.texts.imageConfigUnavailable));
     }
     if (!config.enabled) return void (await this.say(this.texts.imageDisabled));
-    const anchor = await this.imageAnchor(message, character.npcId);
+    const anchor = await this.imageAnchor(event, character.npcId);
     if (!anchor) return;
     const money = await this.imageMoney(character.npcId, config.cost, config.worstCost);
     if (money.refusal) return void (await this.say(money.refusal));
@@ -1502,7 +1582,7 @@ export class Relay {
       mode: this.state.data.billing.mode,
       price: config.cost,
       worst: config.worstCost ?? config.cost,
-      chatId: message.chat.id,
+      chatId: this.channel.persistId(event.chatId),
       told: false,
       refunding: false,
       at: Date.now(),
@@ -1516,7 +1596,7 @@ export class Relay {
    * be (said why).
    */
   private async imageAnchor(
-    message: TelegramMessage,
+    event: InboundCommand,
     npcId: string,
   ): Promise<{ mid: string; cid: string } | null> {
     let cid = '';
@@ -1535,9 +1615,8 @@ export class Relay {
     }
     const isReply = (item: ImMessage) =>
       item.senderType === SenderType.assistant && item.semantic === Semantic.dialogueTurn;
-    const replied = message.reply_to_message?.message_id;
-    if (replied) {
-      const mid = this.state.replyMid(replied);
+    if (event.replyTo) {
+      const mid = this.state.replyMid(event.replyTo);
       const known = recent.find((item) => item.mid === mid);
       if (!mid || (known && !isReply(known))) {
         await this.say(this.texts.imageNotReply);
@@ -1916,7 +1995,7 @@ export class Relay {
 
   /**
    * The delivered picture to the owner: downloaded here (fresh links from the task, else the
-   * message's) and uploaded to Telegram, never as a link. Only this task's own message counts.
+   * message's) and uploaded to the channel, never as a link. Only this task's own message counts.
    */
   private async forwardImage(
     record: ImageRecord,
@@ -1939,7 +2018,7 @@ export class Relay {
       }
     }
     const owner = this.state.data.owner;
-    if (!owner || owner.chatId !== record.chatId) {
+    if (!owner || String(owner.chatId) !== String(record.chatId)) {
       this.log(
         tr(
           '配对的主人变了：这张图片没有转发',
@@ -1960,17 +2039,20 @@ export class Relay {
           'Não foi possível baixar a imagem',
         ),
       );
-      return void (await this.say(this.texts.imageForwardFailed));
+      return void (await this.say(this.texts.imageForwardFailed(this.channel.displayName)));
     }
-    await this.bot.sendChatAction(owner.chatId, 'upload_photo').catch(() => undefined);
+    const chat = String(owner.chatId);
+    await this.channel.typing(chat, 'photo', this.replyTo).catch(() => undefined);
     try {
-      const sent = await this.sendPhoto(
-        owner.chatId,
+      const sent = await this.channel.sendPhoto(
+        chat,
         picture,
-        escapeHtml(this.texts.imageCaption(record.name)),
+        this.texts.imageCaption(record.name),
+        this.replyTo,
       );
       const mid = task.resultMid || message?.mid || '';
-      if (mid) this.state.rememberReply(sent.message_id, mid);
+      if (mid && sent.status === 'sent' && sent.refs.length)
+        this.state.rememberReply(this.channel.persistId(sent.refs[0]), mid);
       this.log(
         tr(
           `已转发一张「${record.name}」的图片`,
@@ -1980,29 +2062,31 @@ export class Relay {
         ),
       );
     } catch (error) {
+      const name = this.channel.displayName;
+      const detail = error instanceof ChannelError ? `${error.operation} ${error.code}` : '';
       this.log(
         tr(
-          `图片发到 Telegram 失败${error instanceof TelegramError ? `（${error.method} ${error.code}）` : ''}`,
-          `Couldn't send the image to Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
-          `No se pudo enviar la imagen a Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
-          `Não foi possível enviar a imagem ao Telegram${error instanceof TelegramError ? ` (${error.method} ${error.code})` : ''}`,
+          `图片发到${spaced(name, 'both')}失败${detail ? `（${detail}）` : ''}`,
+          `Couldn't send the image to ${name}${detail ? ` (${detail})` : ''}`,
+          `No se pudo enviar la imagen a ${name}${detail ? ` (${detail})` : ''}`,
+          `Não foi possível enviar a imagem ao ${name}${detail ? ` (${detail})` : ''}`,
         ),
       );
-      await this.say(this.texts.imageForwardFailed);
+      await this.say(this.texts.imageForwardFailed(name));
     }
   }
 
-  /** The first link that gives a picture Telegram takes (10 MB at most); expired ones skipped. */
+  /** The first link with a picture the channel takes (Telegram: 10 MB); expired ones skipped. */
   private async downloadImage(
     task: ChatImageTask,
     message: ImMessage | null,
-  ): Promise<TelegramFile | null> {
+  ): Promise<OutgoingFile | null> {
+    const maxBytes = this.channel.caps.maxPhotoBytes;
     const now = Date.now();
     const fresh = (expires: number) => !expires || expires > now + 5000;
     const links: string[] = [];
     for (const asset of task.assets)
-      if (fresh(asset.accessExpiresAtMs) && asset.sizeBytes <= MAX_PHOTO_BYTES)
-        links.push(asset.url);
+      if (fresh(asset.accessExpiresAtMs) && asset.sizeBytes <= maxBytes) links.push(asset.url);
     for (const image of message?.content.images ?? [])
       if (fresh(image.accessExpiresAtMs)) links.push(image.url);
     for (const asset of task.assets)
@@ -2011,7 +2095,7 @@ export class Relay {
       if (fresh(image.accessExpiresAtMs)) links.push(image.thumbnailUrl);
     for (const link of new Set(links.filter(Boolean))) {
       try {
-        const { bytes } = await download(link, { maxBytes: MAX_PHOTO_BYTES, fetcher: timedFetch });
+        const { bytes } = await download(link, { maxBytes, fetcher: timedFetch });
         const mime = sniffMime(bytes);
         if (mime) return { bytes, mime, name: `yomi-${task.taskId}.${extensionOf(mime)}` };
       } catch {
@@ -2019,17 +2103,6 @@ export class Relay {
       }
     }
     return null;
-  }
-
-  /** `sendPhoto`, once more after Telegram's flood wait (a refused upload was not sent). */
-  private async sendPhoto(chatId: number, picture: TelegramFile, caption: string) {
-    try {
-      return await this.bot.sendPhoto(chatId, picture, caption);
-    } catch (error) {
-      if (!(error instanceof TelegramError) || error.code !== 429) throw error;
-      await sleep(Math.min(error.retryAfter || 1, 30) * 1000, this.abort.signal);
-      return this.bot.sendPhoto(chatId, picture, caption);
-    }
   }
 
   /** `/stop` while a picture is awaited: stop waiting; the server still makes (and charges) it. */
@@ -2172,7 +2245,8 @@ export class Relay {
     if (credential.userId !== this.userId) return this.otherAccount();
     if (this.resumeTimer) clearInterval(this.resumeTimer);
     this.resumeTimer = null;
-    if (this.gate === 'signedOut') this.gate = '';
+    // Only the sign-in came back: a channel the server has not confirmed stays off.
+    if (this.gate === 'signedOut') this.gate = this.policyGated ? 'disabled' : '';
     this.log(
       tr(
         'Yomi 登录已恢复',
@@ -2198,7 +2272,7 @@ export class Relay {
         'A conta do Yomi conectada nesta máquina mudou, relay parado.',
       ),
     );
-    void this.say(this.texts.otherAccount);
+    void this.say(this.texts.otherAccount(this.options.rerunCommand ?? 'yomi relay --telegram'));
     this.abort.abort();
   }
 
@@ -2218,39 +2292,67 @@ export class Relay {
   // -------------------------------------------------------------------------------------------
   // Talking to the owner
 
-  /** Plain text to the owner (escaped). Null when it could not be sent. */
-  private say(text: string, extra: Record<string, unknown> = {}) {
-    return this.sayHtml(escapeHtml(text), extra);
+  /** Plain text to the owner (the channel escapes it); a failure is logged. */
+  private say(text: string) {
+    return this.deliver({ text });
   }
 
-  private async sayHtml(
-    html: string,
-    extra: Record<string, unknown> = {},
-  ): Promise<TelegramMessage | null> {
+  /** Text already in the channel's format (a rendered opening). */
+  private sayFormatted(text: string) {
+    return this.deliver({ text, formatted: true });
+  }
+
+  private async deliver(message: OutgoingText): Promise<void> {
     const owner = this.state.data.owner;
-    if (!owner || !html) return null;
+    if (!owner || !message.text) return;
     try {
-      return await this.bot.sendMessage(owner.chatId, html, extra);
+      await this.channel.send(String(owner.chatId), message, this.replyTo);
     } catch (error) {
-      if (error instanceof TelegramError && error.blocked)
-        this.log(
-          tr(
-            '主人屏蔽了 bot，消息发不出去',
-            "The owner blocked the bot, messages can't be sent",
-            'El dueño bloqueó el bot, no se pueden enviar mensajes',
-            'O dono bloqueou o bot, não é possível enviar mensagens',
-          ),
-        );
-      else
-        this.log(
-          tr(
-            `发给 Telegram 失败${error instanceof TelegramError ? `（${error.code}）` : ''}`,
-            `Couldn't send to Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
-            `No se pudo enviar a Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
-            `Não foi possível enviar ao Telegram${error instanceof TelegramError ? ` (${error.code})` : ''}`,
-          ),
-        );
+      this.sendFailed(error);
+    }
+  }
+
+  /** A question to the owner (buttons or a typed code); null when it could not be shown. */
+  private async ask(question: Question): Promise<AskRef | null> {
+    const owner = this.state.data.owner;
+    if (!owner || !question.prompt) return null;
+    try {
+      return await this.channel.ask(String(owner.chatId), question, this.replyTo);
+    } catch (error) {
+      this.sendFailed(error);
       return null;
     }
+  }
+
+  private sendFailed(error: unknown) {
+    const name = this.channel.displayName;
+    if (error instanceof ChannelError && error.reason === 'blocked')
+      this.log(
+        tr(
+          '主人屏蔽了 bot，消息发不出去',
+          "The owner blocked the bot, messages can't be sent",
+          'El dueño bloqueó el bot, no se pueden enviar mensajes',
+          'O dono bloqueou o bot, não é possível enviar mensagens',
+        ),
+      );
+    // The channel tells the owner itself (once a run), and pauses after repeated refusals.
+    else if (error instanceof ChannelError && error.reason === 'contentRefused')
+      this.log(
+        tr(
+          `${spaced(name, 'after')}按内容规则拒绝了一条消息`,
+          `${name} refused a message under its content rules`,
+          `${name} rechazó un mensaje por sus reglas de contenido`,
+          `O ${name} recusou uma mensagem pelas regras de conteúdo`,
+        ),
+      );
+    else
+      this.log(
+        tr(
+          `发给${spaced(name, 'both')}失败${error instanceof ChannelError ? `（${error.code}）` : ''}`,
+          `Couldn't send to ${name}${error instanceof ChannelError ? ` (${error.code})` : ''}`,
+          `No se pudo enviar a ${name}${error instanceof ChannelError ? ` (${error.code})` : ''}`,
+          `Não foi possível enviar ao ${name}${error instanceof ChannelError ? ` (${error.code})` : ''}`,
+        ),
+      );
   }
 }

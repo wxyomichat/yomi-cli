@@ -5,22 +5,34 @@ import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { tr } from '../core/i18n.js';
+import type { ChannelKind } from './channels/types.js';
 
 /**
- * `yomi relay --telegram --install-service`: keep the relay running for this user, as a launchd
+ * `yomi relay … --install-service`: keep the relay running for this user, as a launchd
  * LaunchAgent (macOS, `gui/<uid>` domain, so it can read the login keychain while the user is
  * logged in) or a systemd user unit (Linux; Secret Service needs the user's session bus, so the
  * relay stops cleanly when the keyring is locked instead of falling back to a file).
  * The unit holds no secrets: the relay reads its tokens from the keychain when it starts.
+ * Each channel has its own names (Telegram's are the ones it always had: `…relay.<env>`,
+ * `yomi-relay-<env>.service`; QQ `…relay.qq-<env>`, WeChat `…relay.wechat-<env>`).
  */
 
+/** Channel names as unit files write them (ASCII). */
+const SERVICE_NAMES: Record<ChannelKind, string> = {
+  telegram: 'Telegram',
+  qq: 'QQ',
+  wechat: 'WeChat',
+};
+
 export type ServiceOptions = {
-  /** `test`, `prod` or `<env>@<origin>` (accountKey): one service per environment. */
+  /** `test`, `prod` or `<env>@<origin>` (accountKey): one service per environment and channel. */
   account: string;
+  /** Which relay this is; Telegram when absent. */
+  channel?: ChannelKind;
   /** Absolute paths: the Node binary and the CLI entry. */
   node: string;
   script: string;
-  /** Arguments after the script: `relay --telegram --env prod …`. */
+  /** Arguments after the script: `relay --telegram --env prod …`, `relay --channel qq …`. */
   args: string[];
   /** Plain settings the relay needs (never tokens): YOMI_CONFIG_DIR, YOMI_LANG, LANG. */
   environment: Record<string, string>;
@@ -73,7 +85,9 @@ export function servicePlan(options: ServiceOptions): ServicePlan {
   const platform = options.platform ?? process.platform;
   const home = options.home ?? homedir();
   const uid = options.uid ?? userInfo().uid;
-  const name = suffix(options.account);
+  const channel = options.channel ?? 'telegram';
+  const name =
+    channel === 'telegram' ? suffix(options.account) : `${channel}-${suffix(options.account)}`;
   const log = join(options.logDir, `relay-${name}.log`);
   if (platform === 'darwin') {
     const label = `io.yomichat.yomi-cli.relay.${name}`;
@@ -132,7 +146,7 @@ ${environment}
       .map(([key, value]) => `Environment=${systemdWord(`${key}=${value}`, false)}`)
       .join('\n');
     const content = `[Unit]
-Description=Yomi CLI Telegram relay (${options.account})
+Description=Yomi CLI ${SERVICE_NAMES[channel]} relay (${options.account})
 Wants=network-online.target
 After=network-online.target
 

@@ -1,17 +1,18 @@
 import { tr } from '../core/i18n.js';
 import type { ImParagraph } from '../im/models.js';
+import type { ReplyPresenter } from './channels/types.js';
 import { renderReply, type RenderOptions } from './render.js';
 import { type TelegramBot, TelegramError } from './telegram.js';
 
 /**
- * One reply as it streams into a Telegram private chat. Only reviewed paragraphs come in; each
- * update replaces the last (they are cumulative). By default it streams a draft
- * (`sendMessageDraft`, Bot API 9.5+): an empty one shows "Thinking…" at once, the user gets a
- * Stop button (`can_stop`), and the finished reply goes out as real messages (`sendMessage`
- * clears the draft). Where drafts are refused it sends a message and edits it instead. Either way
- * there is at most one call per `intervalMs` in the chat (Telegram allows about 20 per 5 s and 40
- * per 30 s per chat, typing included), a 429 waits its `retry_after`, and HTML Telegram cannot
- * parse is sent again as plain text.
+ * Telegram's presenter (drafts, then edits): one reply as it streams into the owner's private
+ * chat. Only reviewed paragraphs come in; each update replaces the last (they are cumulative). By
+ * default it streams a draft (`sendMessageDraft`, Bot API 9.5+): an empty one shows "Thinking…"
+ * at once, the user gets a Stop button (`can_stop`), and the finished reply goes out as real
+ * messages (`sendMessage` clears the draft). Where drafts are refused it sends a message and edits
+ * it instead. Either way there is at most one call per `intervalMs` in the chat (Telegram allows
+ * about 20 per 5 s and 40 per 30 s per chat, typing included), a 429 waits its `retry_after`, and
+ * HTML Telegram cannot parse is sent again as plain text.
  */
 
 export type PresenterOptions = {
@@ -45,7 +46,7 @@ export function nextDraftId(): number {
   return drafts;
 }
 
-export class ReplyPresenter {
+export class TelegramPresenter implements ReplyPresenter {
   readonly draftId = nextDraftId();
   private latest: readonly ImParagraph[] = [];
   private version = 0;
@@ -88,8 +89,13 @@ export class ReplyPresenter {
     this.schedule();
   }
 
+  /** What the draft's Stop button names (`stopped_message_generation.draft_id`). */
+  get streamRef(): string {
+    return String(this.draftId);
+  }
+
   /** Sends the finished reply; resolves with the Telegram message ids that hold it. */
-  async finish(paragraphs: readonly ImParagraph[], emptyText: string): Promise<number[]> {
+  async finish(paragraphs: readonly ImParagraph[], emptyText: string): Promise<string[]> {
     this.close();
     await this.running;
     const messages = renderReply(paragraphs, this.options.render);
@@ -109,7 +115,7 @@ export class ReplyPresenter {
     if (!this.useDrafts)
       for (const extra of this.edited.slice(messages.length))
         await this.bot.deleteMessage(this.chatId, extra.id).catch(() => this.edit(extra.id, '…'));
-    return ids;
+    return ids.map(String);
   }
 
   /** Stops showing this reply (what was shown stays); `note` is sent after it. */

@@ -1,7 +1,9 @@
 /**
  * Strips credentials from anything the CLI may print or log: the `token` query of the long
- * connection, `X-Token`, and token fields in JSON or form bodies. Debug output goes through this;
- * tokens are never printed on purpose.
+ * connection, `X-Token` and `Authorization` headers, and secret fields in JSON or form bodies
+ * (Yomi's tokens; QQ's AppSecret and access token; WeChat iLink's bot token, context token,
+ * typing ticket, image keys and upload parameters, and the login QR, whose holder can collect
+ * the bot token). Debug output goes through this; secrets are never printed on purpose.
  */
 const FIELDS = [
   'token',
@@ -15,6 +17,24 @@ const FIELDS = [
   'x-token',
   'X-Token',
   'state',
+  'secret',
+  'access_token',
+  'clientSecret',
+  'client_secret',
+  'bot_token',
+  'botToken',
+  'context_token',
+  'typing_ticket',
+  'aeskey',
+  'aes_key',
+  'encrypt_query_param',
+  'upload_param',
+  'qrcode',
+  'qrcode_img_content',
+  'verify_code',
+  'Authorization',
+  // A Headers object writes its names in lower case (in JSON, too).
+  'authorization',
 ];
 
 /** A Telegram bot token (`<bot id>:<secret>`), alone or in a Bot API URL path (`/bot<token>/`). */
@@ -32,8 +52,8 @@ export function redact(text: string): string {
       .replace(new RegExp(`("${name}"\\s*:\\s*")[^"]*(")`, 'g'), '$1***$2')
       // query or form: field=value
       .replace(new RegExp(`(^|[?&\\s])(${name}=)[^&\\s"]*`, 'gm'), '$1$2***')
-      // header: field: value
-      .replace(new RegExp(`(^|\\n)(${name}:\\s*)\\S+`, 'gi'), '$1$2***');
+      // header: field: value, to the end of the line (`Authorization: Bearer <token>` is two words)
+      .replace(new RegExp(`(^|\\n)(${name}:\\s*)[^\\r\\n]+`, 'gi'), '$1$2***');
   }
   return result;
 }
