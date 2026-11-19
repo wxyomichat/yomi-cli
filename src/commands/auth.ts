@@ -1,9 +1,13 @@
 import { type AuthorizeRequest, beginBrowserAuthorization, openBrowser } from '../auth/browser.js';
-import { CallbackTimeout } from '../auth/loopback.js';
+import { CallbackTimeout, type CodeOutcome } from '../auth/loopback.js';
 import {
   DeactivationPending,
+  exchangeAuthCode,
+  ExchangeCode,
   exchangeFirebaseToken,
+  type Profile,
   readProfile,
+  revokeSession,
   signOut,
 } from '../auth/session.js';
 import { ApiError, type Gateway, NotSignedIn, refreshLockPath } from '../core/api.js';
@@ -202,8 +206,13 @@ export async function login(context: Context, options: LoginOptions) {
     const old = replaced ?? previous;
     if (old && old.refreshToken !== credential.refreshToken) {
       // Revoked on its own gateway: a refresh this needs never touches the store.
-      const revoked = await signOut(context.gateway.detached(old));
-      if (!revoked)
+      const revoked = await revokeSession(context.gateway.detached(old));
+      // A refused refresh token (`ended`) is expected only when the server itself replaced the
+      // old session: a one-time code of the same account from this machine. Otherwise (another
+      // account, an older page's token) it may be a pair another process rotated without storing
+      // it, and that session lives on: said, as for a failure.
+      const replacedByServer = accepted.via === 'code' && old.userId === credential.userId;
+      if (revoked === 'failed' || (revoked === 'ended' && !replacedByServer))
         warn(
           io,
           tr(
@@ -220,10 +229,10 @@ export async function login(context: Context, options: LoginOptions) {
         io,
         'green',
         tr(
-          `✓ 已登录${describeAccount(credential)}`,
-          `✓ Signed in with ${describeAccount(credential)}`,
-          `✓ Sesión iniciada con ${describeAccount(credential)}`,
-          `✓ Login feito com ${describeAccount(credential)}`,
+          `✓ 已登录${describeAccount(credential, accepted.uid)}`,
+          `✓ Signed in with ${describeAccount(credential, accepted.uid)}`,
+          `✓ Sesión iniciada con ${describeAccount(credential, accepted.uid)}`,
+          `✓ Login feito com ${describeAccount(credential, accepted.uid)}`,
         ),
       ),
     );
@@ -256,8 +265,13 @@ export async function login(context: Context, options: LoginOptions) {
   }
 }
 
-/** The account as the server names it: name, user ID and email (never what the page posted). */
-function describeAccount(credential: Credential): string {
+/**
+ * The account as the server names it, never as the page posted it: name, user ID, the UID people
+ * see in the app (`uid`, when it differs from the user ID) and the email (an older page's sign-in
+ * only). The name is the owner's to choose; the UID is what tells two accounts of the same name
+ * apart, as the email did before codes.
+ */
+function describeAccount(credential: Credential, uid = ''): string {
   const name = credential.displayName
     ? tr(
         `「${terminalText(credential.displayName)}」`,
@@ -266,6 +280,15 @@ function describeAccount(credential: Credential): string {
         ` "${terminalText(credential.displayName)}"`,
       )
     : '';
+  const shownId =
+    uid && uid !== credential.userId
+      ? tr(
+          `，UID ${terminalText(uid)}`,
+          `, UID ${terminalText(uid)}`,
+          `, UID ${terminalText(uid)}`,
+          `, UID ${terminalText(uid)}`,
+        )
+      : '';
   const email = credential.email
     ? tr(
         `，${terminalText(credential.email)}`,
@@ -275,10 +298,10 @@ function describeAccount(credential: Credential): string {
       )
     : '';
   return tr(
-    `账号${name}（user_id ${credential.userId}${email}）`,
-    `account${name} (user_id ${credential.userId}${email})`,
-    `la cuenta${name} (user_id ${credential.userId}${email})`,
-    `a conta${name} (user_id ${credential.userId}${email})`,
+    `账号${name}（user_id ${credential.userId}${shownId}${email}）`,
+    `account${name} (user_id ${credential.userId}${shownId}${email})`,
+    `la cuenta${name} (user_id ${credential.userId}${shownId}${email})`,
+    `a conta${name} (user_id ${credential.userId}${shownId}${email})`,
   );
 }
 
@@ -306,17 +329,171 @@ function refusalOf(error: unknown): string {
     : String(failure.code);
 }
 
+function couldNotExchange(refusal: string): string {
+  return tr(
+    `网页交来的凭证没能换出会话（${refusal}）。`,
+    `The credentials from the web could not be exchanged for a session (${refusal}).`,
+    `No se pudieron canjear las credenciales de la web por una sesión (${refusal}).`,
+    `Não foi possível trocar as credenciais da web por uma sessão (${refusal}).`,
+  );
+}
+
+/**
+ * What a failed exchange means for the login: `end` (the error to end it with) or keep waiting
+ * (what to `say`, by default `couldNotExchange`), and the page the browser is left on.
+ */
+type Verdict = { end?: Error; say?: string; page: CodeOutcome };
+
+/**
+ * A one-time code that did not become a session. The code is spent either way, so it is never
+ * sent again: a refused code waits for the person to authorize again on the page (a new code for
+ * the same login), as does an account in its deletion cool-down (as before codes: anyone with
+ * such an account could otherwise end a login whose link they read). A banned or deleted account,
+ * a refusal of the request itself and a server failure end the login, as does a request that did
+ * not get through or that the gateway turned away (the server may have spent the code without the
+ * CLI hearing, or never saw the request: authorizing again would not help).
+ */
+function codeVerdict(error: unknown): Verdict {
+  if (error instanceof DeactivationPending)
+    return {
+      say: tr(
+        `网页授权的账号正在注销冷静期，没有换出会话（如果是你的账号，请先在 App 或网页处理）。终端继续等待：换个账号后回到授权页再点一次授权，或按 Ctrl+C 结束。`,
+        `The account the web authorized is in its deletion cool-down period, so no session was set up (if it is yours, deal with it in the app or on the web first). Still waiting: switch accounts and click authorize again on the authorization page, or press Ctrl+C to stop.`,
+        `La cuenta que autorizó la web está en su periodo de espera de eliminación, así que no se configuró ninguna sesión (si es tuya, resuélvelo primero en la app o en la web). Se sigue esperando: cambia de cuenta y haz clic en autorizar otra vez en la página de autorización, o presiona Ctrl+C para terminar.`,
+        `A conta que a web autorizou está no período de espera da exclusão, então nenhuma sessão foi configurada (se for sua, resolva isso primeiro no app ou na web). A espera continua: troque de conta e clique em autorizar de novo na página de autorização, ou pressione Ctrl+C para encerrar.`,
+      ),
+      page: 'refused',
+    };
+  if (!(error instanceof ApiError)) return { end: error as Error, page: 'ended' };
+  const refusal = refusalOf(error);
+  if (error.path !== 'account/exchange_cli_auth_code')
+    // The read-back after the exchange: a refusal there waits, as it always has.
+    return error.code === ApiError.transport ? { end: error, page: 'ended' } : { page: 'retry' };
+  switch (error.code) {
+    case ApiError.unauthorized:
+      // An anonymous route the gateway turned away: the request never reached the account
+      // service, so a new code from the page would meet the same answer.
+      return {
+        end: new Error(
+          tr(
+            `Yomi 网关拒绝了换取会话的请求（${refusal}），没有换出会话：请稍后重新运行 yomi login`,
+            `The Yomi gateway turned down the request for the session (${refusal}), so no session was set up: run yomi login again later`,
+            `La pasarela de Yomi rechazó la solicitud de la sesión (${refusal}), así que no se configuró ninguna sesión: ejecuta yomi login de nuevo más tarde`,
+            `O gateway do Yomi recusou a solicitação da sessão (${refusal}), então nenhuma sessão foi configurada: execute yomi login novamente mais tarde`,
+          ),
+        ),
+        page: 'rerun',
+      };
+    case ApiError.transport: {
+      const reason = cleanReason(error.message);
+      return {
+        end: new Error(
+          tr(
+            `换取会话的请求没有完成（${reason}），网页交来的授权码可能已经用掉了：请重新运行 yomi login`,
+            `The request for the session did not complete (${reason}), and the authorization code from the web may already be used up: run yomi login again`,
+            `La solicitud de la sesión no se completó (${reason}), y puede que el código de autorización de la web ya se haya usado: ejecuta yomi login de nuevo`,
+            `A solicitação da sessão não foi concluída (${reason}), e o código de autorização da web pode já ter sido usado: execute yomi login novamente`,
+          ),
+        ),
+        page: 'rerun',
+      };
+    }
+    case ExchangeCode.codeInvalid:
+      return {
+        say: tr(
+          `网页交来的授权码没有生效（无效、已用过或已过期；${refusal}）。终端继续等待：回到授权页再点一次授权。`,
+          `The authorization code from the web did not work (invalid, already used or expired; ${refusal}). Still waiting: go back to the authorization page and click authorize again.`,
+          `El código de autorización de la web no funcionó (no válido, ya usado o caducado; ${refusal}). Se sigue esperando: vuelve a la página de autorización y haz clic en autorizar otra vez.`,
+          `O código de autorização da web não funcionou (inválido, já usado ou expirado; ${refusal}). A espera continua: volte à página de autorização e clique em autorizar de novo.`,
+        ),
+        page: 'retry',
+      };
+    case ExchangeCode.rateLimited:
+      return {
+        say: tr(
+          `授权太频繁，服务端暂时不接受（${refusal}）。终端继续等待：稍等片刻，再回到授权页点一次授权。`,
+          `Too many authorizations; the server is not taking more for now (${refusal}). Still waiting: wait a little, then go back to the authorization page and click authorize again.`,
+          `Demasiadas autorizaciones; el servidor no acepta más por ahora (${refusal}). Se sigue esperando: espera un poco y luego vuelve a la página de autorización y haz clic en autorizar otra vez.`,
+          `Autorizações demais; o servidor não está aceitando mais por enquanto (${refusal}). A espera continua: espere um pouco, depois volte à página de autorização e clique em autorizar de novo.`,
+        ),
+        page: 'later',
+      };
+    case ExchangeCode.banned:
+      return {
+        end: new Error(
+          tr(
+            `这个账号已被封禁，不能登录 Yomi CLI（${refusal}）`,
+            `This account is banned and cannot sign in to Yomi CLI (${refusal})`,
+            `Esta cuenta está suspendida y no puede iniciar sesión en Yomi CLI (${refusal})`,
+            `Esta conta está banida e não pode entrar no Yomi CLI (${refusal})`,
+          ),
+        ),
+        page: 'ended',
+      };
+    case ExchangeCode.accountMissing:
+      return {
+        end: new Error(
+          tr(
+            `这个账号不存在或已注销（${refusal}）`,
+            `This account does not exist or has been deleted (${refusal})`,
+            `Esta cuenta no existe o se eliminó (${refusal})`,
+            `Esta conta não existe ou foi excluída (${refusal})`,
+          ),
+        ),
+        page: 'ended',
+      };
+    case ExchangeCode.invalidParams:
+      return {
+        end: new Error(
+          tr(
+            `服务端说换取会话的请求参数不对（${refusal}）。这是 Yomi CLI 的问题，请连同这行信息反馈。`,
+            `The server says the request for the session has invalid parameters (${refusal}). This is a Yomi CLI bug; please report it with this line.`,
+            `El servidor dice que la solicitud de la sesión tiene parámetros no válidos (${refusal}). Es un error de Yomi CLI; repórtalo junto con esta línea.`,
+            `O servidor diz que a solicitação da sessão tem parâmetros inválidos (${refusal}). É um bug do Yomi CLI; informe-o junto com esta linha.`,
+          ),
+        ),
+        page: 'ended',
+      };
+    case ExchangeCode.internal:
+      return {
+        end: new Error(
+          tr(
+            `服务端出错，没有换出会话（${refusal}）；请稍后重新运行 yomi login`,
+            `The server failed and no session was set up (${refusal}); run yomi login again later`,
+            `El servidor falló y no se configuró ninguna sesión (${refusal}); ejecuta yomi login de nuevo más tarde`,
+            `O servidor falhou e nenhuma sessão foi configurada (${refusal}); execute yomi login novamente mais tarde`,
+          ),
+        ),
+        page: 'ended',
+      };
+    default:
+      // Not in the protocol: the code is spent all the same, so wait for a new one as v1 did.
+      return { page: 'retry' };
+  }
+}
+
+/** A Firebase token (old authorize page) that did not become a session: as before codes. */
+function tokenVerdict(error: unknown): Verdict {
+  const refused =
+    (error instanceof ApiError && error.code !== ApiError.transport) ||
+    error instanceof DeactivationPending;
+  return refused ? { page: 'retry' } : { end: error as Error, page: 'ended' };
+}
+
 /** Server refusals reported one by one; after these, one line says the rest are not. */
 const REFUSALS_REPORTED = 3;
 
 /**
- * Waits for the page's answer and, for a token, tries the session out on a gateway of its own
- * (nothing stored until the person confirms). In a terminal it asks whether that is their
- * account, and whether a cancellation from the page was theirs. A token turned down, a session
- * the server will not give, or a cancellation that was not theirs is revoked or dropped, and the
- * wait goes on for the real answer on the same port. So a callback forged by someone who learned
- * the state can neither sign the CLI into another account nor end the login and take over the
- * port. Without a terminal there is nobody to ask: the first answer is taken.
+ * Waits for the page's answer and, for a one-time code (or, from an older page, a Firebase
+ * token), tries the session out on a gateway of its own (nothing stored until the person
+ * confirms). In a terminal it asks whether that is their account, and whether a cancellation from
+ * the page was theirs. A session turned down, a code or token the server will not take, or a
+ * cancellation that was not theirs is revoked or dropped, and the wait goes on for the real answer
+ * on the same port. So a callback forged by someone who learned the state can neither sign the CLI
+ * into another account nor end the login and take over the port. A banned or deleted account, a
+ * refusal of the request (a CLI bug), a server failure and an exchange that did not get through
+ * end the login (see `codeVerdict`). Without a terminal there is nobody to ask: the first answer
+ * is taken. Also says how the session came (`via`) and the account's UID, for the summary.
  */
 async function acceptedSession(
   context: Context,
@@ -326,11 +503,15 @@ async function acceptedSession(
     ask: (question: string) => Promise<boolean | null>;
     signal: AbortSignal;
   },
-): Promise<{ credential: Credential; gateway: Gateway }> {
+): Promise<{ credential: Credential; gateway: Gateway; via: 'code' | 'token'; uid: string }> {
   const { io } = context;
   const { ask, signal } = options;
   let refusals = 0;
   let lastRefusal = '';
+  /** An authorize page from before one-time codes answered: said once. */
+  let oldPage = false;
+  /** Codes already sent: the server spent each on first sight, so none is sent again. */
+  const spent = new Set<string>();
   const cancelledError = () =>
     new Error(
       tr('已取消登录', 'Sign-in cancelled', 'Inicio de sesión cancelado', 'Login cancelado'),
@@ -340,6 +521,23 @@ async function acceptedSession(
     if (!signal.aborted) return;
     if (candidate.credential) await signOut(candidate);
     throw cancelledError();
+  };
+  /** A callback that did not become a session: said (the first few), and the wait goes on. */
+  const refused = (reason: string, message: string) => {
+    refusals += 1;
+    lastRefusal = reason;
+    if (refusals <= REFUSALS_REPORTED) warn(io, message);
+    else if (refusals === REFUSALS_REPORTED + 1)
+      warn(
+        io,
+        tr(
+          '还有更多换不出会话的回调，之后不再逐条提示。',
+          'More callbacks could not be exchanged for a session; they will no longer be reported one by one.',
+          'Hay más callbacks que no se pudieron canjear por una sesión; ya no se informarán uno por uno.',
+          'Há mais callbacks que não puderam ser trocados por uma sessão; eles não serão mais informados um a um.',
+        ),
+      );
+    waitAgain();
   };
   const waitAgain = () => {
     request.resume();
@@ -432,6 +630,32 @@ async function acceptedSession(
       waitAgain();
       continue;
     }
+    if (result.kind === 'code' && spent.has(result.code)) {
+      result.answer('retry');
+      const reason = tr('已用过', 'already used', 'ya usado', 'já usado');
+      refused(
+        reason,
+        tr(
+          '网页交来的授权码这次登录已经用过，没有再发送。终端继续等待：回到授权页再点一次授权。',
+          'The authorization code from the web was already used in this sign-in and was not sent again. Still waiting: go back to the authorization page and click authorize again.',
+          'El código de autorización de la web ya se usó en este inicio de sesión y no se volvió a enviar. Se sigue esperando: vuelve a la página de autorización y haz clic en autorizar otra vez.',
+          'O código de autorização da web já foi usado neste login e não foi enviado de novo. A espera continua: volte à página de autorização e clique em autorizar de novo.',
+        ),
+      );
+      continue;
+    }
+    if (result.kind === 'token' && !oldPage) {
+      oldPage = true;
+      warn(
+        io,
+        tr(
+          '网页还是旧版（交来的是 Firebase 登录凭证，不是一次性授权码）：这次建立的 CLI 会话仍可能在网页重新登录时被结束，到时再运行 yomi login 即可。',
+          'The web page is still the old version (it sent a Firebase sign-in credential, not a one-time code): the CLI session set up now may still be ended when someone signs in to the web again; run yomi login again then.',
+          'La página web todavía es la versión anterior (envió una credencial de inicio de sesión de Firebase, no un código de un solo uso): la sesión de la CLI que se configure ahora todavía puede terminar cuando alguien vuelva a iniciar sesión en la web; en ese caso ejecuta yomi login de nuevo.',
+          'A página web ainda é a versão antiga (ela enviou uma credencial de login do Firebase, não um código de uso único): a sessão da CLI configurada agora ainda pode ser encerrada quando alguém entrar na web de novo; nesse caso execute yomi login novamente.',
+        ),
+      );
+    }
     say(
       io,
       tr(
@@ -443,48 +667,39 @@ async function acceptedSession(
     );
     const candidate = context.gateway.detached(null);
     try {
-      await exchangeFirebaseToken(candidate, result.idToken, context.idfv, signal);
+      if (result.kind === 'code') {
+        // Sent once: the server spends the code on first sight, whatever comes of it.
+        const { state, codeVerifier } = request.proof();
+        spent.add(result.code);
+        await exchangeAuthCode(
+          candidate,
+          { code: result.code, codeVerifier, state, port: request.port, idfv: context.idfv },
+          signal,
+        );
+      } else await exchangeFirebaseToken(candidate, result.idToken, context.idfv, signal);
     } catch (error) {
       // A session the server issued before failing was already revoked by the exchange.
       await stopIfCancelled(candidate);
-      const refused =
-        (error instanceof ApiError && error.code !== ApiError.transport) ||
-        error instanceof DeactivationPending;
-      if (!refused) throw error;
-      refusals += 1;
-      lastRefusal = refusalOf(error);
-      if (refusals <= REFUSALS_REPORTED)
-        warn(
-          io,
-          tr(
-            `网页交来的凭证没能换出会话（${lastRefusal}）。`,
-            `The credentials from the web could not be exchanged for a session (${lastRefusal}).`,
-            `No se pudieron canjear las credenciales de la web por una sesión (${lastRefusal}).`,
-            `Não foi possível trocar as credenciais da web por uma sessão (${lastRefusal}).`,
-          ),
-        );
-      else if (refusals === REFUSALS_REPORTED + 1)
-        warn(
-          io,
-          tr(
-            '还有更多换不出会话的回调，之后不再逐条提示。',
-            'More callbacks could not be exchanged for a session; they will no longer be reported one by one.',
-            'Hay más callbacks que no se pudieron canjear por una sesión; ya no se informarán uno por uno.',
-            'Há mais callbacks que não puderam ser trocados por uma sessão; eles não serão mais informados um a um.',
-          ),
-        );
-      waitAgain();
+      const verdict = result.kind === 'code' ? codeVerdict(error) : tokenVerdict(error);
+      if (result.kind === 'code') result.answer(verdict.page);
+      if (verdict.end) throw verdict.end;
+      const reason = refusalOf(error);
+      refused(reason, verdict.say ?? couldNotExchange(reason));
       continue;
     }
     await stopIfCancelled(candidate);
-    let name = '';
+    if (result.kind === 'code') result.answer('accepted');
+    const via = result.kind;
+    let profile: Profile | null = null;
     try {
-      name = (await readProfile(candidate, signal)).name.slice(0, 100);
+      profile = await readProfile(candidate, signal);
     } catch (error) {
       await stopIfCancelled(candidate);
       if (error instanceof NotSignedIn) throw error;
-      // The name is a nicety; the user ID identifies the account.
+      // The name and UID help the person recognise the account; the user ID identifies it.
     }
+    const name = profile?.name.slice(0, 100) ?? '';
+    const uid = profile ? profile.displayId.slice(0, 40) : '';
     await stopIfCancelled(candidate);
     // The latest pair: a refresh while reading may have rotated the first one, or the server may
     // have ended the session meanwhile (a web sign-in elsewhere): then there is nothing to keep.
@@ -503,10 +718,10 @@ async function acceptedSession(
     say(
       io,
       tr(
-        `网页授权的是${describeAccount(credential)}。`,
-        `The web authorized ${describeAccount(credential)}.`,
-        `La web autorizó ${describeAccount(credential)}.`,
-        `A web autorizou ${describeAccount(credential)}.`,
+        `网页授权的是${describeAccount(credential, uid)}。`,
+        `The web authorized ${describeAccount(credential, uid)}.`,
+        `La web autorizó ${describeAccount(credential, uid)}.`,
+        `A web autorizou ${describeAccount(credential, uid)}.`,
       ),
     );
     if (!io.interactive) {
@@ -519,7 +734,7 @@ async function acceptedSession(
           'Ninguém confirmou esta conta (execução não interativa). Se você ainda não clicou em autorizar na página web, não clique; se esta não é sua conta, execute yomi logout e depois execute yomi login diretamente em um terminal.',
         ),
       );
-      return { credential, gateway: candidate };
+      return { credential, gateway: candidate, via, uid };
     }
     const yes = await ask(
       tr(
@@ -531,7 +746,8 @@ async function acceptedSession(
     );
     // Ctrl+C at the question: the session is revoked and the login ends.
     await stopIfCancelled(candidate);
-    if (yes === true) return { credential: candidate.credential ?? credential, gateway: candidate };
+    if (yes === true)
+      return { credential: candidate.credential ?? credential, gateway: candidate, via, uid };
     const revoked = await signOut(candidate);
     if (yes === null)
       throw new Error(
@@ -600,10 +816,10 @@ export async function logout(context: Context) {
     warn(
       io,
       tr(
-        '服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，请在浏览器重新登录一次 Yomi 网页，让其他网页平台的会话（包括 CLI）失效。',
-        'The sign-out request to the server failed (network problem, or the session had already expired); local credentials were deleted anyway. If you suspect the credentials leaked, sign in to the Yomi web page again in your browser so that other web-platform sessions (including the CLI) end.',
-        'La solicitud de cierre de sesión al servidor falló (problema de red, o la sesión ya había caducado); las credenciales locales se borraron de todos modos. Si sospechas que las credenciales se filtraron, vuelve a iniciar sesión en la página web de Yomi en tu navegador para que terminen las demás sesiones de la plataforma web (incluida la CLI).',
-        'A solicitação de logout ao servidor falhou (problema de rede, ou a sessão já tinha expirado); as credenciais locais foram apagadas mesmo assim. Se você suspeitar que as credenciais vazaram, entre de novo na página web do Yomi no seu navegador para que as outras sessões da plataforma web (incluindo a CLI) sejam encerradas.',
+        '服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，见 docs/security.md 5.1。',
+        'The sign-out request to the server failed (network problem, or the session had already expired); local credentials were deleted anyway. If you suspect the credentials leaked, see docs/security.md 5.1.',
+        'La solicitud de cierre de sesión al servidor falló (problema de red, o la sesión ya había caducado); las credenciales locales se borraron de todos modos. Si sospechas que las credenciales se filtraron, consulta docs/security.md 5.1.',
+        'A solicitação de logout ao servidor falhou (problema de rede, ou a sessão já tinha expirado); as credenciais locais foram apagadas mesmo assim. Se você suspeitar que as credenciais vazaram, veja docs/security.md 5.1.',
       ),
     );
   relayTokenHint(context);

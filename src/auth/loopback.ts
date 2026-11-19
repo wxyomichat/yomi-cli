@@ -6,22 +6,48 @@ import { tr } from '../core/i18n.js';
 /**
  * The callback the web's authorize page posts to (docs/auth-protocol.md):
  * `POST http://127.0.0.1:<port>/callback`, form-encoded, with the `state` the CLI made and either
- * `id_token` (a fresh Firebase ID token of the signed-in account) or `error`.
+ * `code` (a one-time authorization code the page got for this login), `error`, or, from a page
+ * that predates codes, `id_token` (a fresh Firebase ID token of the signed-in account).
  *
  * - Listens on 127.0.0.1 only, on a port the system picks; answers loopback peers only, and only
  *   when `Host` names that address and port (DNS rebinding) and `Origin` is the web's origin.
- * - The token comes in the POST body, never a URL: a GET with a query is refused.
- * - `state` is compared in constant time. A valid answer (a token or a cancellation) is handed to
- *   the CLI, which holds the callback while the terminal checks it (`resume()` listens again for
- *   the same state when the person turns it down). Bad callbacks never end the wait: they are
- *   refused, so nobody can stop a login (and take over its freed port) by sending them. The
- *   server closes when the CLI is done and at the deadline; the deadline is paused while the
+ * - The code (or token) comes in the POST body, never a URL: a GET with a query is refused.
+ * - `state` is compared in constant time. A valid answer (a code, a token or a cancellation) is
+ *   handed to the CLI, which holds the callback while the terminal checks it (`resume()` listens
+ *   again for the same state when the person turns it down). Bad callbacks never end the wait:
+ *   they are refused, so nobody can stop a login (and take over its freed port) by sending them.
+ *   The server closes when the CLI is done and at the deadline; the deadline is paused while the
  *   terminal checks an answer.
- * - The email and name the page also posts are not used: what the terminal shows comes from the
- *   server, so a forged callback cannot dress up as the person's account.
+ * - For a code, the browser's answer waits until the CLI has tried it (`answer()`), so the page
+ *   it is left on says whether to authorize again; a token or a cancellation is answered at once.
+ * - The email and name an older page also posts are not used: what the terminal shows comes from
+ *   the server, so a forged callback cannot dress up as the person's account.
  */
 
-export type CallbackResult = { kind: 'token'; idToken: string } | { kind: 'denied'; error: string };
+/** What the CLI made of a one-time code, for the page the browser is left on. */
+export type CodeOutcome =
+  /** Exchanged for a session: the terminal takes it from here. */
+  | 'accepted'
+  /** Refused (spent, expired, not this login's): authorize again on the page. */
+  | 'retry'
+  /** Too many attempts: authorize again on the page a little later. */
+  | 'later'
+  /** The account cannot sign in for now (the terminal says why); the terminal still waits. */
+  | 'refused'
+  /** The login is over; the terminal says why. */
+  | 'ended'
+  /** The exchange did not get through and the code may be spent: run yomi login again. */
+  | 'rerun';
+
+export type CallbackResult =
+  | {
+      kind: 'code';
+      code: string;
+      /** Tells the browser how it went (the first call counts). */
+      answer(outcome: CodeOutcome): void;
+    }
+  | { kind: 'token'; idToken: string }
+  | { kind: 'denied'; error: string };
 
 export class CallbackTimeout extends Error {
   constructor() {
@@ -59,6 +85,15 @@ export type CallbackServer = {
 };
 
 const MAX_BODY = 32 * 1024;
+/** One-time codes are 32 random bytes in base64url. */
+const CODE = /^[A-Za-z0-9_-]{43}$/;
+/**
+ * How long the browser waits for the outcome of a code. Before answering, the CLI runs the
+ * exchange and the `account/get_account` read-back, and `account/logout` when either fails after
+ * a session was made: each request has its own 20 s timeout, so together they can take longer
+ * than this. Past it the page just points at the terminal (202), which still reports the outcome.
+ */
+const ANSWER_WAIT_MS = 30_000;
 /** Refused callbacks reported one by one; after these, one line says the rest are not. */
 const REPORTED = 3;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -112,6 +147,140 @@ function reply(response: ServerResponse, status: number, html: string) {
     Connection: 'close',
   });
   response.end(html);
+}
+
+/** The page the browser is left on after posting a code, by what became of it. */
+function codePage(outcome: CodeOutcome | null): [number, string] {
+  switch (outcome) {
+    case 'accepted':
+      return [
+        200,
+        page(
+          tr(
+            '已授权 Yomi CLI',
+            'Yomi CLI authorized',
+            'Yomi CLI autorizado',
+            'Yomi CLI autorizado',
+          ),
+          tr(
+            '可以关闭此页，回到终端继续。',
+            'You can close this page and continue in the terminal.',
+            'Puedes cerrar esta página y continuar en la terminal.',
+            'Você pode fechar esta página e continuar no terminal.',
+          ),
+          true,
+        ),
+      ];
+    case 'retry':
+      return [
+        400,
+        page(
+          tr(
+            '这次授权没有生效',
+            'This authorization did not go through',
+            'Esta autorización no se completó',
+            'Esta autorização não foi concluída',
+          ),
+          tr(
+            '授权码无效或已过期。终端还在等待：回到授权页（浏览器后退），再点一次授权。',
+            'The authorization code is invalid or has expired. The terminal is still waiting: go back to the authorization page (browser back) and click authorize again.',
+            'El código de autorización no es válido o caducó. La terminal sigue esperando: vuelve a la página de autorización (atrás en el navegador) y haz clic en autorizar otra vez.',
+            'O código de autorização é inválido ou expirou. O terminal continua aguardando: volte à página de autorização (voltar no navegador) e clique em autorizar de novo.',
+          ),
+          false,
+        ),
+      ];
+    case 'later':
+      return [
+        429,
+        page(
+          tr('操作太频繁', 'Too many attempts', 'Demasiados intentos', 'Tentativas demais'),
+          tr(
+            '终端还在等待：稍等片刻，再回到授权页（浏览器后退）点一次授权。',
+            'The terminal is still waiting: wait a little, then go back to the authorization page (browser back) and click authorize again.',
+            'La terminal sigue esperando: espera un poco y luego vuelve a la página de autorización (atrás en el navegador) y haz clic en autorizar otra vez.',
+            'O terminal continua aguardando: espere um pouco, depois volte à página de autorização (voltar no navegador) e clique em autorizar de novo.',
+          ),
+          false,
+        ),
+      ];
+    case 'refused':
+      return [
+        403,
+        page(
+          tr(
+            '这次授权没有生效',
+            'This authorization did not go through',
+            'Esta autorización no se completó',
+            'Esta autorização não foi concluída',
+          ),
+          tr(
+            '这个账号现在不能登录 Yomi CLI，原因见终端。终端还在等待：可以换个账号后回到授权页（浏览器后退）再点一次授权，或者回到终端按 Ctrl+C 结束。',
+            'This account cannot sign in to Yomi CLI right now; the terminal says why. The terminal is still waiting: switch to another account and go back to the authorization page (browser back) to click authorize again, or press Ctrl+C in the terminal to stop.',
+            'Esta cuenta no puede iniciar sesión en Yomi CLI ahora; la terminal explica por qué. La terminal sigue esperando: cambia a otra cuenta y vuelve a la página de autorización (atrás en el navegador) para hacer clic en autorizar otra vez, o presiona Ctrl+C en la terminal para terminar.',
+            'Esta conta não pode entrar no Yomi CLI agora; o terminal explica o motivo. O terminal continua aguardando: troque de conta e volte à página de autorização (voltar no navegador) para clicar em autorizar de novo, ou pressione Ctrl+C no terminal para encerrar.',
+          ),
+          false,
+        ),
+      ];
+    case 'rerun':
+      return [
+        502,
+        page(
+          tr(
+            '登录没有完成',
+            'Sign-in not completed',
+            'No se completó el inicio de sesión',
+            'O login não foi concluído',
+          ),
+          tr(
+            '终端没能连上 Yomi 换取会话，这次的授权码可能已经用掉了。请回到终端重新运行 yomi login。',
+            'The terminal could not reach Yomi to set up the session, and this authorization code may already be used up. Go back to the terminal and run yomi login again.',
+            'La terminal no pudo conectar con Yomi para configurar la sesión, y puede que este código de autorización ya se haya usado. Vuelve a la terminal y ejecuta yomi login de nuevo.',
+            'O terminal não conseguiu falar com o Yomi para configurar a sessão, e este código de autorização pode já ter sido usado. Volte ao terminal e execute yomi login novamente.',
+          ),
+          false,
+        ),
+      ];
+    case 'ended':
+      return [
+        403,
+        page(
+          tr(
+            '登录没有完成',
+            'Sign-in not completed',
+            'No se completó el inicio de sesión',
+            'O login não foi concluído',
+          ),
+          tr(
+            '这次登录已经结束，原因见终端。可以关闭此页。',
+            'This sign-in has ended; the terminal says why. You can close this page.',
+            'Este inicio de sesión terminó; la terminal explica por qué. Puedes cerrar esta página.',
+            'Este login terminou; o terminal explica o motivo. Você pode fechar esta página.',
+          ),
+          false,
+        ),
+      ];
+    default:
+      return [
+        202,
+        page(
+          tr(
+            '已收到授权',
+            'Authorization received',
+            'Autorización recibida',
+            'Autorização recebida',
+          ),
+          tr(
+            '请回到终端查看结果。',
+            'Go back to the terminal to see how it went.',
+            'Vuelve a la terminal para ver el resultado.',
+            'Volte ao terminal para ver o resultado.',
+          ),
+          true,
+        ),
+      ];
+  }
 }
 
 function readBody(request: IncomingMessage): Promise<string | null> {
@@ -169,6 +338,8 @@ export function startCallbackServer(options: {
   let ending: Error | null = null;
   let refused = 0;
   let port = 0;
+  /** The browser waiting for the outcome of the code it posted, if any. */
+  let answering: ((outcome: CodeOutcome | null) => void) | null = null;
 
   const current = () => phase;
   const report = (reason: string) => {
@@ -390,6 +561,52 @@ export function startCallbackServer(options: {
       deliver({ kind: 'denied', error: values.error.slice(0, 64) });
       return;
     }
+    if (values.code !== undefined) {
+      if (!CODE.test(values.code)) {
+        report(
+          tr(
+            '网页回传的授权码格式不正确',
+            'the authorization code sent back by the web page is malformed',
+            'el código de autorización que devolvió la página web tiene un formato incorrecto',
+            'o código de autorização enviado de volta pela página web está em formato incorreto',
+          ),
+        );
+        reply(
+          response,
+          400,
+          page(
+            tr(
+              '授权请求无效',
+              'Invalid authorization request',
+              'Solicitud de autorización no válida',
+              'Solicitação de autorização inválida',
+            ),
+            tr(
+              '没有收到有效的授权码。',
+              'No valid authorization code was received.',
+              'No se recibió un código de autorización válido.',
+              'Nenhum código de autorização válido foi recebido.',
+            ),
+            false,
+          ),
+        );
+        return;
+      }
+      const code = values.code;
+      const outcome = await new Promise<CodeOutcome | null>((resolve) => {
+        const timer = setTimeout(() => settle(null), ANSWER_WAIT_MS);
+        function settle(value: CodeOutcome | null) {
+          clearTimeout(timer);
+          if (answering === settle) answering = null;
+          resolve(value);
+        }
+        answering = settle;
+        deliver({ kind: 'code', code, answer: settle });
+      });
+      const [status, html] = codePage(outcome);
+      reply(response, status, html);
+      return;
+    }
     const idToken = values.id_token ?? '';
     if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)) {
       report(
@@ -456,6 +673,8 @@ export function startCallbackServer(options: {
       pending.reject(error);
       pending = null;
     }
+    // A browser still waiting on its code learns the login is over.
+    answering?.('ended');
     // Let the answer reach the browser, then stop listening.
     setTimeout(() => server.close(), 50).unref();
     server.closeIdleConnections?.();

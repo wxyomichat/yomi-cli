@@ -78,6 +78,29 @@ describe('redact', () => {
     expect(result).toContain('x=1');
   });
 
+  it("masks the sign-in's one-time code and PKCE verifier, not status codes", () => {
+    const body = JSON.stringify({
+      code: 'oc1',
+      code_verifier: 'cv1',
+      codeVerifier: 'cv2',
+      state: 's2',
+      callback_port: 53111,
+      base_resp: { status_code: 1101010041, status_msg: 'code invalid' },
+      error_code: 400,
+    });
+    const result = redact(body);
+    for (const secret of ['oc1', 'cv1', 'cv2', 's2']) expect(result).not.toContain(secret);
+    expect(result).toContain('"status_code":1101010041');
+    expect(result).toContain('"error_code":400');
+    expect(result).toContain('"callback_port":53111');
+    expect(redact('{"code": 40001, "message": "bad"}')).toBe('{"code": 40001, "message": "bad"}');
+    const form = redact('state=s3&code=oc2&code_verifier=cv3&error_code=7');
+    for (const secret of ['s3', 'oc2', 'cv3']) expect(form).not.toContain(secret);
+    expect(form).toContain('error_code=7');
+    // Not a header: a line that starts with `code:` stays.
+    expect(redact('code: 1101010041')).toBe('code: 1101010041');
+  });
+
   it('still strips what it always did', () => {
     const text = [
       '{"auth_token":"a1","refresh_token":"r1","firebase_token":"f1","name":"ok"}',

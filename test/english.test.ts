@@ -11,6 +11,7 @@ import { currentLanguage } from '../src/core/device.js';
 import { setLanguage } from '../src/core/i18n.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { COMMANDS, relayTexts } from '../src/relay/texts.js';
+import { authorizeLikeTheBrowser } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -50,21 +51,7 @@ async function signIn() {
   const terminal = memoryIo();
   const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
   const [url] = await terminal.waitFor(/http:\/\/127\.0\.0\.1:\d+\/cli\/auth#\S+/);
-  const link = new URL(url);
-  const params = new URLSearchParams(link.hash.slice(1));
-  const page = await (await fetch(link.origin + link.pathname)).text();
-  const form = [...page.matchAll(/<form method="POST" data-kind="(\w+)">([\s\S]*?)<\/form>/g)].find(
-    (match) => match[1] === 'authorize',
-  )!;
-  const fields = Object.fromEntries(
-    [...form[2].matchAll(/name="([^"]+)" value="([^"]*)"/g)].map((match) => [match[1], match[2]]),
-  );
-  fields.state = params.get('state') ?? '';
-  await fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
-    body: new URLSearchParams(fields).toString(),
-  });
+  await authorizeLikeTheBrowser(mock, url);
   expect(await pending).toBe(0);
   return terminal.out + terminal.err;
 }

@@ -12,6 +12,7 @@ import {
 const ORIGIN = 'https://web.example.test';
 const STATE = 'Wl0bJr1e8rVQb2xq3JpZ4mY7tK9sH6nC5aD1fG8hJ0k';
 const TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2ln';
+const CODE = 'q3Vb9xW2kL0mN8pR4sT6uY1zA5cE7gI9jK2lM4nO6pQ';
 
 /** A raw request, so Host and Origin can be set as an attacker would. */
 function send(
@@ -260,6 +261,68 @@ describe('the loopback callback', () => {
       listen.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it('hands over a one-time code and leaves the browser on a page that says how it went', async () => {
+    const server = await startCallbackServer({
+      state: STATE,
+      expectedOrigin: ORIGIN,
+      timeoutMs: 5000,
+    });
+    // The browser's answer waits for the CLI's verdict on the code.
+    const posted = send(server.port, { body: form({ state: STATE, code: CODE }) });
+    const first = await server.next();
+    expect(first).toMatchObject({ kind: 'code', code: CODE });
+    if (first.kind !== 'code') throw new Error('not a code');
+    first.answer('retry');
+    const refused = await posted;
+    expect(refused.status).toBe(400);
+    expect(refused.body).toContain('再点一次授权');
+    // Authorized again on the page: a new code, the same state.
+    server.resume();
+    const again = send(server.port, { body: form({ state: STATE, code: CODE.replace('q', 'r') }) });
+    const second = await server.next();
+    if (second.kind !== 'code') throw new Error('not a code');
+    second.answer('accepted');
+    second.answer('ended');
+    const ok = await again;
+    expect(ok.status).toBe(200);
+    expect(ok.body).toContain('已授权 Yomi CLI');
+    server.close();
+  });
+
+  it('tells a browser still waiting on its code that the login ended', async () => {
+    const server = await startCallbackServer({
+      state: STATE,
+      expectedOrigin: ORIGIN,
+      timeoutMs: 5000,
+    });
+    const posted = send(server.port, { body: form({ state: STATE, code: CODE }) });
+    await expect(server.next()).resolves.toMatchObject({ kind: 'code' });
+    server.close();
+    const ended = await posted;
+    expect(ended.status).toBe(403);
+    expect(ended.body).toContain('原因见终端');
+  });
+
+  it('refuses a malformed code and keeps waiting', async () => {
+    const reasons: string[] = [];
+    const server = await startCallbackServer({
+      state: STATE,
+      expectedOrigin: ORIGIN,
+      timeoutMs: 5000,
+      onRejected: (reason) => reasons.push(reason),
+    });
+    for (const code of ['short', CODE + 'x', CODE.slice(0, 42) + '.', ''])
+      expect((await send(server.port, { body: form({ state: STATE, code }) })).status).toBe(400);
+    expect(reasons[0]).toBe('网页回传的授权码格式不正确');
+    expect(reasons.join()).not.toContain(CODE);
+    const posted = send(server.port, { body: form({ state: STATE, code: CODE }) });
+    const result = await server.next();
+    if (result.kind !== 'code') throw new Error('not a code');
+    result.answer('accepted');
+    expect((await posted).status).toBe(200);
+    server.close();
   });
 
   it('derives the confirmation code the page shows from the state', () => {

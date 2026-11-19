@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { FileStore } from '../src/core/credentials.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
+import { authorizeLikeTheBrowser as authorizeWith } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
 import { solidPng } from './helpers/png.js';
 
@@ -29,28 +30,9 @@ function setEnv(values: Record<string, string>) {
   }
 }
 
-/**
- * What a browser does on the authorize page: the page reads `port` and `state` from the
- * fragment (never sent to the server) and posts its form, from the web's origin.
- */
-async function authorizeLikeTheBrowser(url: string, action: 'authorize' | 'cancel' = 'authorize') {
-  const link = new URL(url);
-  expect(link.search).toBe('');
-  const params = new URLSearchParams(link.hash.slice(1));
-  const page = await (await fetch(link.origin + link.pathname)).text();
-  const form = [...page.matchAll(/<form method="POST" data-kind="(\w+)">([\s\S]*?)<\/form>/g)].find(
-    (match) => match[1] === action,
-  )!;
-  const fields = Object.fromEntries(
-    [...form[2].matchAll(/name="([^"]+)" value="([^"]*)"/g)].map((match) => [match[1], match[2]]),
-  );
-  fields.state = params.get('state') ?? '';
-  return fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
-    body: new URLSearchParams(fields).toString(),
-  });
-}
+/** What a browser does on the authorize page (see helpers/authorize.ts). */
+const authorizeLikeTheBrowser = (url: string, options?: Parameters<typeof authorizeWith>[2]) =>
+  authorizeWith(mock, url, options);
 
 async function run(args: string[], options: Parameters<typeof memoryIo>[0] = {}) {
   process.exitCode = undefined;
@@ -91,11 +73,12 @@ describe('yomi against the mock gateway', () => {
     const terminal = memoryIo();
     const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
     const [url] = await terminal.waitFor(/http:\/\/127\.0\.0\.1:\d+\/cli\/auth#\S+/);
-    const response = await authorizeLikeTheBrowser(url, 'cancel');
+    const response = await authorizeLikeTheBrowser(url, { action: 'cancel' });
     expect(response.status).toBe(200);
     expect(await pending).toBe(1);
     expect(terminal.err).toContain('已在网页上取消授权');
     expect(mock.state.logins).toHaveLength(0);
+    expect(mock.state.exchanges).toHaveLength(0);
   });
 
   it('logs in through the web and keeps its own session', async () => {
@@ -109,23 +92,32 @@ describe('yomi against the mock gateway', () => {
     expect(await response.text()).toContain('已授权 Yomi CLI');
     expect(await pending).toBe(0);
     // The account as the server names it, never as the page posted it.
+    // An exchange answers no email: the UID people see in the app tells the account apart.
     expect(terminal.out).toContain(
-      '✓ 已登录账号「Mock Creator」（user_id 7300000000000000101，mock@example.com）',
+      '✓ 已登录账号「Mock Creator」（user_id 7300000000000000101，UID 10086）',
     );
     // Nobody could confirm it: said so, with what to do if it was not theirs.
     expect(terminal.err).toContain('没有人确认这个账号（非交互运行）');
-    // The CLI's own session never signs the person out elsewhere.
-    expect(mock.state.logins[0]).toMatchObject({
-      login_type: 3,
-      os: 3,
-      not_logout_other_device: true,
+    // A one-time code with the PKCE verifier, for a session of the CLI's own that signs nobody
+    // out elsewhere; no Firebase token at all.
+    expect(mock.state.logins).toHaveLength(0);
+    const params = new URLSearchParams(new URL(url).hash.slice(1));
+    const [exchange] = mock.state.exchanges;
+    expect(exchange).toMatchObject({
+      state: params.get('state'),
+      callback_port: Number(params.get('port')),
+      client_version: '0.1.0',
+      device_info: { os: 3 },
     });
+    expect(mock.state.sessions.at(-1)?.platform).toBe('cli');
     const file = join(dir, 'credentials.json');
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
-    // The Firebase token was used once and never stored or printed.
-    expect(readFileSync(file, 'utf8')).not.toContain(String(mock.state.logins[0].firebase_token));
-    expect(terminal.out).not.toContain(String(mock.state.logins[0].firebase_token));
+    // The code and the verifier were used once and never stored or printed.
+    for (const secret of [String(exchange.code), String(exchange.code_verifier)]) {
+      expect(readFileSync(file, 'utf8')).not.toContain(secret);
+      expect(terminal.out + terminal.err).not.toContain(secret);
+    }
     // The callback is one-shot.
     const again = await authorizeLikeTheBrowser(url).catch(() => null);
     expect(again === null || again.status >= 400).toBe(true);
@@ -447,7 +439,8 @@ describe('yomi login when something is off', () => {
     const pending = main(['login', '--no-browser', '--timeout', '2'], terminal.io);
     const [url] = await terminal.waitFor(urlPattern);
     const before = mock.state.sessions.length;
-    mock.state.loginRefusal = { code: 1101000009, message: 'account blocked in this region' };
+    // A refusal the protocol does not name: the code is spent, the wait goes on as for any other.
+    mock.state.exchangeRefusal = { code: 1101000009, message: 'account blocked in this region' };
     await authorizeLikeTheBrowser(url);
     expect(await pending).toBe(1);
     expect(terminal.err).toContain('没能换出会话（1101000009：account blocked in this region）');
@@ -464,7 +457,7 @@ describe('yomi login when something is off', () => {
     const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
     const [url] = await terminal.waitFor(urlPattern);
     const before = mock.state.sessions.length;
-    mock.state.loginDelayMs = 300;
+    mock.state.exchangeDelayMs = 300;
     try {
       void authorizeLikeTheBrowser(url);
       await terminal.waitFor(/正在建立 CLI 会话/);
@@ -473,10 +466,10 @@ describe('yomi login when something is off', () => {
         if (!listeners.has(listener)) (listener as () => void)();
       expect(await pending).toBe(1);
     } finally {
-      mock.state.loginDelayMs = 0;
+      mock.state.exchangeDelayMs = 0;
     }
     expect(terminal.err).toContain('已取消登录');
-    // account/login was let finish, and the session it made was revoked before the exit.
+    // The exchange was let finish, and the session it made was revoked before the exit.
     await new Promise((resolve) => setTimeout(resolve, 400));
     const made = mock.state.sessions.slice(before);
     expect(made).toHaveLength(1);
@@ -520,7 +513,9 @@ describe('yomi login when something is off', () => {
     await signedOut();
     const first = memoryIo();
     const signingIn = main(['login', '--no-browser', '--timeout', '20'], first.io);
-    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0]);
+    // Signed in through an older page: the server keeps that session apart from the CLI's
+    // sessions from codes (a code would replace it there), so revoking it is the CLI's job.
+    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0], { page: 'old' });
     expect(await signingIn).toBe(0);
     const old = mock.state.sessions.at(-1)!;
     const terminal = memoryIo();
@@ -538,7 +533,8 @@ describe('yomi login when something is off', () => {
   it('keeps the old sign-in when the new one cannot be stored, and revokes the new one', async () => {
     const first = memoryIo();
     const signingIn = main(['login', '--no-browser', '--timeout', '20'], first.io);
-    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0]);
+    // An older page's session, which a code does not replace on the server (see above).
+    await authorizeLikeTheBrowser((await first.waitFor(urlPattern))[0], { page: 'old' });
     expect(await signingIn).toBe(0);
     const old = mock.state.sessions.at(-1)!;
     // The store refuses to write (a locked keychain, a full disk).

@@ -18,6 +18,7 @@ import type { MockImageState } from '../src/mock/gen/image.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { loadImage, sniffImage } from '../src/ugc/imageFile.js';
 import { loadSpecFile } from '../src/ugc/spec.js';
+import { authorizeLikeTheBrowser as authorizeWith } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
 import { solidPng } from './helpers/png.js';
 
@@ -93,24 +94,8 @@ async function runForget(patch: Partial<ImageCommandOptions>) {
   return result;
 }
 
-/** What a browser does on the authorize page (see e2e.test.ts). */
-async function authorize(url: string) {
-  const link = new URL(url);
-  const params = new URLSearchParams(link.hash.slice(1));
-  const page = await (await fetch(link.origin + link.pathname)).text();
-  const form = [...page.matchAll(/<form method="POST" data-kind="(\w+)">([\s\S]*?)<\/form>/g)].find(
-    (match) => match[1] === 'authorize',
-  )!;
-  const fields = Object.fromEntries(
-    [...form[2].matchAll(/name="([^"]+)" value="([^"]*)"/g)].map((match) => [match[1], match[2]]),
-  );
-  fields.state = params.get('state') ?? '';
-  return fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
-    body: new URLSearchParams(fields).toString(),
-  });
-}
+/** What a browser does on the authorize page (see helpers/authorize.ts). */
+const authorize = (url: string) => authorizeWith(mock, url);
 
 /** A character file with comments, in its own folder. */
 function characterFile(): string {

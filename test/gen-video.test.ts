@@ -10,6 +10,7 @@ import { sha256 } from '../src/core/state.js';
 import { VIDEO_POLL } from '../src/gen/ugcVideo.js';
 import type { MockVideoStore } from '../src/mock/gen/video.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
+import { authorizeLikeTheBrowser as authorizeWith } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -35,23 +36,8 @@ function setEnv(values: Record<string, string>) {
   }
 }
 
-async function authorizeLikeTheBrowser(url: string) {
-  const link = new URL(url);
-  const params = new URLSearchParams(link.hash.slice(1));
-  const page = await (await fetch(link.origin + link.pathname)).text();
-  const form = [...page.matchAll(/<form method="POST" data-kind="(\w+)">([\s\S]*?)<\/form>/g)].find(
-    (match) => match[1] === 'authorize',
-  )!;
-  const fields = Object.fromEntries(
-    [...form[2].matchAll(/name="([^"]+)" value="([^"]*)"/g)].map((match) => [match[1], match[2]]),
-  );
-  fields.state = params.get('state') ?? '';
-  return fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
-    body: new URLSearchParams(fields).toString(),
-  });
-}
+/** What a browser does on the authorize page (see helpers/authorize.ts). */
+const authorizeLikeTheBrowser = (url: string) => authorizeWith(mock, url);
 
 async function run(args: string[], options: Parameters<typeof memoryIo>[0] = {}) {
   process.exitCode = undefined;

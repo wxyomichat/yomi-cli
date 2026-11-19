@@ -1,36 +1,38 @@
-# CLI 网页授权协议（v1）
+# CLI 网页授权协议（v2）
 
 `yomi login` 与 Yomi 网页端授权页 `/cli/auth` 之间的约定。安全考虑见 [security.md](security.md)。
 
-## 为什么传 Firebase ID token
+## 概要
 
-现有服务端认可的凭证：
+网页不把任何长期或可重复使用的凭证交给 CLI。用户在授权页点「授权」时，网页用**自己已登录的 Yomi 会话**申请一枚**一次性授权码**（`account/create_cli_auth_code`），这枚码绑定本次登录的 `state`、回调端口和 PKCE `code_challenge`，120 秒内有效，只能换取一次。网页把它表单 POST 给本机 CLI；CLI 立即用「授权码 + 只有它知道的 `code_verifier`」调用 `account/exchange_cli_auth_code`，换出**自己的**会话（`user_id / device_id / auth_token / refresh_token`）。之后 CLI 只用这套会话，按 `account/refresh_auth_token` 续期，`yomi logout` 调 `account/logout` 撤销。
 
-| 凭证                                    | 有效期                                  | 用途                                      | 交给 CLI 的问题                                                |
-| --------------------------------------- | --------------------------------------- | ----------------------------------------- | -------------------------------------------------------------- |
-| 网页会话 `auth_token` / `refresh_token` | auth 短期，refresh 长期，刷新会换新一对 | `X-Token`、长连接 `token`                 | CLI 与网页共用一条刷新链，一方刷新后另一方失效；而且是长期凭证 |
-| Firebase ID token                       | 1 小时                                  | `account/login`（`login_type` 3）换出会话 | 短期；CLI 只用它换一次**自己的**会话，不落盘                   |
+服务端把这个会话记为 CLI 自己的会话，与网页、App 的会话分开：在网页或 App 上重新登录不会让它失效；`yomi logout`、刷新令牌过期、注销账号仍会让它失效。
 
-服务端目前没有 device code / 一次性授权码之类的接口，所以 v1 让网页把一枚刚取到的 Firebase ID token 交给本机 CLI，CLI 立即调用 `account/login`（`not_logout_other_device: true`，不踢掉 App 和网页的登录），得到独立的 `user_id / device_id / auth_token / refresh_token`。之后 CLI 只用这套会话，按 `account/refresh_auth_token` 续期，`yomi logout` 调 `account/logout` 撤销。Firebase token 用完即弃，不落盘、不打印。
-
-如果以后服务端提供一次性授权码（网页用自己的会话换一个短期 code，CLI 用 code + PKCE verifier 换会话），协议可以升级为 v2，CLI 和网页都不再经手 Firebase token。（未实施）
+v1 由网页交出一枚 Firebase ID token，CLI 用 `account/login` 换会话。这一版仍接受它作为过渡（见「v1 兜底」），等网页的 v2 普及后移除。
 
 ## 流程
 
 ```
-yomi login                                 浏览器（已登录 Yomi 网页）
-────────────                               ───────────────────────────
+yomi login                                 浏览器（已登录 Yomi 网页）                     服务端
+────────────                               ───────────────────────────                    ──────
 生成 state（32 字节随机，base64url）
+生成 code_verifier（32 字节随机，base64url），
+  code_challenge = base64url(SHA-256(verifier))
 在 127.0.0.1:<随机端口> 起回调
-打印确认码 XXXX-XXXX，打开 ──────────────▶ <web>/cli/auth#port=<port>&state=<state>&client=yomi-cli&version=<v>
+打印确认码 XXXX-XXXX，打开 ──────────────▶ <web>/cli/auth#port&state&client&version
+                                             &code_challenge&code_challenge_method=S256
                                            读出片段参数后立即从地址栏去掉
                                            校验参数；未登录则先登录
                                            显示账号、确认码、「授权」「取消」
-                                           点授权：currentUser.getIdToken(true)
+                                           点授权：create_cli_auth_code ─────────────────▶ 校验网页会话，签发 code
+                                                   ◀───────────────────────────────────── {code, expires_at}
                          ◀──────────────── 表单 POST http://127.0.0.1:<port>/callback
-校验 Host / Origin / state                  （state, id_token, email, display_name）
-回一个「已授权，可以关闭此页」页面 ──────▶ 浏览器显示 CLI 的结果页
-account/login → account/get_account
+校验 Host / Origin / state                  （state, code）
+exchange_cli_auth_code ─────────────────────────────────────────────────────────────────▶ 取出并作废 code，
+  （code, code_verifier, state, 端口）                                                     校验 state / 端口 / PKCE / 账号
+◀───────────────────────────────────────────────────────────────────────────────────────── 新会话
+account/get_account 读回核对（失败时撤销新会话）
+回一个结果页 ────────────────────────────▶ 浏览器显示 CLI 的结果页
 终端显示服务端返回的账号，问是否以它登录
   是：凭证存入系统钥匙串，关闭回调
   否：撤销刚建立的会话，回调继续等待
@@ -40,25 +42,44 @@ account/login → account/get_account
 
 参数放在 URL **片段**（`#` 之后）里，而不是查询串：片段不会发给任何服务器（不进 nginx / 网关访问日志），也不会出现在 Referer 里。页面读出后立即用 `history.replaceState` 把片段从地址栏去掉，参数只保留在当前标签页的历史记录状态（`history.state`）里，刷新页面仍可用；RUM 上报时也会去掉 `/cli/auth` 的片段。
 
-片段参数（缺一不可，否则显示「链接无效」，不提供授权按钮）：
+片段参数按下表顺序排列（缺一不可，否则显示「链接无效」，不提供授权按钮）：
 
-| 参数      | 规则                                          |
-| --------- | --------------------------------------------- |
-| `port`    | 十进制整数，1024–65535                        |
-| `state`   | 43 个 base64url 字符（`^[A-Za-z0-9_-]{43}$`） |
-| `client`  | 固定 `yomi-cli`                               |
-| `version` | CLI 版本，仅展示                              |
+| 参数                    | 规则                                                                |
+| ----------------------- | ------------------------------------------------------------------- |
+| `port`                  | 十进制整数，1024–65535                                              |
+| `state`                 | 43 个 base64url 字符（`^[A-Za-z0-9_-]{43}$`）                       |
+| `client`                | 固定 `yomi-cli`                                                     |
+| `version`               | CLI 版本，仅展示                                                    |
+| `code_challenge`        | 43 个 base64url 字符：`base64url(SHA-256(code_verifier))`，不带填充 |
+| `code_challenge_method` | 固定 `S256`                                                         |
+
+`code_challenge` 和 `code_challenge_method` 必须同时出现；只有一个、method 不是 `S256` 或 challenge 格式不对，都显示「链接无效」。两个都没有的链接来自旧版 CLI，网页按 v1 处理。
 
 页面要求：
 
 - 不被搜索引擎收录（noindex）；`state` 不进访问日志、埋点、RUM 和 Referer（见上，片段 + 读后即删）。
 - 显示当前账号（名字、邮箱）、**确认码**和提示：「只有在你刚刚于本机终端运行 `yomi login`、且终端显示同一确认码时才授权」。
 - 未登录：走网页现有登录（Google / Apple），登录后回到本页。
-- 「授权」点击时取新鲜的 Firebase ID token（`getIdToken(true)`）。网页会话在但 Firebase 登录态丢失（`currentUser` 为空）时，请用户在本页重新登录一次（弹窗），不要改动网页会话。
+- 「授权」点击时用当前网页会话调用 `account/create_cli_auth_code`（带 `X-Token`）：
+
+  ```json
+  {
+    "code_challenge": "<challenge>",
+    "code_challenge_method": "S256",
+    "state": "<state>",
+    "callback_port": 53111,
+    "client_name": "yomi-cli",
+    "client_version": "<version>"
+  }
+  ```
+
+  回包 `code`（43 个 base64url 字符）、`expires_at`（毫秒时间戳）。只有网页会话可以申请（App、CLI 或匿名会话都不行），同一账号 10 分钟内最多 10 次。太频繁时提示「操作太频繁，请稍后再试」；会话失效时走网页现有的重新登录；其他错误提示「授权失败，请重试」。
+
 - 回传方式：**顶层表单 POST**（`<form method="POST" action="http://127.0.0.1:<port>/callback">`，`application/x-www-form-urlencoded`），不要用 `fetch`（会触发 Chrome 的本地网络访问授权弹窗，也需要 CORS）。`action` 只由校验过的 `port` 拼出，主机固定 `127.0.0.1`，路径固定 `/callback`。
 - 提交前把页面的 referrer 策略设为 `origin`（`<meta name="referrer" content="origin">`）。默认策略 `strict-origin-when-cross-origin` 下，https 页面提交到 `http://127.0.0.1` 算降级，浏览器会发 `Origin: null`，CLI 会拒绝。`origin` 只带源，不带路径和片段。（2026-11-13 用 Chrome 157 和真实回调服务实测。）
-- 表单字段：`state`（原样），`id_token`；`email`、`display_name` 可以带，但 CLI 不使用（终端显示的账号只取服务端返回的，防止伪造的回调冒充用户的邮箱）。取消时只发 `state` 和 `error=access_denied`。
-- 凭证绝不出现在 URL 里。
+- 表单字段：`state`（原样）、`code`。取消时只发 `state` 和 `error=access_denied`。终端显示的账号只取服务端返回的，页面不需要也不应回传账号信息。
+- 授权码绝不出现在 URL 里。
+- CLI 换取失败后，用户可以回到授权页（浏览器后退）再点一次「授权」：页面为同一个 `state` / `code_challenge` / 端口申请一枚新的码。
 
 ### 确认码
 
@@ -82,20 +103,61 @@ account/login → account/get_account
 | 方法 POST，且 URL 不带查询串（凭证不进 URL）                                                     | 405    |
 | 登录还没结束（读请求体前后各查一次；监听关闭前的片刻，之后连接直接被拒）                         | 410    |
 | `Origin` 等于所选环境的网页 origin（生产为 `https://www.yomichat.io`），内容能解析，`state` 一致 | 400    |
-| 终端没有在确认上一次收到的回答（token 或取消）                                                   | 409    |
-| 取消（带 `error`）到此为止；否则 `id_token` 是三段 base64url（JWT 形状）                         | 400    |
+| 终端没有在确认上一次收到的回答（授权码、token 或取消）                                           | 409    |
+| 取消（带 `error`）到此为止；否则 `code` 是 43 个 base64url 字符（v1：`id_token` 是 JWT 形状）    | 400    |
 
-无效回调一律拒绝，但**不会**结束等待：否则知道端口的人发几个错误请求就能让 CLI 停止监听，再占住空出来的端口，接住用户随后点「授权」发出的 token。400 的前三次在终端逐条提示原因，之后只提示一次；403、404、405、409、410 不在终端提示（409 的页面请用户回到终端处理）。
+无效回调一律拒绝，但**不会**结束等待：否则知道端口的人发几个错误请求就能让 CLI 停止监听，再占住空出来的端口，接住用户随后点「授权」发出的授权码。400 的前三次在终端逐条提示原因，之后只提示一次；403、404、405、409、410 不在终端提示（409 的页面请用户回到终端处理）。
 
-收到有效回答（token 或取消）后，回调先挂起：之后 `Origin` 和 `state` 正确的回调都得到 409（不再检查 `id_token`），页面提示到终端处理；超时计时也暂停，直到处理完（换会话、读回账号、终端确认）。
+收到有效回答（授权码、token 或取消）后，回调先挂起：之后 `Origin` 和 `state` 正确的回调都得到 409（不再检查 `code`），页面提示到终端处理；超时计时也暂停，直到处理完（换会话、读回账号、终端确认）。
 
-收到 token 时，CLI 在一个不碰本机凭证的会话里换出会话，在终端显示服务端返回的账号（名字、user_id、邮箱），交互运行时（标准输入和输出都是终端）询问是否以它登录（`y` 确认、`n` 拒绝，其他输入再问一次；提问前敲的输入会被丢弃）：
+### 换取会话
+
+收到授权码时，CLI **立即**调用（码 120 秒内有效）：
+
+```
+POST account/exchange_cli_auth_code
+{"code": "<code>", "code_verifier": "<verifier>", "state": "<state>", "callback_port": 53111,
+ "client_version": "<CLI 版本>", "device_info": {"os": 3, "idfv": "<CLI 安装标识>"}}
+```
+
+匿名请求（不带 `X-Token`），签名和公共 query 与 `account/login` 一样（`os=3`，`device_id=0`）。回包在顶层（兼容放在 `data` 里）：`user_id`、`device_id`、`auth_token`、`refresh_token`。
+
+服务端第一次读到授权码就作废它，不论之后成功与否；state、端口、verifier 任何一项不符都统一回答「授权码无效」。所以 CLI **从不重发**同一个码：同一次登录里再收到用过的码，直接拒绝，不发请求。
+
+| `base_resp.status_code`                      | 含义                                                    | CLI                                              | 浏览器结果页              |
+| -------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------ | ------------------------- |
+| 0                                            | 成功                                                    | 读回账号，终端确认                               | 「已授权」                |
+| 1101010041                                   | 授权码无效、已用过、已过期，或 state / 端口 / PKCE 不符 | 继续等待（前三次逐条提示），回授权页再点一次授权 | 「没有生效，再点一次」    |
+| 1101010181                                   | 太频繁                                                  | 继续等待，提示稍后再点授权                       | 「操作太频繁，稍后再点」  |
+| 1101010091                                   | 账号被封禁                                              | 结束                                             | 「登录已结束，见终端」    |
+| 1101010271                                   | 账号在注销冷静期                                        | 继续等待（前三次逐条提示冷静期原因）             | 「这个账号现在不能登录」  |
+| 1101010130                                   | 账号不存在或已注销                                      | 结束                                             | 「登录已结束，见终端」    |
+| 1101010011                                   | 参数格式错（CLI 的问题）                                | 结束，打印服务端的说明                           | 同上                      |
+| 1101010020                                   | 服务端内部错误                                          | 结束，稍后重试                                   | 同上                      |
+| 其他业务错误                                 | —                                                       | 继续等待（码已作废）                             | 「没有生效，再点一次」    |
+| 网络错误、超时、HTTP 401、不带业务码的非 200 | 码可能已经被服务端用掉（401 时请求没到账号服务）        | 结束，提示重新运行 `yomi login`                  | 「请重新运行 yomi login」 |
+
+非 200 的回包如果带 `base_resp.status_code`，按那个码所在的行处理；表里没有的码算「其他业务错误」。
+
+冷静期继续等待，是为了让读到授权链接、自己账号又在冷静期的人不能借这个回答结束登录、腾出端口（与 v1 一致）；冷静期的原因前三次逐条提示，超时报错时附上。
+
+浏览器提交授权码后，CLI 等换取和 `account/get_account` 读回核对都有了结果（失败时还要撤销刚建立的会话）才回结果页，所以页面能告诉用户是否要回去再点一次授权；之后的终端确认不让浏览器等。每个请求最长约 20 秒，浏览器最多等约 30 秒：超过时页面只提示回到终端查看，结果仍在终端显示。
+
+换取成功后，CLI 在一个不碰本机凭证的会话里读回账号（`account/get_account`），在终端显示服务端返回的账号（名字、user_id 和 App 里可见的 UID；服务端给了邮箱时也显示，只有 v1 兜底会给），交互运行时（标准输入和输出都是终端）询问是否以它登录（`y` 确认、`n` 拒绝，其他输入再问一次；提问前敲的输入会被丢弃）：
 
 - 确认：保存凭证，再撤销被替换的旧 CLI 会话，关闭监听。保存失败时撤销新会话，旧的登录不变。撤销是尽力而为，失败时终端提示（见 security.md 5.1）。
-- 拒绝：撤销刚建立的会话，回调用同一个 `state` 继续等待，直到超时。这样即使有人抢先用自己的 token 回调，CLI 既不会登录到他的账号，端口也不会空出来。
+- 拒绝：撤销刚建立的会话，回调用同一个 `state` 继续等待，直到超时。这样即使有人抢先用他自己账号的授权码（或 v1 的 token）回调，CLI 既不会登录到他的账号，端口也不会空出来。
 - 非交互运行：不询问，直接以服务端返回的账号登录并显示它，同时提醒「没有人确认这个账号」：没在网页上点过授权就不要再点（登录已结束、端口已空出），账号不是你的就 `yomi logout`。
-- `account/login` 返回业务错误（服务端不接受 token）：没有建立会话，继续等待。`account/login` 成功但读回账号失败：撤销刚建立的会话，继续等待。账号在注销冷静期：同样继续等待。终端会显示服务端给的原因（前三次逐条），超时报错时附上最后一次拒绝的原因。网络或传输错误则结束登录。
+- 换取被拒绝时按上表处理。换取成功但读回账号失败：撤销刚建立的会话，继续等待。终端会显示服务端给的原因（前三次逐条），超时报错时附上最后一次拒绝的原因。读回时的网络或传输错误结束登录。
+
+服务端按（账号，设备）记 CLI 的会话，设备由 `device_info.idfv` 找回：同一台机器、同一个账号再次登录时，服务端在换取这一刻就替换旧的 CLI 会话，旧的 `refresh_token` 随即失效（这时即使在终端回答 `n`，旧会话也回不来了）。CLI 随后照常撤销被替换的会话：同一账号经授权码再次登录时，撤销被拒绝说明服务端已经结束了它，不报错；其他情况（换了账号、经 v1 兜底登录）撤销被拒绝可能是别的进程刷新了令牌、会话仍然有效，终端照样提示。
 
 收到取消时：非交互运行时提醒「不是你点的取消，就不要再在网页上授权」后结束；交互运行时问是否结束登录，回答 `n` 则继续等待（伪造的取消不能让端口空出来）。
 
-结果页无脚本（`Cache-Control: no-store`、`Referrer-Policy: no-referrer`、CSP `default-src 'none'`）。默认 300 秒超时（`--timeout`），收到有效回答后到处理完的这段时间暂停计时，继续等待时计算剩下的时间。凭证保存之前，Ctrl+C 在任何一步（包括确认提问处）取消登录：已经建立的会话撤销后才退出，正在进行的 `account/login` 等它返回再撤销；再按一次立即退出。凭证保存之后按 Ctrl+C 只会提示，不会撤回登录。
+结果页无脚本（`Cache-Control: no-store`、`Referrer-Policy: no-referrer`、CSP `default-src 'none'`），用 CLI 的语言。默认 300 秒超时（`--timeout`），收到有效回答后到处理完的这段时间暂停计时，继续等待时计算剩下的时间。凭证保存之前，Ctrl+C 在任何一步（包括确认提问处）取消登录：已经建立的会话撤销后才退出，正在进行的换取（或 v1 的 `account/login`）等它返回再撤销；再按一次立即退出。凭证保存之后按 Ctrl+C 只会提示，不会撤回登录。
+
+## v1 兜底（过渡期）
+
+还不认识 `code_challenge` 的旧版授权页会忽略这两个参数，按 v1 回传 `state`、`id_token`（一枚刚取到的 Firebase ID token，`email`、`display_name` 也可能一起带上，CLI 不使用）。这一版 CLI 仍接受它：调用 `account/login`（`login_type` 3，`os` 3，`not_logout_other_device: true`，`device_info` 同上），之后的读回、确认、存储、撤销与 v2 相同；服务端的业务错误都继续等待，网络错误结束登录。
+
+这样换出的会话属于网页平台：在任何浏览器里重新登录 Yomi 网页都会让它失效。所以终端会提示「网页还是旧版，本次会话仍可能在网页重新登录时被结束」。网页的 v2 普及后，下一版 CLI 移除这个兜底。

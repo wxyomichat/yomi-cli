@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -73,7 +73,21 @@ export const MOCK_NPCS = {
   removed: '7300000000000009003',
 } as const;
 
-type Session = { authToken: string; refreshToken: string; deviceId: string; revoked: boolean };
+type Session = {
+  authToken: string;
+  refreshToken: string;
+  deviceId: string;
+  revoked: boolean;
+  /**
+   * `web`: a web-platform session (the authorize page's own, and the CLI's from `account/login`),
+   * which a web sign-in elsewhere ends; `cli`: one made from a one-time code, which it does not.
+   */
+  platform: 'web' | 'cli';
+  /** The installation that asked for a `cli` session (`device_info.idfv`). */
+  idfv?: string;
+};
+/** A one-time code as the server keeps it: hashes of the code and state, never the values. */
+type CliAuthCode = { challenge: string; stateHash: string; port: number; expiresAt: number };
 type Upload = {
   id: string;
   purpose: string;
@@ -110,7 +124,13 @@ export type MockState = {
   drafts: Map<string, { draftId: string; quotaUsed: number; counter: bigint; stream: string }>;
   previews: Map<string, Preview>;
   gems: number;
-  requests: { path: string; body: Json; headers: Record<string, string | string[] | undefined> }[];
+  requests: {
+    path: string;
+    body: Json;
+    headers: Record<string, string | string[] | undefined>;
+    /** The common query the request was signed with. */
+    query: Record<string, string>;
+  }[];
   sockets: number;
   /** Ordinary chats by character id; one is made by the first accepted send. */
   chats: Map<string, MockChat>;
@@ -148,14 +168,47 @@ export type MockState = {
   accountFailures: number;
   /** Milliseconds `account/login` takes to answer. */
   loginDelayMs: number;
+  /** Every `account/exchange_cli_auth_code` body, verifier included (mock only). */
+  exchanges: Json[];
+  /** One-time codes issued and not yet read, by SHA-256 of the code (hex). */
+  cliAuthCodes: Map<string, CliAuthCode>;
+  /** How long a one-time code lives (120 s, as on the server). */
+  cliAuthCodeTtlMs: number;
+  /**
+   * The next exchange is refused with this business code and message (then cleared). As on the
+   * server, 1101010011 and 1101010181 come before the code is read; any other code after it, so
+   * the code is spent.
+   */
+  exchangeRefusal: { code: number; message: string } | null;
+  /** The next this-many exchanges read (spend) the code, then drop the connection unanswered. */
+  exchangeDrops: number;
+  /** Milliseconds an exchange takes to answer. */
+  exchangeDelayMs: number;
+  /**
+   * The next this-many exchanges are turned away by the gateway with a bare HTTP 401, before the
+   * account service sees them (the code is not spent), as for a route not yet public.
+   */
+  exchangeUnauthorized: number;
+  /** The next this-many `account/logout` calls fail with a bare 503, before any check. */
+  logoutFailures: number;
 };
 
 export type MockServer = {
   origin: string;
   port: number;
   state: MockState;
-  /** A Firebase-like ID token the mock's account/login accepts (what the web page would pass). */
+  /** A Firebase-like ID token the mock's account/login accepts (what an older page would pass). */
   idToken(email?: string): string;
+  /**
+   * The authorize page's own web session, the one it calls `account/create_cli_auth_code` with
+   * (not in `state.sessions`).
+   */
+  webSession: { userId: string; deviceId: string; authToken: string; refreshToken: string };
+  /**
+   * A sign-in to the web elsewhere: ends the other web-platform sessions (a CLI session from
+   * `account/login` among them), never one made from a one-time code.
+   */
+  webSignInAgain(): void;
   /** Terminates every open socket; clients reconnect on their own. */
   dropSockets(): void;
   /**
@@ -491,10 +544,17 @@ function offered(keys: unknown, config: ReasonConfig): boolean {
 }
 
 /**
- * The mock authorize page. As the web's `/cli/auth`, it reads `port` and `state` from the
- * fragment (which the server never sees), fills both forms and drops the fragment.
+ * The mock authorize page. As the web's `/cli/auth`, it reads its parameters from the fragment
+ * (which the server never sees), fills both forms and drops the fragment. With `code_challenge`
+ * (and `code_challenge_method=S256`) it authorizes as the current page does: on "authorize" it
+ * asks `account/create_cli_auth_code`, with its own web session, for a one-time code bound to
+ * this login's state, challenge and port, and posts `state` and `code`. Without them it is a page
+ * from before one-time codes and posts the Firebase-like `id_token` the form carries.
  */
-const WEB_PAGE = (token: string) => `<!doctype html>
+const WEB_PAGE = (
+  token: string,
+  web: { userId: string; deviceId: string; authToken: string },
+) => `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">
 <title>Mock · 授权 Yomi CLI</title>
 <style>body{font:16px/1.6 sans-serif;max-width:480px;margin:48px auto;padding:0 16px}button{font-size:16px;padding:8px 16px;margin-right:8px}</style>
@@ -512,11 +572,63 @@ const WEB_PAGE = (token: string) => `<!doctype html>
 const params = new URLSearchParams(location.hash.slice(1));
 const port = params.get('port') || '';
 const state = params.get('state') || '';
+const challenge = params.get('code_challenge');
+const method = params.get('code_challenge_method');
+const v2 = challenge !== null || method !== null;
 history.replaceState(null, '', location.pathname);
-if (!/^[0-9]{4,5}$/.test(port) || !/^[A-Za-z0-9_-]{43}$/.test(state)) document.body.textContent = '链接无效';
+if (
+  !/^[0-9]{4,5}$/.test(port) ||
+  !/^[A-Za-z0-9_-]{43}$/.test(state) ||
+  (v2 && (!/^[A-Za-z0-9_-]{43}$/.test(challenge || '') || method !== 'S256'))
+)
+  document.body.textContent = '链接无效';
 for (const form of document.forms) {
   form.action = 'http://127.0.0.1:' + port + '/callback';
   form.elements.state.value = state;
+}
+const authorize = document.querySelector('form[data-kind="authorize"]');
+if (v2) {
+  authorize.elements.id_token.remove();
+  authorize.elements.email.remove();
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.name = 'code';
+  authorize.append(input);
+  authorize.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = JSON.stringify({
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state,
+      callback_port: Number(port),
+      client_name: 'yomi-cli',
+      client_version: params.get('version') || '',
+    });
+    const query = [
+      ['app_id', '50010'],
+      ['device_id', '${web.deviceId}'],
+      ['os', '3'],
+      ['user_id', '${web.userId}'],
+    ];
+    const timestamp = String(Date.now());
+    const canonical =
+      query.map((pair) => pair[0] + '=' + pair[1]).join('&') +
+      body + 'x-timestamp=' + timestamp + 'salt=${SALT}';
+    const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(canonical));
+    const sign = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+    const response = await fetch('/ember/api/v1/account/create_cli_auth_code?' + new URLSearchParams(query), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-timestamp': timestamp, 'x-sign': sign, 'X-Token': '${web.authToken}' },
+      body,
+    });
+    const answer = await response.json().catch(() => ({}));
+    if (!answer.base_resp || answer.base_resp.status_code !== 0) {
+      alert('授权失败，请重试');
+      return;
+    }
+    input.value = (answer.data || answer).code;
+    authorize.submit();
+  });
 }
 crypto.subtle.digest('SHA-256', new TextEncoder().encode('yomi-cli-auth:' + state)).then((d) => {
   const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -528,6 +640,10 @@ crypto.subtle.digest('SHA-256', new TextEncoder().encode('yomi-cli-auth:' + stat
 });
 </script></body></html>`;
 
+const B64URL_43 = /^[A-Za-z0-9_-]{43}$/;
+const sha256 = (value: string) => createHash('sha256').update(value).digest();
+const sameBytes = (a: Buffer, b: Buffer) => a.length === b.length && timingSafeEqual(a, b);
+
 export async function startMockServer(options: { port?: number } = {}): Promise<MockServer> {
   const state: MockState = {
     sessions: [],
@@ -535,6 +651,14 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     loginRefusal: null,
     accountFailures: 0,
     loginDelayMs: 0,
+    exchanges: [],
+    cliAuthCodes: new Map(),
+    cliAuthCodeTtlMs: 120_000,
+    exchangeRefusal: null,
+    exchangeDrops: 0,
+    exchangeDelayMs: 0,
+    exchangeUnauthorized: 0,
+    logoutFailures: 0,
     uploads: new Map(),
     characters: new Map(),
     drafts: new Map(),
@@ -569,8 +693,21 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       randomBytes(16).toString('base64url'),
     ].join('.');
 
+  /** The authorize page's own session: signed in on the web, as the person is. */
+  const webSession: Session = {
+    authToken: 'at_web_' + randomBytes(12).toString('hex'),
+    refreshToken: 'rt_web_' + randomBytes(12).toString('hex'),
+    deviceId: nextId(),
+    revoked: false,
+    platform: 'web',
+  };
   const session = (token: string | undefined) =>
-    state.sessions.find((item) => item.authToken === token && !item.revoked) ?? null;
+    [webSession, ...state.sessions].find((item) => item.authToken === token && !item.revoked) ??
+    null;
+  /** What a web sign-in does to the web platform's other sessions; CLI sessions stay. */
+  const webSignInAgain = () => {
+    for (const item of state.sessions) if (item.platform === 'web') item.revoked = true;
+  };
 
   let sid = 1;
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -854,9 +991,9 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
         refreshToken: 'rt_' + randomBytes(12).toString('hex'),
         deviceId: nextId(),
         revoked: false,
+        platform: 'web',
       };
-      if (body.not_logout_other_device !== true)
-        for (const item of state.sessions) item.revoked = true;
+      if (body.not_logout_other_device !== true) webSignInAgain();
       state.sessions.push(created);
       return ok({
         data: {
@@ -867,6 +1004,105 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
           is_new: false,
           email: 'mock@example.com',
         },
+      });
+    },
+    // The authorize page asks for a one-time code with its own web session.
+    'account/create_cli_auth_code': (body, user) => {
+      if (!user || user.platform !== 'web') return fail(1101010011, 'a web session is required');
+      const port = body.callback_port;
+      if (
+        !B64URL_43.test(String(body.code_challenge ?? '')) ||
+        body.code_challenge_method !== 'S256' ||
+        !B64URL_43.test(String(body.state ?? '')) ||
+        typeof port !== 'number' ||
+        !Number.isInteger(port) ||
+        port < 1024 ||
+        port > 65535 ||
+        (body.client_name !== undefined &&
+          body.client_name !== '' &&
+          body.client_name !== 'yomi-cli')
+      )
+        return fail(1101010011, 'invalid params');
+      const code = randomBytes(32).toString('base64url');
+      const expiresAt = Date.now() + state.cliAuthCodeTtlMs;
+      state.cliAuthCodes.set(sha256(code).toString('hex'), {
+        challenge: String(body.code_challenge),
+        stateHash: sha256(String(body.state)).toString('hex'),
+        port,
+        expiresAt,
+      });
+      return ok({ code, expires_at: expiresAt });
+    },
+    /**
+     * Public, as `account/login`. The code is read and deleted in one step before anything is
+     * checked, so it is spent whatever the outcome; every mismatch answers the same 1101010041.
+     * The answer is at the top level (no `data`), as the server sends it.
+     */
+    'account/exchange_cli_auth_code': async (body) => {
+      state.exchanges.push(body);
+      if (state.exchangeDelayMs)
+        await new Promise((resolve) => setTimeout(resolve, state.exchangeDelayMs));
+      const refusal = state.exchangeRefusal;
+      if (refusal && (refusal.code === 1101010011 || refusal.code === 1101010181)) {
+        state.exchangeRefusal = null;
+        return fail(refusal.code, refusal.message);
+      }
+      const code = String(body.code ?? '');
+      const verifier = String(body.code_verifier ?? '');
+      const stateValue = String(body.state ?? '');
+      const port = body.callback_port;
+      const device = body.device_info as Json | undefined;
+      if (
+        !B64URL_43.test(code) ||
+        !/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) ||
+        !B64URL_43.test(stateValue) ||
+        typeof port !== 'number' ||
+        !Number.isInteger(port) ||
+        port < 1024 ||
+        port > 65535 ||
+        !device ||
+        device.os !== 3 ||
+        typeof device.idfv !== 'string' ||
+        !device.idfv
+      )
+        return fail(1101010011, 'invalid params');
+      const key = sha256(code).toString('hex');
+      const record = state.cliAuthCodes.get(key);
+      state.cliAuthCodes.delete(key);
+      if (refusal) {
+        state.exchangeRefusal = null;
+        return fail(refusal.code, refusal.message);
+      }
+      const challenge = createHash('sha256').update(verifier, 'ascii').digest('base64url');
+      if (
+        !record ||
+        record.expiresAt <= Date.now() ||
+        !sameBytes(
+          Buffer.from(record.stateHash),
+          Buffer.from(sha256(stateValue).toString('hex')),
+        ) ||
+        record.port !== port ||
+        !sameBytes(Buffer.from(record.challenge), Buffer.from(challenge))
+      )
+        return fail(1101010041, 'code invalid');
+      // Sessions are kept per account and device: this installation's earlier CLI session of the
+      // same account is replaced here, whatever the terminal answers next.
+      for (const item of state.sessions)
+        if (item.platform === 'cli' && item.idfv === device.idfv) item.revoked = true;
+      const created: Session = {
+        authToken: 'at_' + randomBytes(12).toString('hex'),
+        refreshToken: 'rt_' + randomBytes(12).toString('hex'),
+        deviceId: nextId(),
+        revoked: false,
+        platform: 'cli',
+        idfv: device.idfv,
+      };
+      state.sessions.push(created);
+      return ok({
+        user_id: BigInt(USER_ID),
+        device_id: BigInt(created.deviceId),
+        auth_token: created.authToken,
+        refresh_token: created.refreshToken,
       });
     },
     'account/get_account': (_body, user) => {
@@ -1225,13 +1461,22 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     personaRoutes(genContext),
   );
 
-  const PUBLIC = new Set(['account/login', 'account/refresh_auth_token']);
+  const PUBLIC = new Set([
+    'account/login',
+    'account/exchange_cli_auth_code',
+    'account/refresh_auth_token',
+  ]);
 
   const server: Server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', origin || 'http://127.0.0.1');
     try {
       if (request.method === 'GET' && url.pathname === '/cli/auth')
-        return respond(response, 200, WEB_PAGE(idToken()), 'text/html; charset=utf-8');
+        return respond(
+          response,
+          200,
+          WEB_PAGE(idToken(), { ...webSession, userId: USER_ID }),
+          'text/html; charset=utf-8',
+        );
       if (request.method === 'PUT' && url.pathname.startsWith('/upload/')) {
         const upload = state.uploads.get(url.pathname.slice('/upload/'.length));
         if (!upload) return respond(response, 404, 'no upload', 'text/plain');
@@ -1289,9 +1534,22 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       const path = url.pathname.slice('/ember/api/v1/'.length);
       english = url.searchParams.get('sys_language') === 'en';
       const body = (raw ? parseGatewayJson(raw) : {}) as Json;
-      state.requests.push({ path, body, headers: request.headers });
+      state.requests.push({
+        path,
+        body,
+        headers: request.headers,
+        query: Object.fromEntries(url.searchParams),
+      });
       const handler = present(path) ? routes[path] : undefined;
       if (!handler) return respond(response, 404, fail(404, `mock has no ${path}`));
+      if (path === 'account/exchange_cli_auth_code' && state.exchangeUnauthorized > 0) {
+        state.exchangeUnauthorized -= 1;
+        return respond(response, 401, '', 'text/plain');
+      }
+      if (path === 'account/logout' && state.logoutFailures > 0) {
+        state.logoutFailures -= 1;
+        return respond(response, 503, '', 'text/plain');
+      }
       const user = session(request.headers['x-token'] as string | undefined);
       if (!PUBLIC.has(path)) {
         if (!user) return respond(response, 401, fail(401, 'X-Token required'));
@@ -1301,7 +1559,14 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
         )
           return respond(response, 401, fail(40103, 'identity mismatch'));
       }
-      return respond(response, 200, await handler(body, user));
+      const answer = await handler(body, user);
+      if (path === 'account/exchange_cli_auth_code' && state.exchangeDrops > 0) {
+        // The code was read (spent) and maybe a session made; the client hears nothing.
+        state.exchangeDrops -= 1;
+        request.socket.destroy();
+        return;
+      }
+      return respond(response, 200, answer);
     } catch (error) {
       return respond(
         response,
@@ -1369,6 +1634,13 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     port,
     state,
     idToken,
+    webSession: {
+      userId: USER_ID,
+      deviceId: webSession.deviceId,
+      authToken: webSession.authToken,
+      refreshToken: webSession.refreshToken,
+    },
+    webSignInAgain,
     dropSockets,
     setOffline: (offline) => {
       state.offline = offline;
