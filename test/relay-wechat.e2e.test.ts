@@ -19,7 +19,7 @@ import {
 } from '../src/relay/channels/wechat-login.js';
 import { aesEcbPaddedSize } from '../src/relay/channels/wechat-media.js';
 import { Relay, type RelayOptions } from '../src/relay/relay.js';
-import { RelayState, relayStatePath } from '../src/relay/state.js';
+import { ownerKey, RelayState, relayStatePath } from '../src/relay/state.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -201,6 +201,9 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     expect(state.data.kind).toBe('wechat');
     expect(state.data.botId).toBe(wechatScope(wx.owner));
     expect(state.data.owner).toMatchObject({ userId: wx.owner, chatId: wx.owner, name: '' });
+    // Bound: owed the welcome, kept by a hash of the scanner.
+    expect(state.welcomeOwed).toBe(true);
+    expect(JSON.stringify(state.data.welcomed)).not.toContain(wx.owner);
   });
 
   it('prints the link with --qr-link, asks for the digits on the phone and follows a redirect', async () => {
@@ -301,6 +304,9 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     expect(kept.billing).toMatchObject({ mode: 'paid', budget: 30, spent: 4 });
     expect(kept.allowance).toMatchObject({ maxSpend: 50, spent: 12 });
     expect(kept.pending).toMatchObject({ before: 99 });
+    // Still owed the one welcome (not given yet), and no second one.
+    expect(kept.welcomeDue).toBe(ownerKey(wx.owner));
+    expect(kept.welcomed).toEqual([]);
     // A new login starts healthy.
     expect(kept.channel?.expiredCount).toBeUndefined();
     expect(kept.channel?.pausedUntil).toBeUndefined();
@@ -310,6 +316,7 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     expect(other.terminal.out).toContain('扫码的微信号现在是这个 relay 的主人');
     const fresh = stateOf('q7_other@im.wechat').data;
     expect(fresh.owner!.userId).toBe('q7_other@im.wechat');
+    expect(fresh.welcomeDue).toBe(ownerKey('q7_other@im.wechat'));
     // A new scanner starts with no budget: Yomi charges by its normal rules.
     expect(fresh.billing.mode).toBe('open');
     expect(fresh.pending).toBeNull();
@@ -356,6 +363,29 @@ describe('yomi relay --channel wechat --experimental (the command)', () => {
     const answered = wx.messages().slice(from);
     expect(answered.length).toBeGreaterThan(1);
     expect(answered.every((message) => message.context_token === wx.contextOf(id))).toBe(true);
+    // The first message after the login: the welcome before the reply (WeChat cannot speak
+    // first), the cover encrypted and uploaded like any picture.
+    const served = Buffer.from(
+      await (await fetch(`${mock.origin}/media/cover-${npc}.png`)).arrayBuffer(),
+    );
+    expect(answered.map((message) => (message.image ? message.image : message.text))).toEqual([
+      expect.stringMatching(/^你正在与 AI 角色「林夏」聊天/),
+      served,
+      '旧书店的店主，雨天总坐在窗边看书。',
+      '（雨停了，书店的门铃响了一声。）\n\n你来了。',
+      '（她合上书，看着你。）\n\n第一句？这个问题，我想了很久。',
+    ]);
+    expect(wx.uploads.at(-1)).toMatchObject({ media_type: 1, rawsize: served.length });
+    expect(stateOf(wx.owner).welcomeOwed).toBe(false);
+    // The next message: only its reply.
+    const second = wx.messages().length;
+    const next = wx.userSends('第二句');
+    await until(() => wx.texts().find((text) => text.includes('第二句？')));
+    const later = wx.messages().slice(second);
+    expect(later.every((message) => message.context_token === wx.contextOf(next))).toBe(true);
+    expect(later.map((message) => message.text)).toEqual([
+      '（她合上书，看着你。）\n\n第二句？这个问题，我想了很久。',
+    ]);
     const login = await run([
       'relay',
       '--channel',
@@ -372,6 +402,20 @@ describe('yomi relay --channel wechat --experimental (the command)', () => {
     expect(terminal.err).toContain(
       '微信结束了这次登录：请运行 yomi relay --channel wechat --experimental --login 重新扫码登录。',
     );
+  });
+});
+
+describe('the welcome over WeChat', () => {
+  it('owes nothing to the same scanner logging in again after it', async () => {
+    const welcomed = stateOf(wx.owner).data.welcomed;
+    expect(welcomed).toEqual([{ owner: ownerKey(wx.owner), npcId: npc, at: expect.any(Number) }]);
+    const again = await startLogin();
+    wx.confirm();
+    expect(await again.pending).toBe(0);
+    expect(again.terminal.out).toContain('还是同一个微信号');
+    const state = stateOf(wx.owner);
+    expect(state.welcomeOwed).toBe(false);
+    expect(state.data.welcomed).toEqual(welcomed);
   });
 });
 

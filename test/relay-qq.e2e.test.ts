@@ -13,6 +13,7 @@ import { type MockQq, startMockQq } from '../src/mock/qq.js';
 import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
 import { QqChannel, type QqChannelOptions } from '../src/relay/channels/qq.js';
 import { type ChannelHost, type InboundEvent, RelayStopped } from '../src/relay/channels/types.js';
+import { PairingCode } from '../src/relay/pairing.js';
 import { Relay, type RelayOptions } from '../src/relay/relay.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { relayTexts } from '../src/relay/texts.js';
@@ -282,6 +283,24 @@ describe('yomi relay --channel qq', () => {
     expect(paired.text).toContain('（Lin QQ bot）');
     expect(paired.replyTo).toBe(pairing);
     expect(paired.kind).toBe('text');
+    // The welcome in three of the four passive replies: the pairing, the character and the AI
+    // notice in one; the cover; the introduction and the opening.
+    await said(/你来了。$/);
+    const answered = qq.messages(OWNER).filter((message) => message.replyTo === pairing);
+    expect(answered.map((message) => [message.kind, message.seq])).toEqual([
+      ['text', 1],
+      ['media', 2],
+      ['text', 3],
+    ]);
+    expect(answered[0].text).toMatch(
+      new RegExp(`^已配对：[^]*\\n\\n当前角色：林夏（ID ${npc}）\\n\\n${NOTICE}$`),
+    );
+    const served = await fetch(`${mock.origin}/media/cover-${npc}.png`);
+    expect(answered[1].bytes!.equals(Buffer.from(await served.arrayBuffer()))).toBe(true);
+    expect(answered[1].text).toBe('');
+    expect(answered[2].text).toBe(
+      '旧书店的店主，雨天总坐在窗边看书。\n\n（雨停了，书店的门铃响了一声。）\n\n你来了。',
+    );
     const strangerMessages = qq.messages(STRANGER).length;
     qq.userSends(STRANGER, '你好');
     await sleep(300);
@@ -333,6 +352,28 @@ describe('yomi relay --channel qq', () => {
 });
 
 describe('the QQ relay', () => {
+  it('lets /report name the latest reply a pairing welcome shows, though QQ held it', async () => {
+    // A conversation from the app: the welcome shows its latest reply.
+    const other = mock.replyFromAnotherDevice(npc, '书店几点关门');
+    await qq.waitFor(
+      () =>
+        mock.state.chats
+          .get(npc)
+          ?.messages.some((message) => String(message.mid) === other.assistantMid),
+      10_000,
+    );
+    const pairing = new PairingCode();
+    const { state } = await start({}, { pairing }, { unpaired: true });
+    const welcomed = expectNew(/书店几点关门？这个问题，我想了很久。$/);
+    qq.userSends(OWNER, `/pair ${pairing.display}`);
+    await welcomed();
+    expect(state.lastReplyMid).toBe(other.assistantMid);
+    const next = expectNew(/^选择举报原因/);
+    qq.userSends(OWNER, '/report');
+    const question = await next();
+    expect(question.text).toContain('举报这个角色');
+  });
+
   it('streams the finished paragraphs of a reply, with the AI notice as its first lines', async () => {
     await start();
     const before = qq.messages(OWNER).length;
@@ -777,6 +818,31 @@ describe('the QQ presenter', () => {
       /^你不在时的消息（2 条）：\n\n图片已经生成[^]*\n\n图片已经生成[^]*\n\n（一）\n\n二$/,
     );
     expect(qq.messages(OWNER).filter((message) => message.replyTo === id)).toHaveLength(2);
+  });
+
+  it('sends what it held before a picture sent while the message is still handled', async () => {
+    const { channel, next } = await opened();
+    // A message the core is still handling (a pairing and its welcome): its sends wait.
+    const { id, event } = await next('配对', false);
+    await channel.send(OWNER, { text: '先说的话' }, event.context);
+    const picture = { bytes: solidPngBytes(8, 8, [10, 10, 200]), mime: 'image/png', name: 'c.png' };
+    const sent = await channel.sendPhoto(OWNER, picture, '', event.context);
+    expect(sent.status).toBe('sent');
+    await channel.send(OWNER, { text: '后说的话' }, event.context);
+    await channel.flush();
+    await qq.waitFor(
+      () => qq.messages(OWNER).filter((message) => message.replyTo === id).length === 3,
+    );
+    expect(
+      qq
+        .messages(OWNER)
+        .filter((message) => message.replyTo === id)
+        .map((message) => [message.kind, message.seq, message.text]),
+    ).toEqual([
+      ['text', 1, '先说的话'],
+      ['media', 2, ''],
+      ['text', 3, '后说的话'],
+    ]);
   });
 
   it('hands the held notices back when stopped, and queues what cannot go out at shutdown', async () => {

@@ -22,10 +22,11 @@ import { memoryIo } from './helpers/io.js';
 
 /**
  * The golden transcript of `yomi relay --telegram`: one scripted session against the mock gateway
- * and the mock Bot API (pairing, a chat with a single character, a group character, /price,
+ * and the mock Bot API (pairing and its welcome, a chat with a single character, a group character, /price,
  * /budget with a press, /report with a press, /image, /stop, a stale message, a non-text message,
  * an unknown command, the bot added to a group, a second poller's 409), and a snapshot of what the
- * relay said, call for call. Taken before the channel refactor, it must not change through it.
+ * relay said, call for call. Taken before the channel refactor, it must not change through it; the
+ * welcome at pairing (the character's cover, introduction and opening) came later.
  *
  * Only what is deterministic is in the snapshot: per chat, in order, `sendMessage`, `sendPhoto`,
  * `answerCallbackQuery` and `editMessageReplyMarkup`, plus `getWebhookInfo` and `setMyCommands`,
@@ -271,19 +272,22 @@ describe('the relay, golden transcript', () => {
     const press = (messageId: number, data: string) =>
       presses.set(tg.press(owner, owner.id, messageId, data), owner.id);
 
-    // Pairing: a wrong code (never valid: 0 is not in the alphabet), then the owner's.
+    // Pairing: a wrong code (never valid: 0 is not in the alphabet), then the owner's, welcomed
+    // with the AI notice, 林夏's cover, her introduction and her opening.
     let next = expectNew(stranger.id, /配对码不对/);
     tg.userSends(stranger, '/start 00000000');
     await next();
-    next = expectNew(owner.id, /当前角色：林夏/);
+    next = expectNew(owner.id, /你来了。/);
     tg.userSends(owner, `/start ${pairing.code}`);
     await next();
     expect(state.data.owner?.userId).toBe(owner.id);
+    expect(state.data.greeted).toEqual([MOCK_NPCS.single]);
+    expect(tg.photos(owner.id)).toHaveLength(1);
 
     // Once paired, a stranger gets nothing (the owner's reply below shows it was handled).
     tg.userSends(stranger, '你好，在吗');
 
-    // A chat with the single character: the AI notice, then the reply.
+    // A chat with the single character: the reply (the welcome gave the AI notice).
     next = expectNew(owner.id, /今天天气怎么样？/);
     tg.userSends(owner, '今天天气怎么样');
     await next();
@@ -331,7 +335,7 @@ describe('the relay, golden transcript', () => {
     next = expectNew(owner.id, /正在生成图片（免费）/);
     tg.userSends(owner, '/image');
     await next();
-    await tg.waitFor(() => tg.photos(owner.id).length === 1, 8000);
+    await tg.waitFor(() => tg.photos(owner.id).length === 2, 8000);
     await idle();
 
     // /stop while a slow reply streams; once it has ended, /stop has nothing to stop.
@@ -397,7 +401,8 @@ describe('the relay, golden transcript', () => {
     expect(tg.calls.filter((call) => !call.ok).map((call) => [call.method, call.error])).toEqual([
       ['getUpdates', expect.stringMatching(/^Conflict/)],
     ]);
-    // Drafts on: no typing keep-alive, only "sending a photo" before the picture.
+    // Drafts on: no typing keep-alive, only "sending a photo" before the /image picture (none
+    // before the welcome's cover).
     expect(calls('sendChatAction').map((call) => call.params)).toEqual([
       { chat_id: owner.id, action: 'upload_photo' },
     ]);

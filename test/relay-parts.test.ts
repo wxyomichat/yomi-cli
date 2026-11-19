@@ -10,7 +10,8 @@ import type { Io } from '../src/core/ui.js';
 import { ParagraphType } from '../src/im/models.js';
 import { escapeHtml, renderReply } from '../src/relay/render.js';
 import { ApiError } from '../src/core/api.js';
-import { ChatRefusal, refusalOf } from '../src/chat/api.js';
+import { type CharacterProfile, ChatRefusal, refusalOf } from '../src/chat/api.js';
+import { cutText, htmlToText, introductionOf } from '../src/chat/introduction.js';
 import { PairingCode } from '../src/relay/pairing.js';
 import { unknownOutcome } from '../src/relay/relay.js';
 import { installService, servicePlan, uninstallService } from '../src/relay/service.js';
@@ -333,5 +334,89 @@ describe('the money status texts', () => {
       expect(texts.budgetLine(status(2))).toContain(two);
       expect(texts.budgetLine(status(0))).not.toMatch(/measured|medir|另有/);
     }
+  });
+});
+
+describe("a character's introduction as plain text", () => {
+  const profile = (
+    introduction: string,
+    presentation: CharacterProfile['introductionPresentation'],
+  ): CharacterProfile => ({
+    npcId: '7300000000000009001',
+    name: '林夏',
+    group: false,
+    openingStatus: 1,
+    openingParagraphs: [],
+    visibility: 1,
+    backgroundUrl: '',
+    introduction,
+    introductionPresentation: presentation,
+  });
+
+  it('takes the text the presentation names, else the plain introduction', () => {
+    expect(introductionOf(profile('  plain  ', null))).toBe('plain');
+    expect(introductionOf(profile('plain', { mode: 1, text: 'native\r\ntext' }))).toBe(
+      'native\ntext',
+    );
+    expect(introductionOf(profile('plain', { mode: 3, text: 'fallback' }))).toBe('fallback');
+    expect(introductionOf(profile('plain', { mode: 1, text: '  ' }))).toBe('plain');
+    expect(introductionOf(profile('plain', { mode: 9, text: 'unknown' }))).toBe('plain');
+    expect(introductionOf(profile('plain', { mode: 2, text: '<p>页面</p>' }))).toBe('页面');
+    // A document without words: the plain introduction.
+    const empty = '<html><head><style>p{}</style></head><body><script>x()</script></body></html>';
+    expect(introductionOf(profile('plain', { mode: 2, text: empty }))).toBe('plain');
+    expect(introductionOf(profile('', null))).toBe('');
+  });
+
+  it('reads a controlled HTML document down to its words', () => {
+    const html = [
+      '<!doctype html><html><head><title>标题</title><style>.a { color: red }</style>',
+      '<meta charset="utf-8"></head><body>',
+      '<!-- note --><message speaker="林夏">旧书店的<b>店主</b>，',
+      '雨天   总坐在窗边。</message><narration>门铃响了</narration>',
+      '<html-box><p>第一段</p><br/><div>第二段<br>同一段</div></html-box>',
+      '<script>alert("<p>不是正文</p>")</script><svg/><svg><text>图</text></svg>',
+      '<template><p>模板</p></template><noscript>无脚本</noscript>',
+      '<iframe src="x">框</iframe><object>物</object>',
+      '<ul><li>一</li><li>二</li></ul>',
+      '<p>&lt;b&gt; &amp; &quot;引&quot; &#39;单&apos; &hellip;&mdash;&ndash;&middot;</p>',
+      '<p>&ldquo;双&rdquo;&lsquo;单&rsquo;&nbsp;&nbsp;空&#x4E2D;&#25991; &#0;&#xD800;&#1114112;&unknown;</p>',
+      '</body></html>',
+    ].join('\n');
+    expect(htmlToText(html)).toBe(
+      [
+        '旧书店的店主， 雨天 总坐在窗边。',
+        '',
+        '门铃响了',
+        '',
+        '第一段',
+        '',
+        '第二段',
+        '同一段',
+        '',
+        '一',
+        '',
+        '二',
+        '',
+        '<b> & "引" \'单\' …—–·',
+        '',
+        '“双”‘单’ 空中文 &unknown;',
+      ].join('\n'),
+    );
+    // An unclosed hidden block hides the rest; a lone "<" is text.
+    expect(htmlToText('a < b<p>c</p><script>never')).toBe('a < b\nc');
+    expect(htmlToText('')).toBe('');
+  });
+
+  it('cuts a long one at a line or sentence end, marked', () => {
+    expect(cutText('短的', 10)).toBe('短的');
+    expect(cutText('一二三四五。六七八九十十一', 10)).toBe('一二三四五。…');
+    expect(cutText('一二三四五\n六七八九十十一', 10)).toBe('一二三四五…');
+    expect(cutText('一二三四五六七八九十十一', 10)).toBe('一二三四五六七八九…');
+    // Characters, not UTF-16 units: an emoji is never cut in half.
+    expect(cutText('😀'.repeat(12), 10)).toBe('😀'.repeat(9) + '…');
+    const long = profile('长'.repeat(1500), null);
+    expect(Array.from(introductionOf(long))).toHaveLength(1000);
+    expect(Array.from(introductionOf(long, 300))).toHaveLength(300);
   });
 });

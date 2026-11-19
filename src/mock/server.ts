@@ -6,7 +6,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 
 import { encodeBody, type Json, parseGatewayJson } from '../core/json.js';
 import { chatImageRoutes } from './gen/chatImage.js';
-import type { MockBlob, MockGenContext } from './gen/context.js';
+import { type MockBlob, type MockGenContext, solidPngBytes } from './gen/context.js';
 import { imageRoutes } from './gen/image.js';
 import { personaRoutes } from './gen/persona.js';
 import { videoRoutes } from './gen/video.js';
@@ -191,6 +191,16 @@ export type MockState = {
   exchangeUnauthorized: number;
   /** The next this-many `account/logout` calls fail with a bare 503, before any check. */
   logoutFailures: number;
+  /**
+   * Fields laid over a character's `npc/get_npc_profile` answer, by character id: another
+   * introduction (`introduction_presentation`), no cover or one that is not there
+   * (`background_url`), no opening (`opening_status: 2`).
+   */
+  profilePatches: Map<string, Json>;
+  /** The next this-many `npc/get_npc_profile` calls fail with a bare 503. */
+  profileFailures: number;
+  /** The next this-many `conversation/get_conversation_info_by_entity` calls fail with a bare 503. */
+  conversationInfoFailures: number;
 };
 
 export type MockServer = {
@@ -310,6 +320,8 @@ const PERSONA_ID = 7300000000000009201n;
 type MockNpc = {
   npcId: string;
   name: string;
+  /** The introduction (sent as native text). */
+  introduction: string;
   opening: ImParagraph[];
   /** A group chat's members (`worldview_info.npc_list`); empty for a single character. */
   members: { npcId: string; name: string }[];
@@ -351,6 +363,7 @@ const NPCS_EN = new Map<string, MockNpc>([
     MOCK_NPCS.single,
     {
       ...NOVA,
+      introduction: 'She keeps an old bookshop and reads by the window whenever it rains.',
       opening: [
         narration('The rain has stopped. The bell over the bookshop door rings.'),
         line('You came.', NOVA),
@@ -363,6 +376,7 @@ const NPCS_EN = new Map<string, MockNpc>([
     {
       npcId: MOCK_NPCS.group,
       name: 'Fog Harbour',
+      introduction: 'A harbour town in the fog, where newcomers are noticed at once.',
       opening: [
         narration('Along the harbour, the lamps come on one by one.'),
         line('New here?', MEMBERS_EN[0]),
@@ -379,6 +393,7 @@ const NPCS = new Map<string, MockNpc>([
     MOCK_NPCS.single,
     {
       ...LIN_XIA,
+      introduction: '旧书店的店主，雨天总坐在窗边看书。',
       opening: [narration('雨停了，书店的门铃响了一声。'), line('你来了。', LIN_XIA)],
       members: [],
     },
@@ -388,17 +403,27 @@ const NPCS = new Map<string, MockNpc>([
     {
       npcId: MOCK_NPCS.group,
       name: '雾港',
+      introduction: '雾里的港口小镇，新来的人一眼就会被认出来。',
       opening: [narration('雾港的码头上，灯一盏盏亮起来。'), line('新来的？', MEMBERS[0])],
       members: MEMBERS,
     },
   ],
 ]);
 
-/** `npc/get_npc_profile`'s `NpcProfile`; `worldview_info` only for a group chat. */
-function profileJson(npc: MockNpc): Json {
+/** The size of a character's mock cover (a solid PNG). */
+export const MOCK_COVER = { width: 60, height: 80 };
+
+/**
+ * `npc/get_npc_profile`'s `NpcProfile`, its cover at `cover`; `worldview_info` only for a group
+ * chat.
+ */
+function profileJson(npc: MockNpc, cover: string): Json {
   return {
     npc_id: BigInt(npc.npcId),
     name: npc.name,
+    background_url: cover,
+    introduction: npc.introduction,
+    introduction_presentation: { mode: 1, text: npc.introduction },
     opening_status: 1,
     opening_paragraphs: npc.opening.map(paragraphJson),
     ...(npc.members.length
@@ -659,6 +684,9 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     exchangeDelayMs: 0,
     exchangeUnauthorized: 0,
     logoutFailures: 0,
+    profilePatches: new Map(),
+    profileFailures: 0,
+    conversationInfoFailures: 0,
     uploads: new Map(),
     characters: new Map(),
     drafts: new Map(),
@@ -1346,7 +1374,14 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
     // persona list are wrapped in `data`.
     'npc/get_npc_profile': (body) => {
       const npc = npcOf(body.npc_id);
-      return npc ? ok({ data: profileJson(npc) }) : removed();
+      if (!npc) return removed();
+      const cover = genContext.serveMedia(
+        `cover-${npc.npcId}.png`,
+        solidPngBytes(MOCK_COVER.width, MOCK_COVER.height, [190, 150, 110]),
+        'image/png',
+      );
+      const patch = state.profilePatches.get(npc.npcId) ?? {};
+      return ok({ data: { ...profileJson(npc, cover), ...patch } });
     },
     'user/get_conversation_persona_list': (body) => {
       const context = (body.context ?? {}) as Json;
@@ -1552,6 +1587,17 @@ export async function startMockServer(options: { port?: number } = {}): Promise<
       }
       if (path === 'account/logout' && state.logoutFailures > 0) {
         state.logoutFailures -= 1;
+        return respond(response, 503, '', 'text/plain');
+      }
+      if (path === 'npc/get_npc_profile' && state.profileFailures > 0) {
+        state.profileFailures -= 1;
+        return respond(response, 503, '', 'text/plain');
+      }
+      if (
+        path === 'conversation/get_conversation_info_by_entity' &&
+        state.conversationInfoFailures > 0
+      ) {
+        state.conversationInfoFailures -= 1;
         return respond(response, 503, '', 'text/plain');
       }
       const user = session(request.headers['x-token'] as string | undefined);

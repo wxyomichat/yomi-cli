@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { main } from '../src/cli.js';
 import { createContext } from '../src/commands/context.js';
-import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
+import { MOCK_COVER, type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
 import {
   type MockTelegram,
   type MockTelegramUser,
@@ -186,6 +186,31 @@ describe('yomi relay --telegram (the command)', () => {
     await said(stranger.id, /配对码不对/);
     tg.userSends(owner, `/start ${code}`);
     await said(owner.id, /已配对/);
+    // The welcome: the AI notice, the cover uploaded (no "sending a photo" first), the
+    // introduction and the opening; free.
+    await said(owner.id, /你来了。/);
+    expect(texts(owner.id)).toEqual([
+      expect.stringMatching(/^已配对/),
+      `当前角色：林夏（ID ${MOCK_NPCS.single}）`,
+      expect.stringMatching(/^你正在与 AI 角色「林夏」聊天/),
+      '旧书店的店主，雨天总坐在窗边看书。',
+      '<i>雨停了，书店的门铃响了一声。</i>\n\n你来了。',
+    ]);
+    const [cover] = tg.photos(owner.id);
+    const served = await fetch(`${mock.origin}/media/cover-${MOCK_NPCS.single}.png`);
+    expect(cover.bytes.equals(Buffer.from(await served.arrayBuffer()))).toBe(true);
+    expect([cover.mime, cover.caption, cover.width, cover.height]).toEqual([
+      'image/png',
+      '',
+      MOCK_COVER.width,
+      MOCK_COVER.height,
+    ]);
+    // Between the AI notice and the introduction.
+    const ids = tg.messages(owner.id).map((message) => message.message_id);
+    expect(cover.message_id).toBeGreaterThan(ids[2]);
+    expect(cover.message_id).toBeLessThan(ids[3]);
+    expect(tg.calls.some((call) => call.method === 'sendChatAction')).toBe(false);
+    expect(sends().length).toBe(before);
     tg.userSends(stranger, '你好，我也想聊');
     tg.userSends(stranger, `/start ${code}`);
     tg.userSends(owner, '第一句');

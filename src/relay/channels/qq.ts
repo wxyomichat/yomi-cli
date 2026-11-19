@@ -470,8 +470,10 @@ export class QqChannel implements RelayChannel, QqOutlet {
   ): Promise<Sent> {
     const given = isQqContext(context) && context.openid === to ? context : null;
     return this.serial(async () => {
-      // What was said before the picture goes first.
-      if (given && given.pending.length && !given.presenterOpen && !given.handling)
+      // What was said before the picture goes first, also while the core is still handling the
+      // message (a welcome's notice before its cover). An open reply keeps its notices as its
+      // first lines.
+      if (given && given.pending.length && !given.presenterOpen)
         await this.deliverNow(given, given.pending.splice(0));
       return this.photoNow(to, file, caption, this.passiveTarget(to, given));
     });

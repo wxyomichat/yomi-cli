@@ -82,6 +82,41 @@ exports[`the relay, golden transcript > says the same things, in the same order,
         },
       },
       {
+        "method": "sendPhoto",
+        "params": {
+          "chat_id": "5570001",
+        },
+        "photo": {
+          "height": 80,
+          "type": "image/png",
+          "width": 60,
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "旧书店的店主，雨天总坐在窗边看书。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<i>雨停了，书店的门铃响了一声。</i>
+
+你来了。",
+        },
+      },
+      {
         "method": "sendMessage",
         "params": {
           "chat_id": 5570001,
@@ -190,7 +225,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
         "method": "editMessageReplyMarkup",
         "params": {
           "chat_id": 5570001,
-          "message_id": "<message 10>",
+          "message_id": "<message 12>",
           "reply_markup": {
             "inline_keyboard": [],
           },
@@ -250,7 +285,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
         "method": "editMessageReplyMarkup",
         "params": {
           "chat_id": 5570001,
-          "message_id": "<message 12>",
+          "message_id": "<message 14>",
           "reply_markup": {
             "inline_keyboard": [],
           },

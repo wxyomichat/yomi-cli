@@ -499,15 +499,14 @@ export async function wechatLogin(
   const state = new RelayState(relayStatePath(account, scope), scope, account, 'wechat');
   const fresh = !state.data.owner;
   // The same person keeps their owner record, budget, pending charge and queue: never reset here.
+  // A new owner is owed the welcome, given before the answer to their first message.
   if (fresh)
-    state.update({
-      owner: {
-        userId: credentials.ilinkUserId,
-        chatId: credentials.ilinkUserId,
-        name: '',
-        language: '',
-        pairedAt: Date.now(),
-      },
+    state.bindOwner({
+      userId: credentials.ilinkUserId,
+      chatId: credentials.ilinkUserId,
+      name: '',
+      language: '',
+      pairedAt: Date.now(),
     });
   // A new login starts healthy: an hour's pause or a count of stale logins is the old one's.
   const channel = state.channelStore();

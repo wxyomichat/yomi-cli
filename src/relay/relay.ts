@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import {
   CHARACTER_REMOVED,
+  type CharacterProfile,
   ChatRefusal,
   characterProfile,
   characterReportReasons,
@@ -19,6 +20,7 @@ import {
   submitCharacterReport,
   submitFeedback,
 } from '../chat/api.js';
+import { introductionOf } from '../chat/introduction.js';
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
 import { tr } from '../core/i18n.js';
 import { LocalState } from '../core/state.js';
@@ -77,6 +79,7 @@ import {
   RelayStopped,
   type ReplyContext,
   type ReplyPresenter,
+  type Sent,
 } from './channels/types.js';
 import { PairingCode } from './pairing.js';
 import {
@@ -123,6 +126,16 @@ import {
  *   send is never repeated.
  * - The channel only translates: its inbound events in, the core's sends out under its own reply
  *   rules. Every rule about money, consent, policy and Yomi is here, the same on every channel.
+ * - Binding the bot to its owner (pairing in the chat, or WeChat's login) is followed once per
+ *   owner by a free welcome: the AI notice, the character's cover, its introduction, then its
+ *   opening, or its latest reply when a conversation exists. It goes at the pairing, else (WeChat,
+ *   which cannot speak first; a character chosen later; a read that failed; a channel the server
+ *   has not confirmed yet, or a paused one) before the answer to the owner's next message once it
+ *   can go, or with the character first chosen by `/character` (also when the character at the
+ *   binding is unavailable). A `/character` while it is held back leaves the opening to it. It is
+ *   free: profile and history reads only, never a `send_message`. The same owner bound again, or
+ *   a restart, gets none. `/character` later shows a character's opening once, when there is no
+ *   conversation yet.
  * - `/image` asks for a picture of a reply (one at a time, like a reply): a priced one goes as a
  *   reply does (refused under free-only, within a cap when one is set) and is measured like a
  *   reply. The request is kept before it is sent and resent only as the same request (`/image
@@ -302,6 +315,14 @@ export function unknownOutcome(error: unknown): boolean {
 const timedFetch: typeof fetch = (input, init) =>
   fetch(input, { ...init, signal: AbortSignal.timeout(60_000) });
 
+/** A character's cover is only part of a welcome: given up on sooner. */
+const coverFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, signal: AbortSignal.timeout(15_000) });
+
+/** A character's own reply in its chat (not the user's message, not a picture or a note). */
+const isReply = (item: ImMessage) =>
+  item.senderType === SenderType.assistant && item.semantic === Semantic.dialogueTurn;
+
 /** What happened to an image's gems (`ImageBillingStatus`), for the owner. */
 function billingNote(status: number): ImageBillingNote {
   switch (status) {
@@ -327,6 +348,8 @@ export class Relay {
   private policy: RelayPolicy = DEFAULT_POLICY;
   private readonly texts: RelayTexts;
   private price: { npcId: string; value: number | null; at: number } | null = null;
+  /** The unavailable character the welcome waits past, said once (`welcome`). */
+  private welcomeUnavailable = '';
   private buttons = new Map<string, Button>();
   private asides = new Set<string>();
   private noticed = new Set<string>();
@@ -678,8 +701,15 @@ export class Relay {
     }
     this.replyTo = event.context;
     await this.refreshPolicy();
-    if (Date.now() - event.sentAt > this.options.staleMs)
-      return void (await this.say(this.texts.stale));
+    // Taken before a welcome, which takes a few seconds.
+    const stale = Date.now() - event.sentAt > this.options.staleMs;
+    // A welcome still owed goes first (WeChat cannot speak before the owner's first message);
+    // `/character <id>` gives it with the character it chooses.
+    const character = this.state.data.character;
+    const choosing =
+      event.kind === 'command' && event.name.toLowerCase() === 'character' && event.argument;
+    if (character && !choosing) await this.welcome(character);
+    if (stale) return void (await this.say(this.texts.stale));
     if (!event.text) return void (await this.say(this.texts.textOnly));
     if (event.kind === 'command') return this.command(event);
     return this.chat(event, event.text);
@@ -706,14 +736,12 @@ export class Relay {
       return;
     }
     this.options.pairing = null;
-    this.state.update({
-      owner: {
-        userId: this.channel.persistId(event.from.id),
-        chatId: this.channel.persistId(event.chatId),
-        name: event.from.name.slice(0, 64),
-        language: event.from.language,
-        pairedAt: Date.now(),
-      },
+    this.state.bindOwner({
+      userId: this.channel.persistId(event.from.id),
+      chatId: this.channel.persistId(event.chatId),
+      name: event.from.name.slice(0, 64),
+      language: event.from.language,
+      pairedAt: Date.now(),
     });
     const name = this.channel.displayName;
     const who = event.from.name;
@@ -731,8 +759,9 @@ export class Relay {
     const handle = this.identity.handle;
     await this.say(this.texts.paired(handle ? `@${handle}` : this.identity.name || name));
     const character = this.state.data.character;
-    if (character) await this.say(this.texts.characterIs(character.name, character.npcId));
-    else await this.say(this.texts.noCharacter);
+    if (!character) return void (await this.say(this.texts.noCharacter));
+    await this.say(this.texts.characterIs(character.name, character.npcId));
+    await this.welcome(character);
   }
 
   private async command(event: InboundCommand) {
@@ -855,7 +884,11 @@ export class Relay {
     );
     if (!announce) return;
     await this.say(this.texts.characterSet(character.name));
+    // The first character since the bot was bound: the welcome, with this one.
+    if (await this.welcome(character, profile, true)) return;
     await this.notice(character, true);
+    // The welcome is owed but held back (an unconfirmed or paused channel): it shows the opening.
+    if (this.state.welcomeOwed) return;
     // A first chat shows the opening, as the app does; the server keeps no message for it.
     const greeted = this.state.data.greeted;
     if (greeted.includes(npcId)) return;
@@ -871,6 +904,169 @@ export class Relay {
     ))
       await this.sayFormatted(text);
     this.state.update({ greeted: [...greeted, npcId].slice(-200) });
+  }
+
+  /**
+   * The welcome the bound owner is owed (`RelayState.bindOwner`), with `character`: the AI notice,
+   * the cover, the introduction, then the opening when there is no conversation yet (it counts as
+   * shown), else the character's latest reply. Free: profile and history reads only, never a send.
+   * Not now (it stays owed) while the relay is paused or a reply is open. Never throws: an
+   * unreadable profile keeps it owed, and so does an unavailable character (the next one chosen
+   * gets it); a cover that cannot be had is left out, an unreadable history leaves out the last
+   * part. True when it was given.
+   */
+  private async welcome(
+    character: RelayCharacter,
+    given?: CharacterProfile,
+    force = false,
+  ): Promise<boolean> {
+    if (!this.state.welcomeOwed || this.gate || this.channelPaused() || this.turn) return false;
+    let profile = given;
+    if (!profile) {
+      try {
+        profile = await characterProfile(this.gateway, character.npcId);
+      } catch (error) {
+        // Signed out: the owner's message that follows finds out and says so.
+        if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
+          return false;
+        if (error instanceof ChatRefusal && error.kind === 'unavailable') {
+          if (this.welcomeUnavailable !== character.npcId)
+            this.log(
+              tr(
+                `角色「${character.name}」不可用：介绍等选好角色后再发`,
+                `"${character.name}" is unavailable: the introduction goes with the character chosen next`,
+                `"${character.name}" no está disponible: la presentación se enviará con el próximo personaje que se elija`,
+                `"${character.name}" não está disponível: a apresentação será enviada com o próximo personagem escolhido`,
+              ),
+            );
+          this.welcomeUnavailable = character.npcId;
+          return false;
+        }
+        this.log(
+          tr(
+            '读不到角色资料：介绍和开场白下次再发',
+            "Can't read the character's profile: the introduction and opening are sent later",
+            'No se puede leer el perfil del personaje: la presentación y el mensaje de apertura se enviarán más tarde',
+            'Não foi possível ler o perfil do personagem: a apresentação e a mensagem de abertura serão enviadas depois',
+          ),
+        );
+        return false;
+      }
+    }
+    // Saved first: a crash or a restart halfway never gives it twice.
+    this.state.markWelcomed(character.npcId);
+    await this.notice(character, force);
+    await this.sendCover(character, profile);
+    await this.say(introductionOf(profile, this.channel.caps.maxText));
+    let history: { cid: string; recent: ImMessage[] };
+    try {
+      history = await this.recentHistory(character.npcId);
+    } catch {
+      this.log(
+        tr(
+          '读不到聊天记录：没有发开场白或最近一条回复',
+          "Can't read the chat history: the opening or latest reply was not sent",
+          'No se puede leer el historial del chat: no se envió el mensaje de apertura ni la última respuesta',
+          'Não foi possível ler o histórico do chat: a mensagem de abertura ou a última resposta não foi enviada',
+        ),
+      );
+      return true;
+    }
+    const { maxText, format } = this.channel.caps;
+    const render = { characterName: character.name, group: character.group };
+    // No conversation yet: its opening (none when the character has none).
+    const opening = history.cid ? [] : renderReply(openingOf(profile), render, maxText, format);
+    for (const text of opening) await this.sayFormatted(text);
+    if (!history.cid) {
+      const greeted = this.state.data.greeted;
+      if (!greeted.includes(character.npcId))
+        this.state.update({ greeted: [...greeted, character.npcId].slice(-200) });
+    }
+    if (opening.length) {
+      this.log(
+        tr(
+          `已向主人发送「${character.name}」的介绍和开场白`,
+          `Sent the owner the introduction and opening of "${character.name}"`,
+          `Se envió al dueño la presentación y el mensaje de apertura de "${character.name}"`,
+          `A apresentação e a mensagem de abertura de "${character.name}" foram enviadas ao dono`,
+        ),
+      );
+      return true;
+    }
+    // No opening, or a conversation without a reply in its latest messages: the introduction alone.
+    const reply = history.recent.find(isReply);
+    if (!reply) {
+      this.log(
+        tr(
+          `已向主人发送「${character.name}」的介绍`,
+          `Sent the owner the introduction of "${character.name}"`,
+          `Se envió al dueño la presentación de "${character.name}"`,
+          `A apresentação de "${character.name}" foi enviada ao dono`,
+        ),
+      );
+      return true;
+    }
+    // Named by its pieces, so /report and a quoted /image find it.
+    let named = false;
+    let held = false;
+    for (const text of renderReply(reply.content.paragraphs, render, maxText, format)) {
+      const sent = await this.sayFormatted(text);
+      held ||= sent?.status === 'queued';
+      if (sent?.status !== 'sent') continue;
+      for (const ref of sent.refs) this.state.rememberReply(this.channel.persistId(ref), reply.mid);
+      named ||= sent.refs.length > 0;
+    }
+    // Held for the message being handled (QQ: no refs, and no quotes): /report still finds it.
+    if (held && !named) this.state.rememberReply(`welcome:${reply.mid}`, reply.mid);
+    this.log(
+      tr(
+        `已向主人发送「${character.name}」的介绍和最近一条回复`,
+        `Sent the owner the introduction and latest reply of "${character.name}"`,
+        `Se envió al dueño la presentación y la última respuesta de "${character.name}"`,
+        `A apresentação e a última resposta de "${character.name}" foram enviadas ao dono`,
+      ),
+    );
+    return true;
+  }
+
+  /**
+   * The character's cover (`background_url`), downloaded here and uploaded as a picture with no
+   * caption; left out when there is none, it cannot be had or the channel refuses it.
+   */
+  private async sendCover(character: RelayCharacter, profile: CharacterProfile) {
+    const owner = this.state.data.owner;
+    if (!owner || !profile.backgroundUrl) return;
+    let file: OutgoingFile | null = null;
+    try {
+      const { bytes } = await download(profile.backgroundUrl, {
+        maxBytes: this.channel.caps.maxPhotoBytes,
+        fetcher: coverFetch,
+      });
+      const mime = sniffMime(bytes);
+      if (mime) file = { bytes, mime, name: `cover-${character.npcId}.${extensionOf(mime)}` };
+    } catch {
+      // Said below.
+    }
+    if (!file)
+      return this.log(
+        tr(
+          '角色封面下载失败，只发文字',
+          "Couldn't download the character's cover: sending text only",
+          'No se pudo descargar la portada del personaje: solo se envía texto',
+          'Não foi possível baixar a capa do personagem: só o texto é enviado',
+        ),
+      );
+    try {
+      await this.channel.sendPhoto(String(owner.chatId), file, '', this.replyTo);
+    } catch (error) {
+      this.sendFailed(error);
+    }
+  }
+
+  /** The character's conversation ('' when none yet) and its latest 30 messages, newest first. */
+  private async recentHistory(npcId: string): Promise<{ cid: string; recent: ImMessage[] }> {
+    const cid = await conversationId(this.gateway, npcId);
+    return { cid, recent: cid ? await listMessages(this.gateway, cid, 30) : [] };
   }
 
   /** The relay's own AI notice: at the start of a run and every 3 hours, unless the server does it. */
@@ -1968,8 +2164,7 @@ export class Relay {
     let cid = '';
     let recent: ImMessage[] = [];
     try {
-      cid = await conversationId(this.gateway, npcId);
-      if (cid) recent = await listMessages(this.gateway, cid, 30);
+      ({ cid, recent } = await this.recentHistory(npcId));
     } catch (error) {
       if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn)) {
         await this.signedOut();
@@ -1979,8 +2174,6 @@ export class Relay {
       await this.say(removed ? this.texts.unavailable : this.texts.imageHistoryUnavailable);
       return null;
     }
-    const isReply = (item: ImMessage) =>
-      item.senderType === SenderType.assistant && item.semantic === Semantic.dialogueTurn;
     if (event.replyTo) {
       const mid = this.state.replyMid(event.replyTo);
       const known = recent.find((item) => item.mid === mid);
@@ -2766,13 +2959,15 @@ export class Relay {
     return this.deliver({ text, formatted: true });
   }
 
-  private async deliver(message: OutgoingText): Promise<void> {
+  /** What the channel did with it; null when it was not sent (a failure is logged). */
+  private async deliver(message: OutgoingText): Promise<Sent | null> {
     const owner = this.state.data.owner;
-    if (!owner || !message.text) return;
+    if (!owner || !message.text) return null;
     try {
-      await this.channel.send(String(owner.chatId), message, this.replyTo);
+      return await this.channel.send(String(owner.chatId), message, this.replyTo);
     } catch (error) {
       this.sendFailed(error);
+      return null;
     }
   }
 

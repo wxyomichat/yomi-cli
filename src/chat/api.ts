@@ -289,6 +289,15 @@ export type CharacterProfile = {
   openingParagraphs: ImParagraph[];
   /** `PrivacySetting`: 1 public, 2 private, 3 unlisted; 0 when absent. */
   visibility: number;
+  /** The cover picture's address, '' when there is none (read only through `download`). */
+  backgroundUrl: string;
+  /** The introduction as plain text (placeholders already replaced by the server). */
+  introduction: string;
+  /**
+   * How the app shows the introduction (`IntroductionMode`: 1 native text, 2 a controlled HTML
+   * document, 3 a plain fallback), null when the server sent none (introduction.ts reads it).
+   */
+  introductionPresentation: { mode: number; text: string } | null;
 };
 
 /** `npc/get_npc_profile` → `{data: NpcProfile}`. */
@@ -304,6 +313,8 @@ export async function characterProfile(gateway: Gateway, npcId: string): Promise
     throw refusalOf(error);
   }
   const name = text(data.name).trim();
+  const presentation = optionalObject(data.introduction_presentation);
+  const mode = count(presentation.mode);
   return {
     npcId: optionalId(data.npc_id) || npcId,
     name: name || tr('角色', 'Character', 'Personaje', 'Personagem'),
@@ -311,6 +322,9 @@ export async function characterProfile(gateway: Gateway, npcId: string): Promise
     openingStatus: count(data.opening_status),
     openingParagraphs: list(data.opening_paragraphs).map(parseParagraph),
     visibility: count(data.visibility),
+    backgroundUrl: text(data.background_url).trim(),
+    introduction: text(data.introduction),
+    introductionPresentation: mode ? { mode, text: text(presentation.text) } : null,
   };
 }
 

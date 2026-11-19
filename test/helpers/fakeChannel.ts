@@ -7,6 +7,7 @@ import {
   type BotCommand,
   type BotIdentity,
   type ChannelCaps,
+  type ChannelError,
   type ChannelHost,
   type ChannelKind,
   channelName,
@@ -134,6 +135,10 @@ export class FakeChannel implements RelayChannel {
   closes = 0;
   /** True: every send is queued for the owner's next message instead of sent. */
   queueSends = false;
+  /** The pictures sent, in order (their bytes and type). */
+  readonly photos: OutgoingFile[] = [];
+  /** When set, sendPhoto fails with it (nothing is shown). */
+  photoError: ChannelError | null = null;
   /** A presenter's stop() waits this long, and for `stopHold` when set. */
   stopDelayMs = 0;
   stopHold: Promise<void> | null = null;
@@ -358,6 +363,8 @@ export class FakeChannel implements RelayChannel {
     caption: string,
     context: ReplyContext | null,
   ): Promise<Sent> {
+    if (this.photoError) throw this.photoError;
+    this.photos.push(file);
     return {
       status: 'sent',
       refs: [this.record('photo', to, `${file.name} ${caption}`, false, context)],

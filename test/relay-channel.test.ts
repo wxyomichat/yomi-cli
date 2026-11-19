@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -44,7 +44,13 @@ import {
   TELEGRAM_HTML,
 } from '../src/relay/render.js';
 import { servicePlan } from '../src/relay/service.js';
-import { forgetRelayStates, RelayState, relayStatePath } from '../src/relay/state.js';
+import {
+  forgetRelayStates,
+  ownerKey,
+  RelayState,
+  type RelayStateFile,
+  relayStatePath,
+} from '../src/relay/state.js';
 import { TelegramBot, TelegramError } from '../src/relay/telegram.js';
 import { relayTexts } from '../src/relay/texts.js';
 import { FakeChannel, waitFor } from './helpers/fakeChannel.js';
@@ -361,6 +367,98 @@ describe('the relay state per channel', () => {
     expect(forgetRelayStates('test', folder)).toBe(1);
     expect(forgetRelayStates('prod', folder, 'wechat')).toBe(0);
     expect(forgetRelayStates('prod', folder, 'qq')).toBe(1);
+  });
+
+  const ownerOf = (userId: number | string) => ({
+    userId,
+    chatId: userId,
+    name: 'Lin',
+    language: 'zh',
+    pairedAt: 1,
+  });
+
+  it('owes the welcome to a newly bound owner only, and keeps who it welcomed by a hash', () => {
+    const folder = dir();
+    const path = relayStatePath('test', '7000000002', folder);
+    const state = new RelayState(path, '7000000002', 'test');
+    expect([state.data.welcomed, state.data.welcomeDue, state.welcomeOwed]).toEqual([
+      [],
+      '',
+      false,
+    ]);
+    state.bindOwner(ownerOf(5550001));
+    expect(state.data.owner?.userId).toBe(5550001);
+    expect(state.data.welcomeDue).toBe(ownerKey(5550001));
+    expect(state.welcomeOwed).toBe(true);
+    state.markWelcomed(MOCK_NPCS.single);
+    expect(state.welcomeOwed).toBe(false);
+    expect(state.data.welcomed).toEqual([
+      { owner: ownerKey(5550001), npcId: MOCK_NPCS.single, at: expect.any(Number) },
+    ]);
+    // The same owner pairs again: kept welcomed, owed nothing; the old id is not kept in clear.
+    state.resetOwner();
+    expect([state.data.owner, state.data.welcomeDue]).toEqual([null, '']);
+    expect(readFileSync(path, 'utf8')).not.toContain('5550001');
+    state.bindOwner(ownerOf(5550001));
+    expect(state.welcomeOwed).toBe(false);
+    // Another person: owed, until welcomed; another Yomi account changes neither.
+    state.resetOwner();
+    state.bindOwner(ownerOf(5550002));
+    expect(state.welcomeOwed).toBe(true);
+    state.bindAccount('7300000000000000101');
+    state.bindAccount('7300000000000000999');
+    expect(state.welcomeOwed).toBe(true);
+    expect(state.data.welcomed).toHaveLength(1);
+    state.markWelcomed(MOCK_NPCS.group);
+    expect(state.data.welcomed.map((record) => record.owner)).toEqual([
+      ownerKey(5550001),
+      ownerKey(5550002),
+    ]);
+    // A welcome owed to someone else is not this owner's.
+    state.update({ welcomeDue: ownerKey(5550001) });
+    expect(state.welcomeOwed).toBe(false);
+    // Still a Telegram file as before channels.
+    const stored = JSON.parse(readFileSync(path, 'utf8'));
+    expect(Object.keys(stored)).not.toContain('kind');
+    expect(Object.keys(stored)).not.toContain('channel');
+    // Twenty owners at most, newest last.
+    for (let index = 0; index < 25; index++) {
+      state.bindOwner(ownerOf(`user-${index}`));
+      state.markWelcomed(MOCK_NPCS.single);
+    }
+    expect(state.data.welcomed).toHaveLength(20);
+    expect(state.data.welcomed.at(-1)!.owner).toBe(ownerKey('user-24'));
+  });
+
+  it('counts the owner of a file from before welcomes as welcomed', () => {
+    const folder = dir();
+    const old = (scope: string, owner: ReturnType<typeof ownerOf> | null) => {
+      const path = relayStatePath('test', scope, folder);
+      mkdirSync(dirname(path), { recursive: true });
+      const fresh = new RelayState(path, scope, 'test', 'qq').data as Partial<RelayStateFile>;
+      delete fresh.welcomed;
+      delete fresh.welcomeDue;
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...fresh,
+          owner,
+          character: { npcId: MOCK_NPCS.single, name: '林夏', group: false },
+        }),
+      );
+      return new RelayState(path, scope, 'test', 'qq');
+    };
+    const upgraded = old('qq:102000011', ownerOf('openid-old'));
+    expect(upgraded.data.welcomed).toEqual([
+      { owner: ownerKey('openid-old'), npcId: MOCK_NPCS.single, at: 0 },
+    ]);
+    expect([upgraded.data.welcomeDue, upgraded.welcomeOwed]).toEqual(['', false]);
+    upgraded.bindOwner(ownerOf('openid-old'));
+    expect(upgraded.welcomeOwed).toBe(false);
+    const unpaired = old('qq:102000012', null);
+    expect(unpaired.data.welcomed).toEqual([]);
+    unpaired.bindOwner(ownerOf('openid-new'));
+    expect(unpaired.welcomeOwed).toBe(true);
   });
 });
 
@@ -773,10 +871,17 @@ describe('the core on any channel', () => {
     expect(await pending).toBe(0);
   }
 
-  /** A relay on `fake`, paired with its owner unless `unpaired`, listening for events. */
+  /**
+   * A relay on `fake`, paired with its owner unless `unpaired`, listening for events. `bound`: the
+   * owner is bound as a pairing or a login does it (owed the welcome), not just written.
+   */
   async function start(
     fake: FakeChannel,
-    { unpaired = false, ...overrides }: Partial<RelayOptions> & { unpaired?: boolean } = {},
+    {
+      unpaired = false,
+      bound = false,
+      ...overrides
+    }: Partial<RelayOptions> & { unpaired?: boolean; bound?: boolean } = {},
   ) {
     const context = createContext(
       memoryIo().io,
@@ -785,16 +890,17 @@ describe('the core on any channel', () => {
     );
     const path = relayStatePath(context.account, fake.scope);
     const state = new RelayState(path, fake.scope, context.account, fake.kind);
-    if (!unpaired && !state.data.owner)
-      state.update({
-        owner: {
-          userId: fake.ownerId,
-          chatId: fake.ownerId,
-          name: '',
-          language: '',
-          pairedAt: Date.now(),
-        },
-      });
+    const owner = {
+      userId: fake.ownerId,
+      chatId: fake.ownerId,
+      name: '',
+      language: '',
+      pairedAt: Date.now(),
+    };
+    if (!unpaired && !state.data.owner) {
+      if (bound) state.bindOwner(owner);
+      else state.update({ owner });
+    }
     const logs: string[] = [];
     const relay = new Relay(context.gateway, fake, state, {
       maxSpend: 50,
@@ -1248,5 +1354,440 @@ describe('the core on any channel', () => {
     } finally {
       mock.state.relayPolicy = policy;
     }
+  });
+
+  const NOTICE = /^你正在与 AI 角色「林夏」聊天：/;
+  const INTRODUCTION = '旧书店的店主，雨天总坐在窗边看书。';
+  const OPENING = '（雨停了，书店的门铃响了一声。）\n\n你来了。';
+  const COVER = `cover-${MOCK_NPCS.single}.png `;
+  const kinds = (fake: FakeChannel, from = 0) => fake.sends.slice(from).map((send) => send.kind);
+  /** The owner's code pairing, handled (with its welcome) before this returns. */
+  async function paired(fake: FakeChannel, pairing: PairingCode) {
+    const next = fake.expect(/^(当前角色|还没有选择角色)/);
+    fake.say(`/pair ${pairing.display}`);
+    await next();
+    await fake.idle();
+  }
+
+  it('welcomes an owner who pairs with a code: notice, cover, introduction, opening; nothing sent', async () => {
+    for (const kind of ['qq', 'telegram'] as const) {
+      mock.state.chats.delete(MOCK_NPCS.single);
+      const pairing = new PairingCode();
+      const fake = new FakeChannel({ kind, scope: `fake:welcome-${kind}`, ownerId: '5550101' });
+      const { relay, state, logs, stop } = await start(fake, { pairing, unpaired: true });
+      const before = sends().length;
+      await paired(fake, pairing);
+      expect(kinds(fake), kind).toEqual(['text', 'text', 'text', 'photo', 'text', 'text']);
+      const [pairedText, current, notice, photo, introduction, opening] = fake.texts();
+      expect(pairedText).toMatch(/^已配对/);
+      expect(current).toBe(`当前角色：林夏（ID ${MOCK_NPCS.single}）`);
+      expect(notice).toMatch(NOTICE);
+      expect(photo).toBe(COVER);
+      expect(introduction).toBe(INTRODUCTION);
+      expect(opening).toBe(
+        kind === 'qq' ? OPENING : '<i>雨停了，书店的门铃响了一声。</i>\n\n你来了。',
+      );
+      expect(fake.sends[5].formatted).toBe(true);
+      // The cover's own bytes, uploaded: never a link.
+      const served = await fetch(`${mock.origin}/media/${encodeURIComponent(COVER.trim())}`);
+      expect(fake.photos[0].bytes.equals(Buffer.from(await served.arrayBuffer()))).toBe(true);
+      expect(fake.photos[0].mime).toBe('image/png');
+      // Free: profile and history reads only.
+      expect(sends()).toHaveLength(before);
+      expect(state.data.greeted).toContain(MOCK_NPCS.single);
+      expect(state.welcomeOwed).toBe(false);
+      expect(state.data.welcomed.at(-1)).toMatchObject({
+        owner: ownerKey('5550101'),
+        npcId: MOCK_NPCS.single,
+      });
+      expect(logs).toContain('已向主人发送「林夏」的介绍和开场白');
+      // The first chat: the reply, without a second notice.
+      await chatted(fake, relay, '你好');
+      expect(fake.texts().filter((text) => NOTICE.test(text))).toHaveLength(1);
+      expect(fake.photos).toHaveLength(1);
+      await stop();
+    }
+  });
+
+  it('welcomes with the character first chosen when none was set at binding', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    mock.state.chats.delete(MOCK_NPCS.group);
+    const pairing = new PairingCode();
+    const fake = new FakeChannel({ scope: 'fake:welcome-later' });
+    const { state } = await start(fake, { pairing, unpaired: true, characterId: '' });
+    await paired(fake, pairing);
+    expect(fake.texts()).toEqual([
+      expect.stringMatching(/^已配对/),
+      expect.stringMatching(/^还没有/),
+    ]);
+    expect(state.welcomeOwed).toBe(true);
+    let from = fake.sends.length;
+    let next = fake.expect(/你来了。$/);
+    fake.say(`/character ${MOCK_NPCS.single}`);
+    await next();
+    await fake.idle();
+    expect(kinds(fake, from)).toEqual(['text', 'text', 'photo', 'text', 'text']);
+    expect(fake.texts().slice(from)).toEqual([
+      '已切换到「林夏」。',
+      expect.stringMatching(NOTICE),
+      COVER,
+      INTRODUCTION,
+      OPENING,
+    ]);
+    expect(state.welcomeOwed).toBe(false);
+    // Switching later: as before, the notice and the opening once, no cover or introduction.
+    from = fake.sends.length;
+    next = fake.expect(/新来的？$/);
+    fake.say(`/character ${MOCK_NPCS.group}`);
+    await next();
+    await fake.idle();
+    expect(kinds(fake, from)).toEqual(['text', 'text', 'text']);
+    expect(fake.texts()[from]).toBe('已切换到「雾港」。');
+    expect(state.data.greeted).toEqual([MOCK_NPCS.single, MOCK_NPCS.group]);
+    // Back to the first: its opening was shown, so only the notice.
+    from = fake.sends.length;
+    next = fake.expect(/^你正在与 AI 角色「林夏」聊天/);
+    fake.say(`/character ${MOCK_NPCS.single}`);
+    await next();
+    await fake.idle();
+    expect(kinds(fake, from)).toEqual(['text', 'text']);
+  });
+
+  it('gives the latest reply instead of the opening when a conversation exists', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const other = mock.replyFromAnotherDevice(MOCK_NPCS.single, '在吗');
+    await waitFor(() =>
+      mock.state.chats
+        .get(MOCK_NPCS.single)
+        ?.messages.some((message) => String(message.mid) === other.assistantMid),
+    );
+    const fake = new FakeChannel({ scope: 'fake:welcome-chatted' });
+    const { state, logs } = await start(fake, { bound: true });
+    const before = sends().length;
+    const next = fake.expect(/^直接发文字/);
+    fake.say('/help');
+    await next();
+    await fake.idle();
+    expect(kinds(fake)).toEqual(['text', 'photo', 'text', 'text', 'text']);
+    expect(fake.texts().slice(1, 4)).toEqual([
+      COVER,
+      INTRODUCTION,
+      '（她合上书，看着你。）\n\n在吗？这个问题，我想了很久。',
+    ]);
+    // Not an opening: greeted stays; /report and a quoted /image can name the reply.
+    expect(state.data.greeted).toEqual([]);
+    expect(state.lastReplyMid).toBe(other.assistantMid);
+    expect(state.replyMid('ref-4')).toBe(other.assistantMid);
+    expect(logs).toContain('已向主人发送「林夏」的介绍和最近一条回复');
+    expect(sends()).toHaveLength(before);
+  });
+
+  it('welcomes a WeChat owner before the answer to their first message, once, across restarts', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const scope = 'fake:welcome-wx';
+    // Nobody to answer yet: a restart before the first message keeps it owed.
+    const first = new FakeChannel({ kind: 'wechat', scope });
+    const one = await start(first, { bound: true });
+    await first.idle();
+    expect(first.sends).toEqual([]);
+    expect(one.state.welcomeOwed).toBe(true);
+    await one.stop();
+    const fake = new FakeChannel({ kind: 'wechat', scope });
+    const { relay, state } = await start(fake);
+    await chatted(fake, relay, '第一句');
+    expect(kinds(fake)).toEqual(['text', 'photo', 'text', 'text', 'reply']);
+    expect(fake.texts().slice(0, 4)).toEqual([
+      expect.stringMatching(NOTICE),
+      COVER,
+      INTRODUCTION,
+      OPENING,
+    ]);
+    // All of it answers that message.
+    const context = fake.sends[0].context;
+    expect(context).not.toBeNull();
+    expect(fake.sends.every((send) => send.context === context)).toBe(true);
+    expect(state.welcomeOwed).toBe(false);
+    await chatted(fake, relay, '第二句');
+    expect(fake.photos).toHaveLength(1);
+    expect(fake.texts().filter((text) => text === INTRODUCTION)).toHaveLength(1);
+    // A restart (a background service too) never gives it again.
+    const three = new FakeChannel({ kind: 'wechat', scope });
+    const restarted = await start(three);
+    await chatted(three, restarted.relay, '重启之后');
+    expect(three.photos).toEqual([]);
+    expect(three.texts()).not.toContain(INTRODUCTION);
+  });
+
+  it('does not welcome the same owner after a re-pairing; another owner is welcomed', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const scope = 'fake:welcome-again';
+    const pairAs = async (from: string) => {
+      const pairing = new PairingCode();
+      const fake = new FakeChannel({ scope, ownerId: from });
+      const run = await start(fake, { pairing, unpaired: true });
+      await paired(fake, pairing);
+      await run.stop();
+      return { fake, state: run.state };
+    };
+    const first = await pairAs('openid-a');
+    expect(first.fake.photos).toHaveLength(1);
+    first.state.resetOwner();
+    const same = await pairAs('openid-a');
+    expect(kinds(same.fake)).toEqual(['text', 'text']);
+    same.state.resetOwner();
+    const other = await pairAs('openid-b');
+    expect(kinds(other.fake)).toEqual(['text', 'text', 'text', 'photo', 'text', 'text']);
+    expect(other.state.data.welcomed.map((record) => record.owner)).toEqual([
+      ownerKey('openid-a'),
+      ownerKey('openid-b'),
+    ]);
+  });
+
+  it('welcomes nobody on an upgrade: the owner of an older file chats as before', async () => {
+    const fake = new FakeChannel({ scope: 'fake:welcome-upgrade' });
+    const context = createContext(memoryIo().io, {}, { client: 'relay-qq', channel: 'cli_relay' });
+    const path = relayStatePath(context.account, fake.scope);
+    const older = new RelayState(path, fake.scope, context.account, 'qq');
+    older.update({
+      owner: { userId: fake.ownerId, chatId: fake.ownerId, name: '', language: '', pairedAt: 1 },
+    });
+    const { welcomed: _welcomed, welcomeDue: _due, ...before } = older.data;
+    writeFileSync(path, JSON.stringify(before));
+    const { relay, state } = await start(fake);
+    await chatted(fake, relay, '升级之后');
+    expect(fake.photos).toEqual([]);
+    expect(fake.texts()).not.toContain(INTRODUCTION);
+    expect(state.data.welcomed).toEqual([{ owner: ownerKey(fake.ownerId), npcId: '', at: 0 }]);
+  });
+
+  it('sends the text when the cover cannot be had or sent; an HTML introduction as plain text', async () => {
+    const cases = [
+      {
+        name: 'missing',
+        patch: { background_url: `${mock.origin}/media/no-such-cover.png` },
+        log: '角色封面下载失败，只发文字',
+      },
+      { name: 'large', caps: { maxPhotoBytes: 100 }, log: '角色封面下载失败，只发文字' },
+      { name: 'refused', refuse: true, log: '发给 QQ 失败（500）' },
+      { name: 'none', patch: { background_url: '' }, log: '' },
+    ];
+    try {
+      for (const item of cases) {
+        mock.state.chats.delete(MOCK_NPCS.single);
+        mock.state.profilePatches.set(MOCK_NPCS.single, {
+          ...item.patch,
+          introduction_presentation: {
+            mode: 2,
+            text: '<html><head><style>p{}</style></head><body><message>旧书店的<b>店主</b>。</message><script>x()</script><p>雨天&amp;窗边</p></body></html>',
+          },
+        });
+        const fake = new FakeChannel({ scope: `fake:cover-${item.name}`, caps: item.caps });
+        if (item.refuse)
+          fake.photoError = new ChannelError(
+            'qq',
+            'POST /v2/users/{openid}/files',
+            500,
+            'x',
+            'transient',
+          );
+        const { relay, logs } = await start(fake, { bound: true });
+        await chatted(fake, relay, '你好');
+        expect(fake.photos, item.name).toEqual([]);
+        expect(kinds(fake), item.name).toEqual(['text', 'text', 'text', 'reply']);
+        expect(fake.texts().slice(1, 3)).toEqual(['旧书店的店主。\n\n雨天&窗边', OPENING]);
+        if (item.log) expect(logs, item.name).toContain(item.log);
+      }
+    } finally {
+      mock.state.profilePatches.clear();
+    }
+  });
+
+  it('keeps the welcome owed when the profile cannot be read, and gives it at the next message', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const pairing = new PairingCode();
+    const fake = new FakeChannel({ scope: 'fake:welcome-noprofile' });
+    const { relay, state, logs } = await start(fake, { pairing, unpaired: true });
+    mock.state.profileFailures = 1;
+    try {
+      await paired(fake, pairing);
+      expect(kinds(fake)).toEqual(['text', 'text']);
+      expect(logs).toContain('读不到角色资料：介绍和开场白下次再发');
+      expect(state.welcomeOwed).toBe(true);
+      await chatted(fake, relay, '你好');
+      expect(kinds(fake, 2)).toEqual(['text', 'photo', 'text', 'text', 'reply']);
+      expect(state.welcomeOwed).toBe(false);
+    } finally {
+      mock.state.profileFailures = 0;
+    }
+  });
+
+  it('leaves out the last part when the history cannot be read, and still relays', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const fake = new FakeChannel({ scope: 'fake:welcome-nohistory' });
+    const { relay, state, logs } = await start(fake, { bound: true });
+    mock.state.conversationInfoFailures = 1;
+    try {
+      await chatted(fake, relay, '你好');
+      expect(kinds(fake)).toEqual(['text', 'photo', 'text', 'reply']);
+      expect(fake.texts()[2]).toBe(INTRODUCTION);
+      expect(logs).toContain('读不到聊天记录：没有发开场白或最近一条回复');
+      expect(state.welcomeOwed).toBe(false);
+      expect(state.data.greeted).toEqual([]);
+    } finally {
+      mock.state.conversationInfoFailures = 0;
+    }
+  });
+
+  it('waits with the welcome until the server confirms the channel', async () => {
+    const policy = mock.state.relayPolicy;
+    mock.state.relayPolicy = null;
+    try {
+      mock.state.chats.delete(MOCK_NPCS.single);
+      const pairing = new PairingCode();
+      const fake = new FakeChannel({ scope: 'fake:welcome-gated' });
+      const { relay, state } = await start(fake, {
+        pairing,
+        unpaired: true,
+        requireServerPolicy: true,
+        policyRefetchMs: 300,
+      });
+      await paired(fake, pairing);
+      expect(kinds(fake)).toEqual(['text', 'text']);
+      expect(state.welcomeOwed).toBe(true);
+      mock.state.relayPolicy = {
+        enabled: true,
+        channel: 'qq',
+        features: { free_only: true, spend_cap: true },
+      };
+      await sleep(350);
+      await chatted(fake, relay, '现在可以了吗');
+      expect(kinds(fake, 2)).toEqual(['text', 'photo', 'text', 'text', 'reply']);
+    } finally {
+      mock.state.relayPolicy = policy;
+    }
+  });
+
+  it('leaves the opening to a welcome held back when /character runs: shown once', async () => {
+    const policy = mock.state.relayPolicy;
+    mock.state.relayPolicy = null;
+    try {
+      mock.state.chats.delete(MOCK_NPCS.single);
+      const pairing = new PairingCode();
+      const fake = new FakeChannel({ scope: 'fake:welcome-gated-choose' });
+      const { relay, state } = await start(fake, {
+        pairing,
+        unpaired: true,
+        characterId: '',
+        requireServerPolicy: true,
+        policyRefetchMs: 300,
+      });
+      await paired(fake, pairing);
+      expect(state.welcomeOwed).toBe(true);
+      // Not confirmed yet: the notice, and the opening left to the welcome.
+      const next = fake.expect(NOTICE);
+      fake.say(`/character ${MOCK_NPCS.single}`);
+      await next();
+      await fake.idle();
+      expect(fake.texts().slice(2)).toEqual(['已切换到「林夏」。', expect.stringMatching(NOTICE)]);
+      expect(state.welcomeOwed).toBe(true);
+      expect(state.data.greeted).toEqual([]);
+      mock.state.relayPolicy = {
+        enabled: true,
+        channel: 'qq',
+        features: { free_only: true, spend_cap: true },
+      };
+      await sleep(350);
+      await chatted(fake, relay, '现在可以了吗');
+      expect(kinds(fake, 4)).toEqual(['photo', 'text', 'text', 'reply']);
+      expect(fake.texts().filter((text) => text === OPENING)).toHaveLength(1);
+      expect(state.welcomeOwed).toBe(false);
+      expect(state.data.greeted).toEqual([MOCK_NPCS.single]);
+    } finally {
+      mock.state.relayPolicy = policy;
+    }
+  });
+
+  it('keeps the welcome owed past an unavailable character: the one chosen next gets it', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const pairing = new PairingCode();
+    const fake = new FakeChannel({ scope: 'fake:welcome-removed' });
+    const context = createContext(memoryIo().io, {}, { client: 'relay-qq', channel: 'cli_relay' });
+    new RelayState(
+      relayStatePath(context.account, fake.scope),
+      fake.scope,
+      context.account,
+      'qq',
+    ).update({ character: { npcId: MOCK_NPCS.removed, name: '旧角色', group: false } });
+    const { state, logs } = await start(fake, { pairing, unpaired: true, characterId: '' });
+    await paired(fake, pairing);
+    expect(fake.texts()).toEqual([
+      expect.stringMatching(/^已配对/),
+      `当前角色：旧角色（ID ${MOCK_NPCS.removed}）`,
+    ]);
+    expect(state.welcomeOwed).toBe(true);
+    const unavailable = '角色「旧角色」不可用：介绍等选好角色后再发';
+    expect(logs).toContain(unavailable);
+    // Each message tries again, said once.
+    let next = fake.expect(/^直接发文字/);
+    fake.say('/help');
+    await next();
+    await fake.idle();
+    expect(logs.filter((line) => line === unavailable)).toHaveLength(1);
+    expect(fake.photos).toEqual([]);
+    const from = fake.sends.length;
+    next = fake.expect(/你来了。$/);
+    fake.say(`/character ${MOCK_NPCS.single}`);
+    await next();
+    await fake.idle();
+    expect(kinds(fake, from)).toEqual(['text', 'text', 'photo', 'text', 'text']);
+    expect(fake.texts().slice(from + 3)).toEqual([INTRODUCTION, OPENING]);
+    expect(state.welcomeOwed).toBe(false);
+    expect(state.data.welcomed.at(-1)).toMatchObject({ npcId: MOCK_NPCS.single });
+  });
+
+  it('gives the introduction alone to a character without an opening', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    mock.state.profilePatches.set(MOCK_NPCS.single, { opening_status: 2 });
+    try {
+      const fake = new FakeChannel({ scope: 'fake:welcome-no-opening' });
+      const { relay, state, logs } = await start(fake, { bound: true });
+      await chatted(fake, relay, '你好');
+      expect(kinds(fake)).toEqual(['text', 'photo', 'text', 'reply']);
+      expect(fake.texts()[2]).toBe(INTRODUCTION);
+      expect(logs).toContain('已向主人发送「林夏」的介绍');
+      expect(logs).not.toContain('已向主人发送「林夏」的介绍和开场白');
+      expect(state.welcomeOwed).toBe(false);
+      expect(state.data.greeted).toEqual([MOCK_NPCS.single]);
+    } finally {
+      mock.state.profilePatches.clear();
+    }
+  });
+
+  it('gives the introduction alone when the conversation has no reply in its latest messages', async () => {
+    mock.state.chats.delete(MOCK_NPCS.single);
+    const other = mock.replyFromAnotherDevice(MOCK_NPCS.single, '在吗');
+    const chat = await waitFor(() => {
+      const found = mock.state.chats.get(MOCK_NPCS.single);
+      return found?.messages.some((message) => String(message.mid) === other.assistantMid)
+        ? found
+        : undefined;
+    });
+    // Only the user's message is left.
+    chat.messages = chat.messages.filter((message) => String(message.mid) !== other.assistantMid);
+    const fake = new FakeChannel({ scope: 'fake:welcome-no-reply' });
+    const { state, logs } = await start(fake, { bound: true });
+    const before = sends().length;
+    const next = fake.expect(/^直接发文字/);
+    fake.say('/help');
+    await next();
+    await fake.idle();
+    expect(kinds(fake)).toEqual(['text', 'photo', 'text', 'text']);
+    expect(fake.texts()[2]).toBe(INTRODUCTION);
+    expect(fake.texts()).not.toContain(OPENING);
+    expect(logs).toContain('已向主人发送「林夏」的介绍');
+    expect(state.welcomeOwed).toBe(false);
+    expect(state.data.greeted).toEqual([]);
+    expect(state.lastReplyMid).toBe('');
+    expect(sends()).toHaveLength(before);
   });
 });

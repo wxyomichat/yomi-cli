@@ -14,6 +14,10 @@ import type { ChannelKind, ChannelStore } from './channels/types.js';
  * secret on its own: useless without the bot_token in the keychain). Plus a short map from the
  * chat's messages to Yomi message ids for `/report`.
  *
+ * The welcome (`bindOwner`, `markWelcomed`) remembers whom this bot welcomed, by a hash of the user
+ * id (never the id itself) and the character it was given with, so a re-pairing or re-login by the
+ * same owner and a restart never repeat it; `resetOwner` keeps that list.
+ *
  * Money state is bound to who agreed to it: the in-chat budget (optional: none by default, and Yomi
  * charges by its normal rules) belongs to the paired owner and the Yomi account (`bindAccount`,
  * `resetOwner` start it over), and the local ceiling (`--max-spend`, optional too) keeps its own
@@ -85,6 +89,9 @@ export type BillingPause = '' | 'budget' | 'freeCharged';
 
 export type RelayCharacter = { npcId: string; name: string; group: boolean };
 
+/** One welcome this bot gave: to whom (`ownerKey`) and with which character. */
+export type WelcomeRecord = { owner: string; npcId: string; at: number };
+
 export type RelayStateFile = {
   version: 1;
   /** Absent for Telegram, so its files do not change. */
@@ -113,6 +120,13 @@ export type RelayStateFile = {
   noticeAt: Record<string, number>;
   /** Characters whose opening was shown here. */
   greeted: string[];
+  /**
+   * The owners this bot welcomed, newest last, at most 20. A file from before welcomes starts with
+   * its owner then as welcomed (`npcId` its character or '', `at` 0), so an upgrade sends nothing.
+   */
+  welcomed: WelcomeRecord[];
+  /** The bound owner (`ownerKey`) is owed the welcome; '' when nobody is. */
+  welcomeDue: string;
   /** The chat's message ref (Telegram message id) → Yomi assistant mid, newest last. */
   replies: [number | string, string][];
   /** What a QQ or WeChat channel keeps itself (`channelStore`); absent until it writes something. */
@@ -120,6 +134,10 @@ export type RelayStateFile = {
 };
 
 const MAX_REPLIES = 500;
+const MAX_WELCOMED = 20;
+
+/** How an owner is kept in the welcome's records: never the chat user id itself. */
+export const ownerKey = (userId: number | string) => sha256(String(userId)).slice(0, 16);
 
 /**
  * Before budgets were optional, `free` with `setAt` 0 was the default nobody chose: it becomes
@@ -150,6 +168,8 @@ function empty(botId: string, account: string, kind: ChannelKind = 'telegram'): 
     billingPause: '',
     noticeAt: {},
     greeted: [],
+    welcomed: [],
+    welcomeDue: '',
     replies: [],
   };
 }
@@ -209,6 +229,19 @@ export class RelayState {
         // Older files kept every pause in one field; only the money ones carry over.
         billingPause:
           stored.billingPause ?? (paused === 'budget' || paused === 'freeCharged' ? paused : ''),
+        // Before welcomes, today's owner already had their start: they are not owed one.
+        welcomed:
+          stored.welcomed ??
+          (stored.owner
+            ? [
+                {
+                  owner: ownerKey(stored.owner.userId),
+                  npcId: stored.character?.npcId ?? '',
+                  at: 0,
+                },
+              ]
+            : []),
+        welcomeDue: stored.welcomed ? (stored.welcomeDue ?? '') : '',
       };
       if (account) this.data.account = account;
     } else this.data = empty(scope, account, kind);
@@ -252,9 +285,48 @@ export class RelayState {
     return false;
   }
 
-  /** A new pairing: the next person agrees to spending afresh and sees none of the old replies. */
+  /**
+   * A new pairing: the next person agrees to spending afresh and sees none of the old replies. Who
+   * was welcomed stays: the same owner pairing again is not welcomed twice.
+   */
   resetOwner() {
-    this.update({ owner: null, billing: freshBilling(), billingPause: '', replies: [] });
+    this.update({
+      owner: null,
+      billing: freshBilling(),
+      billingPause: '',
+      replies: [],
+      welcomeDue: '',
+    });
+  }
+
+  /**
+   * The bot is bound to `owner` (a pairing in the chat, WeChat's login): owed the welcome unless
+   * this bot welcomed them before. The only place that rule lives.
+   */
+  bindOwner(owner: RelayOwner) {
+    const key = ownerKey(owner.userId);
+    const welcomed = this.data.welcomed.some((record) => record.owner === key);
+    this.update({ owner, welcomeDue: welcomed ? '' : key });
+  }
+
+  /** The bound owner is owed the welcome. */
+  get welcomeOwed(): boolean {
+    const owner = this.data.owner;
+    return Boolean(
+      owner && this.data.welcomeDue && this.data.welcomeDue === ownerKey(owner.userId),
+    );
+  }
+
+  /** The bound owner was welcomed with `npcId` (saved before anything is sent: never twice). */
+  markWelcomed(npcId: string) {
+    const owner = this.data.owner;
+    if (!owner) return;
+    const key = ownerKey(owner.userId);
+    const welcomed = [
+      ...this.data.welcomed.filter((record) => record.owner !== key),
+      { owner: key, npcId, at: Date.now() },
+    ].slice(-MAX_WELCOMED);
+    this.update({ welcomed, welcomeDue: '' });
   }
 
   /**
