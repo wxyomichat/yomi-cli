@@ -48,7 +48,13 @@
 
 - 还能用这台电脑：运行 `yomi logout`，撤销服务端会话并删除本机凭证。如果它提示服务端注销没有成功，或者说本机没有登录，本机的令牌可能已经被别人刷新换掉，服务端的会话仍然有效：再按下一条处理。
 - 用不了这台电脑：目前没有「已登录设备」列表可以单独踢掉 CLI。在任意浏览器重新登录一次 Yomi 网页，会让所有其他网页平台的会话（包括 CLI）失效；代价是其他浏览器也要重新登录。服务端还会让长期不用的会话过期。
-- 用过 `yomi relay --telegram` 的话，bot token 也保存在这台电脑上（系统钥匙串，或 `--allow-file-store` 时的 0600 文件），和 CLI 会话一起暴露，`yomi logout` 不会删除它。不论还能不能用这台电脑，都在 Telegram 的 @BotFather 里对这个 bot 发 `/revoke`，让旧 token 失效（之后用新 token 运行 `yomi relay --telegram --set-token` 并重新配对）。还能用这台电脑时，先停掉正在运行的 relay，再运行 `yomi relay --telegram --forget`，删除本机的 token、配对信息和后台服务。
+- 用过 `yomi relay` 的话，bot 的凭证（Telegram 的 bot token、QQ 的 AppSecret、微信 ClawBot 的登录凭证）也保存在这台电脑上（系统钥匙串，或 `--allow-file-store` 时的 0600 文件），和 CLI 会话一起暴露，`yomi logout` 不会删除它们。不论还能不能用这台电脑，都到发放凭证的地方让它失效：
+  - Telegram：在 @BotFather 里对这个 bot 发 `/revoke`，让旧 token 失效（之后用新 token 运行 `yomi relay --telegram --set-token` 并重新配对）；
+  - QQ：在 QQ 开放平台（q.qq.com）的机器人设置里重置 AppSecret（之后 `yomi relay --channel qq --set-app`），见 [relay-qq.md](relay-qq.md)；
+  - 微信：在手机微信里解除 ClawBot 的绑定，见 [relay-wechat.md](relay-wechat.md)。
+
+  还能用这台电脑时，先停掉正在运行的 relay，再对用过的每个通道运行 `yomi relay --channel <通道> --forget`（`--telegram --forget` 也一样；微信不需要 `--experimental`），删除本机这个通道的凭证、配对信息和后台服务。
+
 - 服务端提供设备列表和按设备撤销之后，CLI 会跟进。
 
 ## 6. 超时与取消

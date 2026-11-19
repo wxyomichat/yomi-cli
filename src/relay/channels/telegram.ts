@@ -1,12 +1,20 @@
+import type { Context } from '../../commands/context.js';
+import type { RelayCommandOptions } from '../../commands/relay.js';
+import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
+import { readSecret } from '../../core/prompt.js';
+import { paint, say, warn } from '../../core/ui.js';
+import type { PairingCode } from '../pairing.js';
 import { TelegramPresenter } from '../presenter.js';
 import { escapeHtml, MESSAGE_LIMIT, TELEGRAM_HTML } from '../render.js';
 import {
+  BOT_TOKEN,
   MAX_PHOTO_BYTES,
-  type TelegramBot,
+  TelegramBot,
   TelegramError,
   type TelegramUpdate,
 } from '../telegram.js';
+import type { ChannelSetup } from './setup.js';
 import {
   type AskRef,
   type BotCommand,
@@ -310,3 +318,204 @@ export class TelegramChannel implements RelayChannel {
     return this.host;
   }
 }
+
+// -------------------------------------------------------------------------------------------------
+// `yomi relay --telegram` (`--channel telegram`): the bot token, typed without echo or piped on
+// stdin, kept in the keychain, never an argument or variable; `/start <code>` pairing with a
+// t.me deep link. What the command did before channels, text for text.
+
+const secretName = (account: string) => `telegram-bot:${account}`;
+
+async function askToken(context: Context, fromStdin: boolean): Promise<string> {
+  const { io } = context;
+  if (!fromStdin)
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '在 Telegram 的 @BotFather 里新建一个 bot（/newbot），把它给的 token 粘贴到这里（不会显示）。',
+          'Create a bot with @BotFather in Telegram (/newbot) and paste the token it gives you here (it will not be shown).',
+          'Crea un bot con @BotFather en Telegram (/newbot) y pega aquí el token que te dé (no se mostrará).',
+          'Crie um bot com o @BotFather no Telegram (/newbot) e cole aqui o token que ele fornecer (ele não será exibido).',
+        ),
+      ),
+    );
+  const token = await readSecret(io, 'Bot token: ', { fromStdin });
+  if (!BOT_TOKEN.test(token))
+    throw new UsageError(
+      tr(
+        '这不像是 bot token（应为 123456789:AA… 的形式）',
+        'This does not look like a bot token (it should look like 123456789:AA…)',
+        'Esto no parece un token de bot (debería verse como 123456789:AA…)',
+        'Isto não parece um token de bot (deveria ser como 123456789:AA…)',
+      ),
+    );
+  return token;
+}
+
+/** Telegram's refusal of a token, as the command words it. */
+function refusedToken(): UsageError {
+  return new UsageError(
+    tr(
+      'Telegram 不认这个 token：确认是 BotFather 给的、没有在 /revoke 后失效。',
+      'Telegram does not accept this token: check that it came from BotFather and was not invalidated with /revoke.',
+      'Telegram no acepta este token: comprueba que venga de BotFather y que no se haya invalidado con /revoke.',
+      'O Telegram não aceita este token: verifique se ele veio do BotFather e se não foi invalidado com /revoke.',
+    ),
+  );
+}
+
+async function verifiedBot(token: string) {
+  const bot = new TelegramBot(token, { apiOrigin: process.env.YOMI_TELEGRAM_API_ORIGIN });
+  try {
+    const me = await bot.getMe();
+    return { bot, me };
+  } catch (error) {
+    if (error instanceof TelegramError && error.unauthorized) throw refusedToken();
+    throw error;
+  }
+}
+
+export const telegramSetup: ChannelSetup = {
+  kind: 'telegram',
+  command: 'yomi relay --telegram',
+  displayName: channelName('telegram'),
+  experimental: false,
+  personalUseOnly: false,
+  get secretLabel() {
+    return tr('bot token', 'bot token', 'token del bot', 'token do bot');
+  },
+  secretName,
+
+  wantsCredentials: (options: RelayCommandOptions) => options.setToken,
+
+  async setCredentials(context: Context, options: RelayCommandOptions) {
+    const { io, store } = context;
+    const token = await askToken(context, options.tokenStdin);
+    const { me } = await verifiedBot(token);
+    store.setSecret(secretName(context.account), token);
+    say(
+      io,
+      tr(
+        `已保存 @${me.username ?? me.first_name} 的 token（${store.kind === 'file' ? '本地文件 0600' : '系统钥匙串'}）。`,
+        `Saved the token for @${me.username ?? me.first_name} (${store.kind === 'file' ? 'local file, mode 0600' : 'system keychain'}).`,
+        `Se guardó el token de @${me.username ?? me.first_name} (${store.kind === 'file' ? 'archivo local, permisos 0600' : 'llavero del sistema'}).`,
+        `Token de @${me.username ?? me.first_name} salvo (${store.kind === 'file' ? 'arquivo local, modo 0600' : 'Keychain do sistema'}).`,
+      ),
+    );
+    say(
+      io,
+      tr(
+        '接下来运行 yomi relay --telegram，在 Telegram 里完成配对。',
+        'Next, run yomi relay --telegram and finish pairing in Telegram.',
+        'A continuación, ejecuta yomi relay --telegram y completa la vinculación en Telegram.',
+        'Em seguida, execute yomi relay --telegram e conclua o pareamento no Telegram.',
+      ),
+    );
+  },
+
+  async open(context: Context, options: RelayCommandOptions) {
+    const { io, store } = context;
+    let token = store.getSecret(secretName(context.account));
+    if (!token) {
+      if (!io.interactive && !options.tokenStdin) {
+        // A service restarting would not fix this: say so and end without failing.
+        warn(
+          io,
+          tr(
+            '还没有设置 bot token：先运行 yomi relay --telegram --set-token',
+            'No bot token set yet: run yomi relay --telegram --set-token first',
+            'Todavía no hay un token de bot configurado: ejecuta primero yomi relay --telegram --set-token',
+            'Ainda não há token de bot configurado: execute primeiro yomi relay --telegram --set-token',
+          ),
+        );
+        return null;
+      }
+      token = await askToken(context, options.tokenStdin);
+      await verifiedBot(token);
+      store.setSecret(secretName(context.account), token);
+    }
+    const bot = new TelegramBot(token, { apiOrigin: process.env.YOMI_TELEGRAM_API_ORIGIN });
+    // The Relay built this from the bot before channels, with the command's timings.
+    return new TelegramChannel(bot, {
+      drafts: options.drafts,
+      intervalMs: 1000,
+      pollTimeoutSeconds: 25,
+    });
+  },
+
+  async verify(channel) {
+    try {
+      return await channel.verify();
+    } catch (error) {
+      if (error instanceof TelegramError && error.unauthorized) throw refusedToken();
+      throw error;
+    }
+  },
+
+  lockNameOf: (secret: string) => (BOT_TOKEN.test(secret) ? secret.split(':')[0] : null),
+
+  printPairing(context: Context, code: PairingCode, identity: BotIdentity) {
+    const { io } = context;
+    const username = identity.handle;
+    say(io);
+    say(
+      io,
+      tr(
+        `在 Telegram 里打开 @${username}，发送：`,
+        `Open @${username} in Telegram and send:`,
+        `Abre @${username} en Telegram y envía:`,
+        `Abra @${username} no Telegram e envie:`,
+      ),
+    );
+    say(io, `  ${paint(io, 'bold', `/start ${code.code}`)}`);
+    say(
+      io,
+      tr(
+        `或直接打开：${code.link(username)}`,
+        `Or open: ${code.link(username)}`,
+        `O abre: ${code.link(username)}`,
+        `Ou abra: ${code.link(username)}`,
+      ),
+    );
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '配对码 15 分钟内有效、只能用一次，只显示在这个终端里：不要发给别人。',
+          'The pairing code is valid for 15 minutes, works once and is shown only in this terminal: do not send it to anyone.',
+          'El código de vinculación es válido durante 15 minutos, funciona una sola vez y solo se muestra en esta terminal: no se lo envíes a nadie.',
+          'O código de pareamento vale por 15 minutos, funciona uma única vez e só aparece neste terminal: não o envie para ninguém.',
+        ),
+      ),
+    );
+    say(io);
+  },
+
+  unpairedHint: () =>
+    tr(
+      '还没有配对：请在终端里运行一次 yomi relay --telegram，按提示在 Telegram 里发送配对码。',
+      'Not paired yet: run yomi relay --telegram once in a terminal and send the pairing code in Telegram as prompted.',
+      'Todavía no está vinculado: ejecuta yomi relay --telegram una vez en una terminal y envía el código de vinculación en Telegram según las indicaciones.',
+      'Ainda não pareado: execute yomi relay --telegram uma vez em um terminal e envie o código de pareamento no Telegram conforme indicado.',
+    ),
+
+  serviceArgs: (options: RelayCommandOptions) => ({
+    lead: ['--telegram'],
+    trail: options.drafts ? [] : ['--no-drafts'],
+  }),
+
+  forgetHint: () =>
+    tr(
+      '如果 token 可能泄露，请在 @BotFather 里用 /revoke 让它失效。',
+      'If the token may have leaked, invalidate it with /revoke in @BotFather.',
+      'Si el token pudo haberse filtrado, invalídalo con /revoke en @BotFather.',
+      'Se o token pode ter vazado, invalide-o com /revoke no @BotFather.',
+    ),
+
+  label: (identity: BotIdentity) => `@${identity.handle}`,
+};

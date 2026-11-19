@@ -16,6 +16,7 @@ import { persona } from './commands/persona.js';
 import { preview } from './commands/preview.js';
 import { relay } from './commands/relay.js';
 import { video } from './commands/video.js';
+import { CHANNEL_KINDS, type ChannelKind } from './relay/channels/types.js';
 import { UgcFailure } from './ugc/api.js';
 import { ImageError } from './ugc/imageFile.js';
 import {
@@ -46,7 +47,7 @@ function help(): string {
   video -f <文件>    AI 生成角色视频（动态封面 / 介绍视频），按报价扣钻石
   persona list       你的聊天人设（主控）
   persona avatar     AI 生成人设头像
-  relay --telegram   把你自己的 Telegram bot 私聊转给已发布的 Yomi 角色（实验）
+  relay --channel …  把你自己的 Telegram、QQ bot 或微信 ClawBot 的私聊转给已发布的 Yomi 角色（实验）
 
 全局选项：
   --env <prod|test>  环境，默认 prod（生产，创建和花钻石前要再确认）；test 需自己配置地址
@@ -81,7 +82,7 @@ Commands:
   video -f <file>    Generate character videos with AI (dynamic cover / intro video), gems charged per quote
   persona list       Your chat personas
   persona avatar     Generate a persona avatar with AI
-  relay --telegram   Relay private chats with your own Telegram bot to a published Yomi character (experimental)
+  relay --channel …  Relay private chats with your own Telegram or QQ bot, or WeChat ClawBot, to a published Yomi character (experimental)
 
 Global options:
   --env <prod|test>  Environment, default prod (production: asks again before creating or spending gems); test
@@ -116,7 +117,7 @@ Comandos:
   video -f <archivo>    Genera videos del personaje con IA (portada animada / video de presentación); cobra gemas según la cotización
   persona list          Tus personas de chat
   persona avatar        Genera un avatar de persona con IA
-  relay --telegram      Reenvía los chats privados con tu propio bot de Telegram a un personaje de Yomi publicado (experimental)
+  relay --channel …     Reenvía los chats privados con tu propio bot de Telegram o QQ, o con WeChat ClawBot, a un personaje de Yomi publicado (experimental)
 
 Opciones globales:
   --env <prod|test>     Entorno, por defecto prod (producción: vuelve a preguntar antes de crear o gastar gemas); test
@@ -151,7 +152,7 @@ Comandos:
   video -f <arquivo>    Gera vídeos do personagem com IA (capa animada / vídeo de apresentação); cobra gemas conforme a cotação
   persona list          Suas personas de chat
   persona avatar        Gera um avatar de persona com IA
-  relay --telegram      Repassa os chats privados com o seu próprio bot do Telegram para um personagem do Yomi publicado (experimental)
+  relay --channel …     Repassa os chats privados com o seu próprio bot do Telegram ou do QQ, ou com o WeChat ClawBot, para um personagem do Yomi publicado (experimental)
 
 Opções globais:
   --env <prod|test>     Ambiente, padrão prod (produção: pergunta novamente antes de criar ou gastar gemas); test
@@ -479,84 +480,136 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --accept-price / --confirm-prod / --json`,
     ),
     relay: tr(
-      `yomi relay --telegram [--character ID] [--max-spend 钻石] [选项]
-  用你在 @BotFather 建的 bot，把你本人在 Telegram 私聊里发的消息转给 Yomi 角色，流式回复。
-  只服务配对过的本人。默认不花钻石：付费要先在 Telegram 里用 /budget 设预算并点按钮确认，
-  累计不超过本机的 --max-spend。服务端支持「只用免费额度」之前，没设预算不会发出任何消息。
-  详见 docs/relay.md。
-  --set-token           设置或更换 bot token（终端里输入，不显示；或配合 --token-stdin）
-  --token-stdin         从标准输入读 token（不接受命令行参数和环境变量）
-  --pair                重新配对（会显示新的配对码）
+      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend 钻石] [选项]
+  把你本人在私聊里发给自己 bot 的消息转给 Yomi 角色，再把角色的回复发回去。通道：
+    telegram   你在 @BotFather 建的 Telegram bot，回复流式显示（--telegram 等同 --channel telegram）
+    qq         你自己在 QQ 开放平台（q.qq.com）建的 QQ bot，只用私聊（仅限个人使用）
+    wechat     微信 ClawBot（iLink），扫码登录（实验功能，仅限个人使用；要加 --experimental）
+  只服务配对过的本人。默认不花钻石：付费要先在聊天里用 /budget 设预算并确认（Telegram 点按钮，
+  QQ 和微信回复确认码），累计不超过本机的 --max-spend。服务端支持「只用免费额度」之前，没设预算
+  不会发出任何消息。详见 docs/relay.md、docs/relay-qq.md、docs/relay-wechat.md。
+  --set-token           Telegram：设置或更换 bot token（终端里输入，不显示；或配合 --token-stdin）
+  --set-app             QQ：设置 bot 的 AppID 和 AppSecret（AppSecret 不显示；或配合 --token-stdin）
+  --login               微信：用手机微信扫码登录，扫码的人就是主人（只能在终端里）
+  --qr-link             微信：和 --login 一起用，同时打印二维码的链接
+  --token-stdin         从标准输入读凭证（Telegram：token；QQ：第一行 AppID，第二行 AppSecret），
+                        不接受命令行参数和环境变量
+  --experimental        使用微信通道时必须加
+  --pair                重新配对（Telegram、QQ：会显示新的配对码）
   --character ID        启动时使用的角色
   --max-spend 数量      本机允许 relay 累计花的钻石上限，默认 0：不花钻石
   --reset-spend         重新计算本机上限的累计花费
-  --allow-file-store    没有系统钥匙串时，允许把 token 和会话存成 0600 文件
-  --install-service     安装为后台服务（macOS launchd / Linux systemd --user），需先配对
+  --allow-file-store    没有系统钥匙串时，允许把凭证和会话存成 0600 文件
+  --install-service     安装为后台服务（macOS launchd / Linux systemd --user），需先配对（微信：先登录）
   --uninstall-service   停止并删除后台服务
   --service-status      查看后台服务状态
-  --forget              删除本机保存的 bot token 和配对信息
+  --forget              删除本机保存的这个通道的凭证和配对信息（其他通道的不受影响）
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
-  --no-drafts           不用流式草稿，改为编辑消息
+  --no-drafts           Telegram：不用流式草稿，改为编辑消息
   --confirm-prod        非交互在生产环境运行时明确确认`,
-      `yomi relay --telegram [--character ID] [--max-spend gems] [options]
-  With the bot you created with @BotFather, relays the messages you yourself send it in a Telegram private chat
-  to a Yomi character and streams the replies. Serves only the paired owner. Spends no gems by default: paying
-  needs a budget set with /budget in Telegram and confirmed with a button, and the total never goes over the
-  local spending cap (--max-spend). Until the server supports "free messages only", nothing is sent without a
-  budget. See docs/relay.md.
-  --set-token           Set or replace the bot token (typed in the terminal, hidden; or with --token-stdin)
-  --token-stdin         Read the token from standard input (never from arguments or environment variables)
-  --pair                Pair again (shows a new pairing code)
+      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gems] [options]
+  Relays the messages you yourself send your own bot in a private chat to a Yomi character, and sends the
+  character's replies back. Channels:
+    telegram   A Telegram bot you created with @BotFather; replies stream in (--telegram is the same as
+               --channel telegram)
+    qq         Your own QQ bot from the QQ Open Platform (q.qq.com), private chat only (personal use only)
+    wechat     WeChat ClawBot (iLink), signed in with a QR code (experimental, personal use only; needs
+               --experimental)
+  Serves only the paired owner. Spends no gems by default: paying needs a budget set with /budget in the chat
+  and confirmed (a button in Telegram, a typed code in QQ and WeChat), and the total never goes over the local
+  spending cap (--max-spend). Until the server supports "free messages only", nothing is sent without a
+  budget. See docs/relay.md, docs/relay-qq.md and docs/relay-wechat.md.
+  --set-token           Telegram: set or replace the bot token (typed in the terminal, hidden; or with --token-stdin)
+  --set-app             QQ: set the bot's AppID and AppSecret (the AppSecret hidden; or both with --token-stdin)
+  --login               WeChat: sign in by scanning a QR code with WeChat on your phone; whoever scans it is the
+                        owner (in a terminal only)
+  --qr-link             WeChat, with --login: also print the QR code's link
+  --token-stdin         Read the credentials from standard input (Telegram: the token; QQ: the AppID on line 1,
+                        the AppSecret on line 2), never from arguments or environment variables
+  --experimental        Required for the WeChat channel
+  --pair                Pair again (Telegram, QQ: shows a new pairing code)
   --character ID        The character to start with
   --max-spend amount    Local spending cap: the gems relay may spend in total on this machine, default 0 (no gems)
   --reset-spend         Reset the total counted against the local spending cap
-  --allow-file-store    Without a system keychain, allow keeping the token and session in a 0600 file
+  --allow-file-store    Without a system keychain, allow keeping the credentials and session in a 0600 file
   --install-service     Install as a background service (macOS launchd / Linux systemd --user); pair first
+                        (WeChat: sign in first)
   --uninstall-service   Stop and remove the background service
   --service-status      Show the background service status
-  --forget              Delete the bot token and pairing saved on this machine
+  --forget              Delete this channel's credentials and pairing saved on this machine (other channels keep
+                        theirs)
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
-  --no-drafts           Edit messages instead of streaming drafts
+  --no-drafts           Telegram: edit messages instead of streaming drafts
   --confirm-prod        Confirm explicitly when running non-interactively in production`,
-      `yomi relay --telegram [--character ID] [--max-spend gemas] [opciones]
-  Con el bot que creaste con @BotFather, reenvía los mensajes que tú mismo le envías en un chat privado de
-  Telegram a un personaje de Yomi y muestra las respuestas en tiempo real. Solo atiende al dueño vinculado. Por
-  defecto no gasta gemas: para pagar hay que fijar un presupuesto con /budget en Telegram y confirmarlo con un
-  botón, y el total nunca supera el límite de gasto local (--max-spend). Hasta que el servidor admita "solo
-  mensajes gratis", no se envía nada sin presupuesto. Consulta docs/relay.md.
-  --set-token           Configura o reemplaza el token del bot (se escribe en la terminal, oculto; o con --token-stdin)
-  --token-stdin         Lee el token de la entrada estándar (nunca de argumentos ni de variables de entorno)
-  --pair                Vincula de nuevo (muestra un código de vinculación nuevo)
+      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gemas] [opciones]
+  Reenvía a un personaje de Yomi los mensajes que tú mismo le envías a tu propio bot en un chat privado, y
+  devuelve las respuestas del personaje. Canales:
+    telegram   Un bot de Telegram que creaste con @BotFather; las respuestas aparecen en tiempo real
+               (--telegram equivale a --channel telegram)
+    qq         Tu propio bot de QQ de la QQ Open Platform (q.qq.com), solo chat privado (solo para uso
+               personal)
+    wechat     WeChat ClawBot (iLink), con inicio de sesión por código QR (experimental, solo para uso
+               personal; requiere --experimental)
+  Solo atiende al dueño vinculado. Por defecto no gasta gemas: para pagar hay que fijar un presupuesto con
+  /budget en el chat y confirmarlo (con un botón en Telegram, con un código escrito en QQ y WeChat), y el total
+  nunca supera el límite de gasto local (--max-spend). Hasta que el servidor admita "solo mensajes gratis", no
+  se envía nada sin presupuesto. Consulta docs/relay.md, docs/relay-qq.md y docs/relay-wechat.md.
+  --set-token           Telegram: configura o reemplaza el token del bot (se escribe en la terminal, oculto; o con --token-stdin)
+  --set-app             QQ: configura el AppID y el AppSecret del bot (el AppSecret oculto; o ambos con --token-stdin)
+  --login               WeChat: inicia sesión escaneando un código QR con WeChat en tu teléfono; quien lo escanea
+                        es el dueño (solo en una terminal)
+  --qr-link             WeChat, con --login: imprime también el enlace del código QR
+  --token-stdin         Lee las credenciales de la entrada estándar (Telegram: el token; QQ: el AppID en la línea 1,
+                        el AppSecret en la línea 2), nunca de argumentos ni de variables de entorno
+  --experimental        Obligatorio para el canal de WeChat
+  --pair                Vincula de nuevo (Telegram, QQ: muestra un código de vinculación nuevo)
   --character ID        El personaje con el que empezar
   --max-spend cantidad  Límite de gasto local: las gemas que relay puede gastar en total en este equipo, por defecto 0 (sin gemas)
   --reset-spend         Reinicia el total acumulado contra el límite de gasto local
-  --allow-file-store    Sin llavero del sistema, permite guardar el token y la sesión en un archivo 0600
-  --install-service     Instala como servicio en segundo plano (macOS launchd / Linux systemd --user); vincula primero
+  --allow-file-store    Sin llavero del sistema, permite guardar las credenciales y la sesión en un archivo 0600
+  --install-service     Instala como servicio en segundo plano (macOS launchd / Linux systemd --user); vincula
+                        primero (WeChat: inicia sesión primero)
   --uninstall-service   Detiene y elimina el servicio en segundo plano
   --service-status      Muestra el estado del servicio en segundo plano
-  --forget              Elimina el token del bot y la vinculación guardados en este equipo
+  --forget              Elimina las credenciales y la vinculación de este canal guardadas en este equipo (los otros
+                        canales conservan las suyas)
   --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
-  --no-drafts           Edita los mensajes en lugar de transmitir borradores
+  --no-drafts           Telegram: edita los mensajes en lugar de transmitir borradores
   --confirm-prod        Confirma de forma explícita al ejecutar sin interacción en producción`,
-      `yomi relay --telegram [--character ID] [--max-spend gemas] [opções]
-  Com o bot que você criou com o @BotFather, repassa as mensagens que você mesmo envia a ele em um chat privado
-  do Telegram para um personagem do Yomi e mostra as respostas em tempo real. Atende só o dono pareado. Por
-  padrão não gasta gemas: para pagar é preciso definir um orçamento com /budget no Telegram e confirmá-lo com
-  um botão, e o total nunca passa do limite de gastos local (--max-spend). Até o servidor oferecer suporte a
-  "só mensagens grátis", nada é enviado sem orçamento. Veja docs/relay.md.
-  --set-token           Define ou troca o token do bot (digitado no terminal, oculto; ou com --token-stdin)
-  --token-stdin         Lê o token da entrada padrão (nunca de argumentos nem de variáveis de ambiente)
-  --pair                Pareia novamente (mostra um novo código de pareamento)
+      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gemas] [opções]
+  Repassa para um personagem do Yomi as mensagens que você mesmo envia ao seu próprio bot em um chat privado,
+  e devolve as respostas do personagem. Canais:
+    telegram   Um bot do Telegram que você criou com o @BotFather; as respostas aparecem em tempo real
+               (--telegram é o mesmo que --channel telegram)
+    qq         O seu próprio bot do QQ da QQ Open Platform (q.qq.com), só chat privado (somente para uso
+               pessoal)
+    wechat     WeChat ClawBot (iLink), com login por código QR (experimental, somente para uso pessoal;
+               exige --experimental)
+  Atende só o dono pareado. Por padrão não gasta gemas: para pagar é preciso definir um orçamento com /budget
+  no chat e confirmá-lo (com um botão no Telegram, com um código digitado no QQ e no WeChat), e o total nunca
+  passa do limite de gastos local (--max-spend). Até o servidor oferecer suporte a "só mensagens grátis", nada
+  é enviado sem orçamento. Veja docs/relay.md, docs/relay-qq.md e docs/relay-wechat.md.
+  --set-token           Telegram: define ou troca o token do bot (digitado no terminal, oculto; ou com --token-stdin)
+  --set-app             QQ: define o AppID e o AppSecret do bot (o AppSecret oculto; ou ambos com --token-stdin)
+  --login               WeChat: entra escaneando um código QR com o WeChat no celular; quem escaneia é o dono
+                        (só em um terminal)
+  --qr-link             WeChat, com --login: também imprime o link do código QR
+  --token-stdin         Lê as credenciais da entrada padrão (Telegram: o token; QQ: o AppID na linha 1, o
+                        AppSecret na linha 2), nunca de argumentos nem de variáveis de ambiente
+  --experimental        Obrigatório para o canal do WeChat
+  --pair                Pareia novamente (Telegram, QQ: mostra um novo código de pareamento)
   --character ID        O personagem inicial
   --max-spend quantia   Limite de gastos local: as gemas que o relay pode gastar no total nesta máquina, padrão 0 (sem gemas)
   --reset-spend         Zera o total contado no limite de gastos local
-  --allow-file-store    Sem Keychain do sistema, permite guardar o token e a sessão em um arquivo 0600
-  --install-service     Instala como serviço em segundo plano (macOS launchd / Linux systemd --user); pareie antes
+  --allow-file-store    Sem Keychain do sistema, permite guardar as credenciais e a sessão em um arquivo 0600
+  --install-service     Instala como serviço em segundo plano (macOS launchd / Linux systemd --user); pareie
+                        antes (WeChat: entre antes)
   --uninstall-service   Para e remove o serviço em segundo plano
   --service-status      Mostra o status do serviço em segundo plano
-  --forget              Apaga o token do bot e o pareamento salvos nesta máquina
+  --forget              Apaga as credenciais e o pareamento deste canal salvos nesta máquina (os outros canais
+                        mantêm os seus)
   --reply-timeout s     Quanto tempo esperar por uma resposta, padrão 120; depois disso, lê o histórico de mensagens
-  --no-drafts           Edita as mensagens em vez de transmitir rascunhos
+  --no-drafts           Telegram: edita as mensagens em vez de transmitir rascunhos
   --confirm-prod        Confirma explicitamente ao executar de forma não interativa em produção`,
     ),
     check: tr(
@@ -626,8 +679,13 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
   tags: { json: { type: 'boolean' }, query: { type: 'string' } },
   create: { ...SPEC, 'dry-run': { type: 'boolean' }, new: { type: 'boolean' } },
   relay: {
+    channel: { type: 'string' },
     telegram: { type: 'boolean' },
+    experimental: { type: 'boolean' },
     'set-token': { type: 'boolean' },
+    'set-app': { type: 'boolean' },
+    login: { type: 'boolean' },
+    'qr-link': { type: 'boolean' },
     'token-stdin': { type: 'boolean' },
     pair: { type: 'boolean' },
     forget: { type: 'boolean' },
@@ -790,6 +848,50 @@ function gems(value: unknown): number {
 }
 
 /**
+ * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
+ * kept for good). Both naming different channels, an unknown name or neither is a usage error.
+ */
+export function relayChannelKind(values: Values): ChannelKind {
+  const alias = Boolean(values.telegram);
+  const named = values.channel as string | undefined;
+  if (named === undefined) {
+    if (alias) return 'telegram';
+    throw new UsageError(
+      tr(
+        '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
+        'Choose a channel: --channel telegram|qq|wechat (or --telegram)',
+        'Elige un canal: --channel telegram|qq|wechat (o --telegram)',
+        'Escolha um canal: --channel telegram|qq|wechat (ou --telegram)',
+      ),
+    );
+  }
+  const kind = CHANNEL_KINDS.find((item) => item === named.trim().toLowerCase());
+  if (!kind) {
+    // Shown back only when it reads like a name: a token pasted here must not be printed.
+    const word = named.trim();
+    const shown = /^[A-Za-z]{1,16}$/.test(word) ? JSON.stringify(word) : '';
+    throw new UsageError(
+      tr(
+        `不认识的通道${shown ? `：${shown}` : ''}。可选 telegram、qq、wechat`,
+        `Unknown channel${shown ? `: ${shown}` : ''}. Choose telegram, qq or wechat`,
+        `Canal desconocido${shown ? `: ${shown}` : ''}. Elige telegram, qq o wechat`,
+        `Canal desconhecido${shown ? `: ${shown}` : ''}. Escolha telegram, qq ou wechat`,
+      ),
+    );
+  }
+  if (alias && kind !== 'telegram')
+    throw new UsageError(
+      tr(
+        `--telegram 和 --channel ${kind} 不能同时使用`,
+        `--telegram and --channel ${kind} cannot be used together`,
+        `--telegram y --channel ${kind} no se pueden usar juntos`,
+        `--telegram e --channel ${kind} não podem ser usados juntos`,
+      ),
+    );
+  return kind;
+}
+
+/**
  * `--lang zh|en` (or `--lang=…`) anywhere on the line: undefined when absent, null when the value is
  * neither (refused by `main`).
  */
@@ -878,10 +980,12 @@ async function run(argv: string[], io: Io): Promise<number> {
       lane: values.lane as string | undefined,
       debug: values.debug as boolean | undefined,
     };
+    // Before the context: the server tells relays apart by this User-Agent suffix.
+    const relayKind = command === 'relay' ? relayChannelKind(values) : null;
     const context = createContext(
       io,
       globals,
-      command === 'relay' ? { client: 'relay-telegram', channel: 'cli_relay' } : {},
+      relayKind ? { client: `relay-${relayKind}`, channel: 'cli_relay' } : {},
     );
     switch (command) {
       case 'login':
@@ -987,8 +1091,12 @@ async function run(argv: string[], io: Io): Promise<number> {
         break;
       case 'relay':
         await relay(context, {
-          telegram: Boolean(values.telegram),
+          channel: relayKind as ChannelKind,
+          experimental: Boolean(values.experimental),
           setToken: Boolean(values['set-token']),
+          setApp: Boolean(values['set-app']),
+          login: Boolean(values.login),
+          qrLink: Boolean(values['qr-link']),
           tokenStdin: Boolean(values['token-stdin']),
           pair: Boolean(values.pair),
           forget: Boolean(values.forget),
