@@ -18,6 +18,7 @@ import { Ledger, stateLedgerStore } from '../src/relay/hub/ledger.js';
 import { PolicyService } from '../src/relay/hub/policy.js';
 import { SessionGate } from '../src/relay/hub/session.js';
 import { PairingCode } from '../src/relay/pairing.js';
+import { BotRegistry } from '../src/relay/registry.js';
 import { Relay, type RelayOptions } from '../src/relay/relay.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { relayTexts } from '../src/relay/texts.js';
@@ -83,6 +84,11 @@ async function signIn() {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The QQ bot the registry holds for the saved AppID and AppSecret. */
+const registered = () => {
+  const { account } = createContext(memoryIo().io, {});
+  return BotRegistry.open(account).bySecret('qq', `qq-bot:${account}`);
+};
 const sends = () =>
   mock.state.requests.filter((request) => request.path === 'conversation/send_message');
 const shown = (openid = OWNER) => qq.messages(openid).filter((message) => !message.recalled);
@@ -256,6 +262,11 @@ describe('yomi relay --channel qq', () => {
       );
       expect(warned.code).toBe(0);
       expect(warned.err).toContain('这个 bot 还没有私聊（单聊）消息事件的权限');
+      // Another AppID: the channel's bot is that one now, never refused as another bot's.
+      expect(registered()).toMatchObject({ name: 'qq-0077', scope: 'qq:102000077' });
+      const listed = await run(['relay', '--list', '--channel', 'qq']);
+      expect(listed.out).toContain('qq-0077  QQ');
+      expect(listed.out).not.toContain('凭证属于另一个 bot');
     } finally {
       setEnv({ YOMI_QQ_API_ORIGIN: qq.origin });
       await closed.shutdown();
@@ -265,6 +276,8 @@ describe('yomi relay --channel qq', () => {
       { input: [qq.appId, qq.secret] },
     );
     expect(again.code).toBe(0);
+    // Back to the first AppID: its bot again (the next test runs it).
+    expect(registered()).toMatchObject({ scope: `qq:${qq.appId}`, label: 'Lin QQ bot' });
   });
 
   it('pairs with /pair in the private chat, ignores strangers, and stops when QQ delists the bot', async () => {

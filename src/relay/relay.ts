@@ -216,6 +216,8 @@ export type RelayOptions = {
   requireServerPolicy?: boolean;
   /** How long such a gated channel waits before an owner message asks the server again (60 s). */
   policyRefetchMs?: number;
+  /** Told after the character changed (`/character`, `--character`; null: a new Yomi account reset it). */
+  onCharacter?: (character: RelayCharacter | null) => void;
 };
 
 // Moved to channels/types.ts with the reasons other channels add; imports from here keep working.
@@ -578,7 +580,8 @@ export class Relay {
     this.state.update({ botUsername: this.identity.handle });
     await this.channel.connect(this.host);
     await this.channel.setCommands(relayCommands(this.options.language)).catch(() => undefined);
-    if (this.state.bindAccount(this.userId))
+    if (this.state.bindAccount(this.userId)) {
+      this.options.onCharacter?.(null);
       this.log(
         tr(
           '这台电脑上登录的 Yomi 账号和上次不同：预算、角色和记录已重置',
@@ -587,6 +590,7 @@ export class Relay {
           'Uma conta do Yomi diferente da última vez está conectada nesta máquina: orçamento, personagem e registros foram redefinidos',
         ),
       );
+    }
     // A shared ledger's ceiling is set by whoever runs the relays.
     if (this.ownsServices)
       this.ledger.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
@@ -1023,6 +1027,7 @@ export class Relay {
     }
     const character: RelayCharacter = { npcId, name: profile.name, group: profile.group };
     this.state.update({ character });
+    this.options.onCharacter?.(character);
     this.price = null;
     this.log(
       tr(

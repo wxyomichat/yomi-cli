@@ -995,6 +995,7 @@ export const wechatSetup: ChannelSetup = {
 
   async setCredentials(context: Context, options: RelayCommandOptions) {
     await wechatLogin(context, options);
+    return null;
   },
 
   async open(context: Context) {
@@ -1032,16 +1033,30 @@ export const wechatSetup: ChannelSetup = {
 
   /** `wx-<sha256(ilink_user_id)[0:16]>`: the lock of `WechatChannel.lockName` (scope `wx:<same>`). */
   lockNameOf(secret: string) {
+    return wechatSetup.storedBot(secret)?.lockName ?? null;
+  },
+
+  /**
+   * The scanner names the scope and the lock (a re-login may change ilink_bot_id); a login
+   * without its token still names them, for --forget.
+   */
+  storedBot(secret: string) {
+    let userId = '';
+    let botId = '';
     const credentials = parseCredentials(secret);
-    if (credentials) return `wx-${ownerHash(credentials.ilinkUserId)}`;
-    try {
-      const parsed = JSON.parse(secret) as { ilinkUserId?: unknown };
-      return typeof parsed.ilinkUserId === 'string' && parsed.ilinkUserId
-        ? `wx-${ownerHash(parsed.ilinkUserId)}`
-        : null;
-    } catch {
-      return null;
-    }
+    if (credentials) {
+      userId = credentials.ilinkUserId;
+      botId = credentials.ilinkBotId;
+    } else
+      try {
+        const parsed = JSON.parse(secret) as { ilinkUserId?: unknown };
+        if (typeof parsed.ilinkUserId === 'string') userId = parsed.ilinkUserId;
+      } catch {
+        return null;
+      }
+    if (!userId) return null;
+    const hash = ownerHash(userId);
+    return { platformId: botId, scope: `wx:${hash}`, lockName: `wx-${hash}` };
   },
 
   unpairedHint,

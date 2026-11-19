@@ -18,6 +18,7 @@ import {
   wechatScope,
 } from '../src/relay/channels/wechat-login.js';
 import { aesEcbPaddedSize } from '../src/relay/channels/wechat-media.js';
+import { BotRegistry } from '../src/relay/registry.js';
 import { Relay, type RelayOptions } from '../src/relay/relay.js';
 import { ownerKey, RelayState, relayStatePath } from '../src/relay/state.js';
 import { memoryIo } from './helpers/io.js';
@@ -83,6 +84,11 @@ const stateOf = (owner: string) => {
   const { account } = context();
   const scope = wechatScope(owner);
   return new RelayState(relayStatePath(account, scope), scope, account, 'wechat');
+};
+/** The WeChat bot the registry holds for the saved login. */
+const registered = () => {
+  const { account } = context();
+  return BotRegistry.open(account).bySecret('wechat', `wechat-ilink:${account}`);
 };
 const sends = () =>
   mock.state.requests.filter((request) => request.path === 'conversation/send_message');
@@ -320,6 +326,11 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     // A new scanner starts with no budget: Yomi charges by its normal rules.
     expect(fresh.billing.mode).toBe('open');
     expect(fresh.pending).toBeNull();
+    // The channel's bot is the new scanner's now, never refused as another bot's.
+    expect(registered()).toMatchObject({ scope: wechatScope('q7_other@im.wechat') });
+    const listed = await run(['relay', '--list', '--channel', 'wechat']);
+    expect(listed.out).toContain('  状态：没有运行');
+    expect(listed.out).not.toContain('凭证属于另一个 bot');
     // Back to the first owner, without its money state (the tests below chat with it).
     stateOf(wx.owner).update({
       billing: { mode: 'open', budget: 0, spent: 0, setAt: 0 },
@@ -330,6 +341,8 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     wx.confirm();
     expect(await back.pending).toBe(0);
     expect(parseCredentials(secret())!.ilinkUserId).toBe(wx.owner);
+    // Its bot again (the next test runs it).
+    expect(registered()).toMatchObject({ scope: wechatScope(wx.owner) });
   });
 });
 

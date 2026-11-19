@@ -414,6 +414,7 @@ export const telegramSetup: ChannelSetup = {
         'Em seguida, execute yomi relay --telegram e conclua o pareamento no Telegram.',
       ),
     );
+    return { id: String(me.id), name: me.first_name, handle: me.username ?? '' };
   },
 
   async open(context: Context, options: RelayCommandOptions) {
@@ -456,6 +457,13 @@ export const telegramSetup: ChannelSetup = {
   },
 
   lockNameOf: (secret: string) => (BOT_TOKEN.test(secret) ? secret.split(':')[0] : null),
+
+  /** The bot id is the token's first part: the scope, the lock and the platform id at once. */
+  storedBot(secret: string) {
+    if (!BOT_TOKEN.test(secret)) return null;
+    const id = secret.split(':')[0];
+    return { platformId: id, scope: id, lockName: id };
+  },
 
   printPairing(context: Context, code: PairingCode, identity: BotIdentity) {
     const { io } = context;

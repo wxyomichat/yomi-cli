@@ -53,6 +53,7 @@ export function fakeSetup(
     setCredentials: async (context, options) => {
       if (!fake.on) return real.setCredentials(context, options);
       await fake.setCredentials?.();
+      return null;
     },
     open: async (context, options) => {
       if (!fake.on) return real.open(context, options);

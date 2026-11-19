@@ -4,6 +4,20 @@ import type { PairingCode } from '../pairing.js';
 import type { BotIdentity, ChannelKind, RelayChannel } from './types.js';
 
 /**
+ * Who a stored secret belongs to, read offline from the secret alone: what the bot registry
+ * (relay/registry.ts) keeps of a bot and checks every run against, so credentials of another bot
+ * are never run under this bot's owner, budget and cursor.
+ */
+export type StoredBot = {
+  /** Telegram: the bot id; QQ: the AppID; WeChat: ilink_bot_id ('' in older logins). */
+  platformId: string;
+  /** The relay state's scope, as the channel names it (`RelayChannel.scope`). */
+  scope: string;
+  /** The bot's lock, as the channel names it (`RelayChannel.lockName`). */
+  lockName: string;
+};
+
+/**
  * What `yomi relay --channel <kind>` needs from a channel around the relay itself: its
  * credentials (asked, checked, kept in the keychain), how it is named in the terminal, how its
  * owner pairs, its lock and its background service. commands/relay.ts runs the same flow for
@@ -38,8 +52,12 @@ export interface ChannelSetup {
    * keychain check and sign-in: a setup may refuse here (UsageError) what it cannot do at all.
    */
   wantsCredentials(options: RelayCommandOptions): boolean;
-  /** Asks for, checks and saves the credentials, then says what to do next. */
-  setCredentials(context: Context, options: RelayCommandOptions): Promise<void>;
+  /**
+   * Asks for, checks and saves the credentials, then says what to do next. Resolves with the bot
+   * as the platform named it when the check asked it (its name and handle for the registry), else
+   * null.
+   */
+  setCredentials(context: Context, options: RelayCommandOptions): Promise<BotIdentity | null>;
   /**
    * Builds the channel from the stored secret, asking for one first when none is stored and the
    * channel can (a terminal, or --token-stdin). null after a warning (missing secret, nobody to
@@ -53,6 +71,8 @@ export interface ChannelSetup {
   verify(channel: RelayChannel): Promise<BotIdentity>;
   /** The channel's `lockName` from a stored secret, offline (for --forget); null when unreadable. */
   lockNameOf(secret: string): string | null;
+  /** Whose secret it is, offline (the bot registry); null when unreadable. */
+  storedBot(secret: string): StoredBot | null;
   /** Shows a new pairing code ('code' pairing): what to send the bot, and where. */
   printPairing?(context: Context, code: PairingCode, identity: BotIdentity): void;
   /** Why a relay without an owner cannot start here, and what to run (a warning line). */

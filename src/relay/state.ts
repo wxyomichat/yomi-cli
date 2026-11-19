@@ -196,6 +196,7 @@ export function relayStatePath(account: string, scope: string, dir = configDir()
 /**
  * Deletes the relay state files of this environment (`--forget`); returns how many. With `kind`,
  * only that channel's (a file without `kind` is Telegram's), so the other channels keep theirs.
+ * The bot registry beside them (`bots-<hash>.json`, relay/registry.ts) is not a state file.
  */
 export function forgetRelayStates(account: string, dir = configDir(), kind?: ChannelKind): number {
   const folder = join(dir, 'relay');
@@ -207,7 +208,7 @@ export function forgetRelayStates(account: string, dir = configDir(), kind?: Cha
     return 0;
   }
   for (const name of names) {
-    if (!name.endsWith('.json')) continue;
+    if (!name.endsWith('.json') || name.startsWith('bots-')) continue;
     const path = join(folder, name);
     const stored = readJsonFile<Partial<RelayStateFile>>(path);
     // Files from before `account` was stored belong to whichever environment is forgetting.
@@ -330,6 +331,22 @@ export class RelayState {
     return Boolean(
       owner && this.data.welcomeDue && this.data.welcomeDue === ownerKey(owner.userId),
     );
+  }
+
+  /**
+   * The bot registry's baseline (relay/registry.ts): `owner` had their start before the registry
+   * took this bot over, so a state file a version without welcomes rewrote never owes them one.
+   * Changes nothing when they are on the list already or owed the welcome now.
+   */
+  welcomedBefore(baseline: { owner: string; npcId: string }) {
+    const { welcomed, welcomeDue } = this.data;
+    if (welcomeDue === baseline.owner || welcomed.some((record) => record.owner === baseline.owner))
+      return;
+    this.update({
+      welcomed: [{ owner: baseline.owner, npcId: baseline.npcId, at: 0 }, ...welcomed].slice(
+        -MAX_WELCOMED,
+      ),
+    });
   }
 
   /** The bound owner was welcomed with `npcId` (saved before anything is sent: never twice). */

@@ -1243,6 +1243,7 @@ export const qqSetup: ChannelSetup = {
         'Em seguida, adicione o bot como amigo no QQ, execute yomi relay --channel qq e conclua o pareamento no chat privado.',
       ),
     );
+    return { id: String(me?.id || app.appId), name: String(me?.username ?? ''), handle: '' };
   },
 
   async open(context: Context, options: RelayCommandOptions) {
@@ -1282,6 +1283,14 @@ export const qqSetup: ChannelSetup = {
   lockNameOf(secret: string) {
     const app = appOf(secret);
     return app ? `qq-${app.appId}` : null;
+  },
+
+  /** The AppID names the bot, its scope (`qq:<AppID>`) and its lock (`qq-<AppID>`). */
+  storedBot(secret: string) {
+    const app = appOf(secret);
+    return app
+      ? { platformId: app.appId, scope: `qq:${app.appId}`, lockName: `qq-${app.appId}` }
+      : null;
   },
 
   printPairing(context: Context, code: PairingCode, identity: BotIdentity) {

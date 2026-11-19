@@ -14,7 +14,7 @@ import { create } from './commands/create.js';
 import { image } from './commands/image.js';
 import { persona } from './commands/persona.js';
 import { preview } from './commands/preview.js';
-import { relay } from './commands/relay.js';
+import { relay, relayList } from './commands/relay.js';
 import { video } from './commands/video.js';
 import { CHANNEL_KINDS, type ChannelKind } from './relay/channels/types.js';
 import { UgcFailure } from './ugc/api.js';
@@ -505,6 +505,7 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --install-service     安装为后台服务（macOS launchd / Linux systemd --user），需先配对（微信：先登录）
   --uninstall-service   停止并删除后台服务
   --service-status      查看后台服务状态
+  --list                列出这台电脑上的 bot：通道、角色、主人和状态（可以加 --channel 只看一个通道）
   --forget              删除本机保存的这个通道的凭证和配对信息（其他通道的不受影响）
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
   --no-drafts           Telegram：不用流式草稿，改为编辑消息
@@ -540,6 +541,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         (WeChat: sign in first)
   --uninstall-service   Stop and remove the background service
   --service-status      Show the background service status
+  --list                List the bots on this computer: channel, character, owner and status (add --channel
+                        to see one channel)
   --forget              Delete this channel's credentials and pairing saved on this machine (other channels keep
                         theirs)
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
@@ -577,6 +580,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         primero (WeChat: inicia sesión primero)
   --uninstall-service   Detiene y elimina el servicio en segundo plano
   --service-status      Muestra el estado del servicio en segundo plano
+  --list                Muestra los bots de este equipo: canal, personaje, dueño y estado (agrega --channel
+                        para ver un solo canal)
   --forget              Elimina las credenciales y la vinculación de este canal guardadas en este equipo (los otros
                         canales conservan las suyas)
   --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
@@ -614,6 +619,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         antes (WeChat: entre antes)
   --uninstall-service   Para e remove o serviço em segundo plano
   --service-status      Mostra o status do serviço em segundo plano
+  --list                Mostra os bots deste computador: canal, personagem, dono e status (adicione --channel
+                        para ver um canal só)
   --forget              Apaga as credenciais e o pareamento deste canal salvos nesta máquina (os outros canais
                         mantêm os seus)
   --reply-timeout s     Quanto tempo esperar por uma resposta, padrão 120; depois disso, lê o histórico de mensagens
@@ -707,6 +714,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
     'no-drafts': { type: 'boolean' },
     'confirm-prod': { type: 'boolean' },
     'reset-spend': { type: 'boolean' },
+    list: { type: 'boolean' },
   },
   image: {
     prompt: { type: 'string', short: 'p' },
@@ -856,15 +864,27 @@ function gems(value: unknown): number | null {
   return parsed;
 }
 
+/** What `yomi relay --list` may be given besides the global options. */
+const LIST_GOES_WITH = new Set([
+  'list',
+  'channel',
+  'telegram',
+  'experimental',
+  'allow-file-store',
+  ...Object.keys(GLOBAL ?? {}),
+]);
+
 /**
  * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
- * kept for good). Both naming different channels, an unknown name or neither is a usage error.
+ * kept for good). Both naming different channels, an unknown name or neither is a usage error,
+ * except for `--list`, where neither means every channel (null).
  */
-export function relayChannelKind(values: Values): ChannelKind {
+export function relayChannelKind(values: Values): ChannelKind | null {
   const alias = Boolean(values.telegram);
   const named = values.channel as string | undefined;
   if (named === undefined) {
     if (alias) return 'telegram';
+    if (values.list) return null;
     throw new UsageError(
       tr(
         '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
@@ -1099,6 +1119,22 @@ async function run(argv: string[], io: Io): Promise<number> {
         });
         break;
       case 'relay':
+        if (values.list) {
+          const others = Object.keys(values).filter(
+            (key) => values[key] !== undefined && !LIST_GOES_WITH.has(key),
+          );
+          if (others.length)
+            throw new UsageError(
+              tr(
+                `--list 只列出 bot，不能和 --${others[0]} 一起用（可以加 --channel 只看一个通道）`,
+                `--list only lists the bots and does not go with --${others[0]} (add --channel to see one channel)`,
+                `--list solo muestra los bots y no se usa con --${others[0]} (agrega --channel para ver un solo canal)`,
+                `--list só mostra os bots e não é usado com --${others[0]} (adicione --channel para ver um canal só)`,
+              ),
+            );
+          await relayList(context, relayKind);
+          break;
+        }
         await relay(context, {
           channel: relayKind as ChannelKind,
           experimental: Boolean(values.experimental),

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describeEnvironment, type Environment, isProduction, UsageError } from '../core/env.js';
 import { configDir, ensurePrivateDir } from '../core/files.js';
 import { tr, language } from '../core/i18n.js';
-import { acquireProcessLock, type LockNote } from '../core/lock.js';
+import { acquireProcessLock, type LockNote, lockHolder } from '../core/lock.js';
 import { sha256 } from '../core/state.js';
 import { paint, say, warn } from '../core/ui.js';
 import {
@@ -13,8 +13,14 @@ import {
   type ChannelSetup,
   channelSetup,
 } from '../relay/channels/index.js';
-import type { BotIdentity } from '../relay/channels/types.js';
+import type { BotIdentity, RelayChannel } from '../relay/channels/types.js';
 import { PairingCode } from '../relay/pairing.js';
+import {
+  type BotRecord,
+  type BotRegistry,
+  characterOwner,
+  migrateRegistry,
+} from '../relay/registry.js';
 import { Relay, RelayStopped } from '../relay/relay.js';
 import {
   installService,
@@ -34,6 +40,11 @@ import { confirmProduction } from './declaration.js';
  * the pairing in this terminal, one relay per bot and one per Yomi account and environment (lock
  * files), the background service, and `--forget`. What differs per channel is asked of its
  * `ChannelSetup` (relay/channels/setup.ts).
+ *
+ * Each channel's bot is a record of the bot registry (relay/registry.ts), taken over from the
+ * stored credentials before anything else and made the bot new credentials belong to when they
+ * are set: a run starts only when the stored credentials are still that bot's, and `yomi relay
+ * --list` shows the bots without changing them.
  */
 
 export type RelayCommandOptions = {
@@ -393,11 +404,20 @@ function otherServiceRefusal(
   return null;
 }
 
-/** `--forget`: this channel's secret, pairing and service; the other channels keep theirs. */
-function forget(context: Context, setup: ChannelSetup, options: RelayCommandOptions) {
+/** `--forget`: this channel's secret, pairing, bot and service; the other channels keep theirs. */
+function forget(
+  context: Context,
+  setup: ChannelSetup,
+  options: RelayCommandOptions,
+  registry: BotRegistry,
+) {
   const { io, store } = context;
-  const secret = store.getSecret(setup.secretName(context.account));
-  const lockName = secret ? setup.lockNameOf(secret) : null;
+  const secretName = setup.secretName(context.account);
+  const secret = store.getSecret(secretName);
+  const lockName =
+    (secret ? setup.lockNameOf(secret) : null) ??
+    registry.bySecret(setup.kind, secretName)?.lockName ??
+    null;
   if (lockName) {
     const lock = acquireProcessLock(lockPath(lockName));
     if ('heldBy' in lock)
@@ -420,7 +440,8 @@ function forget(context: Context, setup: ChannelSetup, options: RelayCommandOpti
     );
   }
   const states = forgetRelayStates(context.account, undefined, setup.kind);
-  const removed = store.deleteSecret(setup.secretName(context.account));
+  const removed = store.deleteSecret(secretName);
+  registry.forget(setup.kind, secretName);
   const label = setup.secretLabel;
   // Telegram's Spanish and Portuguese say "token de bot" in this one line, as they always have.
   const none = setup.kind === 'telegram' ? 'token de bot' : label;
@@ -441,6 +462,291 @@ function forget(context: Context, setup: ChannelSetup, options: RelayCommandOpti
         ),
   );
   say(io, paint(io, 'dim', setup.forgetHint()));
+}
+
+/** The flag that sets each channel's credentials. */
+const CREDENTIALS_FLAG: Record<ChannelKind, string> = {
+  telegram: '--set-token',
+  qq: '--set-app',
+  wechat: '--login',
+};
+
+/** The options of a plain run of `kind`: for what does not depend on them (its service's file). */
+const plainOptions = (kind: ChannelKind): RelayCommandOptions => ({
+  channel: kind,
+  experimental: kind === 'wechat',
+  setToken: false,
+  setApp: false,
+  login: false,
+  qrLink: false,
+  tokenStdin: false,
+  pair: false,
+  forget: false,
+  characterId: '',
+  maxSpend: null,
+  allowFileStore: false,
+  installService: false,
+  uninstallService: false,
+  serviceStatus: false,
+  replyTimeoutMs: 120_000,
+  drafts: true,
+  confirmProd: false,
+  resetSpend: false,
+});
+
+/** Whether `kind`'s own background service is installed for this environment. */
+function serviceInstalled(context: Context, kind: ChannelKind): string | null {
+  try {
+    const plan = planFor(context, channelSetup(kind), plainOptions(kind));
+    return existsSync(plan.path) ? plan.path : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This environment's bot registry, after taking over the bots the channels' credentials stored
+ * before it (design §4.3); what the takeover found to warn about is said once, then.
+ */
+function openRegistry(context: Context): BotRegistry {
+  const { registry, warnings } = migrateRegistry({
+    account: context.account,
+    store: context.store,
+    installed: (kind) => serviceInstalled(context, kind) !== null,
+  });
+  for (const line of warnings) warn(context.io, line);
+  return registry;
+}
+
+/**
+ * The channel's bot is the one its stored credentials belong to, now that they were set: kept when
+ * it is the registered one, else registered in its place. Nothing when none are stored.
+ */
+function adoptStored(
+  context: Context,
+  registry: BotRegistry,
+  setup: ChannelSetup,
+  identity: BotIdentity | null,
+  channel?: RelayChannel,
+): BotRecord | null {
+  const secretName = setup.secretName(context.account);
+  const secret = context.store.getSecret(secretName);
+  const stored =
+    (secret ? setup.storedBot(secret) : null) ??
+    (channel && identity
+      ? { platformId: identity.id, scope: channel.scope, lockName: channel.lockName }
+      : null);
+  if (!stored) return null;
+  const { record, warnings } = registry.adopt({
+    kind: setup.kind,
+    secretName,
+    stored,
+    ...(identity ? { label: setup.label(identity), handle: identity.handle } : {}),
+  });
+  for (const line of warnings) warn(context.io, line);
+  return record;
+}
+
+/**
+ * The stored credentials are not the registered bot's (something that does not know the registry
+ * replaced them): refused, so another bot never runs as this one.
+ */
+function otherBotCredentials(setup: ChannelSetup, record: BotRecord): string {
+  const name = setup.displayName;
+  const again = `${setup.command} ${CREDENTIALS_FLAG[setup.kind]}`;
+  const forget = `${setup.command} --forget`;
+  return tr(
+    `保存的${inChinese(name)}凭证属于另一个 bot，不是登记的 ${record.name}，所以没有启动。要改用现在保存的这个 bot，运行 ${again} 重新设置；要从头开始，运行 ${forget}。`,
+    `The saved ${name} credentials belong to a bot other than the registered ${record.name}, so the relay was not started. To use the bot saved now instead, set it again with ${again}; to start over, run ${forget}.`,
+    `Las credenciales de ${name} guardadas son de otro bot, no del bot registrado ${record.name}, así que no se inició. Para usar el bot guardado ahora, vuelve a configurarlo con ${again}; para empezar de cero, ejecuta ${forget}.`,
+    `As credenciais do ${name} salvas são de outro bot, não do bot registrado ${record.name}, então ele não foi iniciado. Para usar o bot salvo agora, configure-o de novo com ${again}; para começar do zero, execute ${forget}.`,
+  );
+}
+
+/** The stored credentials changed while the relay started (another command set them): run again. */
+function credentialsChanged(setup: ChannelSetup): string {
+  const name = setup.displayName;
+  return tr(
+    `启动时保存的${inChinese(name)}凭证被换掉了，所以没有启动：再运行一次 ${setup.command}。`,
+    `The saved ${name} credentials changed while the relay was starting, so it was not started: run ${setup.command} again.`,
+    `Las credenciales de ${name} guardadas cambiaron mientras se iniciaba el relay, así que no se inició: vuelve a ejecutar ${setup.command}.`,
+    `As credenciais do ${name} salvas mudaram enquanto o relay iniciava, então ele não foi iniciado: execute ${setup.command} de novo.`,
+  );
+}
+
+/** A chat user id shown in part: its first and last two characters. */
+function masked(id: string): string {
+  return id.length > 6 ? `${id.slice(0, 2)}…${id.slice(-2)}` : '…';
+}
+
+/** What `--list` says of a bot's state, offline: its lock, its credentials, its owner. */
+function botStatus(context: Context, record: BotRecord, state: RelayState | null): string {
+  const holder = lockHolder(lockPath(record.lockName));
+  if (holder)
+    return tr(
+      `运行中（进程 ${holder.pid}）`,
+      `running (process ${holder.pid})`,
+      `en ejecución (proceso ${holder.pid})`,
+      `em execução (processo ${holder.pid})`,
+    );
+  const secret = context.store.getSecret(record.secretName);
+  const stored = secret ? channelSetup(record.kind).storedBot(secret) : null;
+  const command = channelSetup(record.kind).command;
+  if (!stored && record.kind === 'wechat')
+    return tr(
+      `需要登录：${command} --login`,
+      `needs login: ${command} --login`,
+      `necesita iniciar sesión: ${command} --login`,
+      `precisa entrar: ${command} --login`,
+    );
+  if (!stored)
+    return tr(
+      `需要凭证：${command} ${CREDENTIALS_FLAG[record.kind]}`,
+      `needs credentials: ${command} ${CREDENTIALS_FLAG[record.kind]}`,
+      `necesita credenciales: ${command} ${CREDENTIALS_FLAG[record.kind]}`,
+      `precisa de credenciais: ${command} ${CREDENTIALS_FLAG[record.kind]}`,
+    );
+  if (stored.scope !== record.scope)
+    return tr(
+      '凭证属于另一个 bot',
+      'credentials belong to another bot',
+      'las credenciales son de otro bot',
+      'as credenciais são de outro bot',
+    );
+  if (!state?.data.owner && record.kind === 'wechat')
+    return tr(
+      `需要登录：${command} --login`,
+      `needs login: ${command} --login`,
+      `necesita iniciar sesión: ${command} --login`,
+      `precisa entrar: ${command} --login`,
+    );
+  if (!state?.data.owner)
+    return tr(
+      `需要配对：${command} --pair`,
+      `needs pairing: ${command} --pair`,
+      `necesita vinculación: ${command} --pair`,
+      `precisa de pareamento: ${command} --pair`,
+    );
+  return tr('没有运行', 'not running', 'no está en ejecución', 'não está em execução');
+}
+
+/**
+ * `yomi relay --list [--channel K]`: the registered bots, each with its channel, character, owner
+ * and state, and the background services installed. Changes no bot (it takes over stored
+ * credentials first, as every `yomi relay` does) and asks no server.
+ */
+export async function relayList(context: Context, kind: ChannelKind | null) {
+  const { io } = context;
+  const registry = openRegistry(context);
+  const bots = registry.list(kind ?? undefined);
+  if (!bots.length && kind) {
+    // Only this channel has none: the others' bots are listed without --channel.
+    const setup = channelSetup(kind);
+    const name = setup.displayName;
+    const command = `${setup.command} ${CREDENTIALS_FLAG[kind]}`;
+    say(
+      io,
+      tr(
+        `这台电脑上还没有${inChinese(name)}的 bot：用 ${command} 设置一个。`,
+        `No ${name} bot on this computer yet: set one up with ${command}.`,
+        `Todavía no hay ningún bot de ${name} en este equipo: configura uno con ${command}.`,
+        `Ainda não há nenhum bot do ${name} neste computador: configure um com ${command}.`,
+      ),
+    );
+    if (registry.list().length)
+      say(
+        io,
+        paint(
+          io,
+          'dim',
+          tr(
+            '其他通道的 bot：yomi relay --list',
+            "Other channels' bots: yomi relay --list",
+            'Bots de los otros canales: yomi relay --list',
+            'Bots dos outros canais: yomi relay --list',
+          ),
+        ),
+      );
+  } else if (!bots.length)
+    say(
+      io,
+      tr(
+        '这台电脑上还没有 bot：用 yomi relay --telegram --set-token、yomi relay --channel qq --set-app 或 yomi relay --channel wechat --experimental --login 设置一个。',
+        'No bots on this computer yet: set one up with yomi relay --telegram --set-token, yomi relay --channel qq --set-app or yomi relay --channel wechat --experimental --login.',
+        'Todavía no hay bots en este equipo: configura uno con yomi relay --telegram --set-token, yomi relay --channel qq --set-app o yomi relay --channel wechat --experimental --login.',
+        'Ainda não há bots neste computador: configure um com yomi relay --telegram --set-token, yomi relay --channel qq --set-app ou yomi relay --channel wechat --experimental --login.',
+      ),
+    );
+  const none = tr('（还没有）', '(none yet)', '(todavía no)', '(ainda não)');
+  for (const record of bots) {
+    const setup = channelSetup(record.kind);
+    const path = relayStatePath(context.account, record.scope);
+    const state = existsSync(path)
+      ? new RelayState(path, record.scope, context.account, record.kind)
+      : null;
+    const owner = state?.data.owner;
+    const named = record.character;
+    const character = named
+      ? tr(
+          `${named.name}（${named.npcId}）`,
+          `${named.name} (${named.npcId})`,
+          `${named.name} (${named.npcId})`,
+          `${named.name} (${named.npcId})`,
+        )
+      : none;
+    const ownerName = owner
+      ? record.kind === 'telegram' && owner.name
+        ? owner.name
+        : masked(String(owner.userId))
+      : none;
+    say(io, `${paint(io, 'bold', record.name)}  ${setup.displayName}  ${record.label}`);
+    say(
+      io,
+      tr(
+        `  角色：${character}`,
+        `  Character: ${character}`,
+        `  Personaje: ${character}`,
+        `  Personagem: ${character}`,
+      ),
+    );
+    say(
+      io,
+      tr(
+        `  主人：${ownerName}`,
+        `  Owner: ${ownerName}`,
+        `  Dueño: ${ownerName}`,
+        `  Dono: ${ownerName}`,
+      ),
+    );
+    const status = botStatus(context, record, state);
+    say(
+      io,
+      tr(`  状态：${status}`, `  Status: ${status}`, `  Estado: ${status}`, `  Status: ${status}`),
+    );
+  }
+  const installed = CHANNEL_KINDS.filter(
+    (item) => (!kind || item === kind) && serviceInstalled(context, item) !== null,
+  ).map((item) => channelSetup(item).displayName);
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      installed.length
+        ? tr(
+            `已安装的后台服务：${installed.join('、')}`,
+            `Background services installed: ${installed.join(', ')}`,
+            `Servicios en segundo plano instalados: ${installed.join(', ')}`,
+            `Serviços em segundo plano instalados: ${installed.join(', ')}`,
+          )
+        : tr(
+            '没有安装后台服务。',
+            'No background service is installed.',
+            'No hay ningún servicio en segundo plano instalado.',
+            'Nenhum serviço em segundo plano está instalado.',
+          ),
+    ),
+  );
 }
 
 export async function relay(context: Context, options: RelayCommandOptions) {
@@ -496,7 +802,8 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     );
     return;
   }
-  if (options.forget) return forget(context, setup, options);
+  const registry = openRegistry(context);
+  if (options.forget) return forget(context, setup, options, registry);
 
   // Asked before the keychain check and sign-in: a channel may refuse here what it cannot do.
   const settingCredentials = setup.wantsCredentials(options);
@@ -511,7 +818,10 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     );
   if (settingCredentials) {
     // Telegram's --set-token touches nothing a running relay uses (design Appendix A, 11).
-    if (setup.kind === 'telegram') return setup.setCredentials(context, options);
+    if (setup.kind === 'telegram') {
+      adoptStored(context, registry, setup, await setup.setCredentials(context, options));
+      return;
+    }
     // --set-app and --login never run beside a relay of this environment, nor a relay beside
     // them (QQ's gateway probe could take a running relay's events; a login rewrites the owner a
     // running relay saves): they hold the environment's lock while they run.
@@ -520,7 +830,8 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       holder.flag ? credentialsRunning(holder, flag) : runningRefusal(holder, flag),
     );
     try {
-      return await setup.setCredentials(context, options);
+      adoptStored(context, registry, setup, await setup.setCredentials(context, options));
+      return;
     } finally {
       held.release();
     }
@@ -545,6 +856,8 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     ))
   )
     return;
+  const secretName = setup.secretName(context.account);
+  const before = store.getSecret(secretName);
   const channel = await setup.open(context, options);
   if (!channel) return;
   let identity: BotIdentity;
@@ -557,6 +870,21 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     }
     throw error;
   }
+  // The registered bot, read again: --set-token may have set another one while this started.
+  registry.commit(() => false);
+  const registered = registry.bySecret(setup.kind, secretName);
+  const saved = store.getSecret(secretName);
+  let record: BotRecord | null = registered && saved === before ? registered : null;
+  if (!record) {
+    // Credentials set by something else while this started are not the ones opened: run again.
+    const stored = saved ? setup.storedBot(saved) : null;
+    if (stored && stored.scope !== channel.scope) throw new UsageError(credentialsChanged(setup));
+    // Credentials typed in just now (`open` asked) make the bot theirs, as --set-token's do.
+    record = adoptStored(context, registry, setup, identity, channel);
+  }
+  if (!record) return;
+  // Stored credentials of another bot never run as this one.
+  const otherBot = record.scope !== channel.scope;
   const state = new RelayState(
     relayStatePath(context.account, channel.scope),
     channel.scope,
@@ -565,6 +893,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
   );
 
   if (options.installService) {
+    if (otherBot) throw new UsageError(otherBotCredentials(setup, record));
     if (!state.data.owner)
       throw new UsageError(
         channel.caps.pairing === 'login'
@@ -652,6 +981,41 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     throw error;
   }
   try {
+    // Checked under the locks, as the run itself would: a relay already running says so first.
+    if (otherBot) {
+      if (io.interactive) throw new UsageError(otherBotCredentials(setup, record));
+      // A service restarting would not fix it: say so and end without failing.
+      warn(io, otherBotCredentials(setup, record));
+      return;
+    }
+    const bot = registry.refresh(record, {
+      stored: setup.storedBot(store.getSecret(secretName) ?? '') ?? {
+        platformId: identity.id,
+        scope: channel.scope,
+        lockName: channel.lockName,
+      },
+      label: setup.label(identity),
+      handle: identity.handle,
+    });
+    registry.bindAccount(credential.userId);
+    // Its owner then had their start before the registry: never welcomed again.
+    if (bot.welcomeBaseline) state.welcomedBefore(bot.welcomeBaseline);
+    // The character the bot talks as follows the relay's (the state file has the last one).
+    const log = (line: string) => io.stderr.write(`${new Date().toISOString()} ${line}\n`);
+    const bindCharacter = () => {
+      const owner = state.data.owner;
+      try {
+        registry.bindCharacter(
+          bot.key,
+          state.data.character,
+          owner ? characterOwner(bot.kind, owner.userId) : '',
+        );
+      } catch (error) {
+        // The relay goes on: the registry catches up on the next start.
+        log(error instanceof Error ? error.message : String(error));
+      }
+    };
+    bindCharacter();
     // Another person may pair now: their consent to spend starts over.
     if (options.pair) state.resetOwner();
     let pairing: PairingCode | null = null;
@@ -748,10 +1112,11 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       drafts: options.drafts,
       // what the relay says in the chat: the CLI's own language (zh, en, es or pt)
       language: language(),
-      log: (line) => io.stderr.write(`${new Date().toISOString()} ${line}\n`),
+      log,
       rerunCommand: setup.command,
       // QQ and WeChat relay in production only on a policy the server sent for them.
       requireServerPolicy: channel.kind !== 'telegram' && isProduction(context.env),
+      onCharacter: bindCharacter,
     });
     try {
       await engine.run(controller.signal);

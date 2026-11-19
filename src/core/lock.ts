@@ -268,3 +268,14 @@ export function acquireProcessLock(
   }
   return { heldBy: 0 };
 }
+
+/**
+ * Who holds the process lock at `path` now, read without taking or touching it: its live holder
+ * (pid and note), or null when nobody does (no lock, a holder that is gone or from before this
+ * boot, or one not written yet).
+ */
+export function lockHolder(path: string): { pid: number; note?: LockNote } | null {
+  const holder = readHolder(path);
+  if (!holder || !processAlive(holder.pid) || fromBeforeBoot(holder.at)) return null;
+  return holder.note ? { pid: holder.pid, note: holder.note } : { pid: holder.pid };
+}
