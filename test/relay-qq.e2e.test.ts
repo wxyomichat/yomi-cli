@@ -13,6 +13,10 @@ import { type MockQq, startMockQq } from '../src/mock/qq.js';
 import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
 import { QqChannel, type QqChannelOptions } from '../src/relay/channels/qq.js';
 import { type ChannelHost, type InboundEvent, RelayStopped } from '../src/relay/channels/types.js';
+import { ImFeed } from '../src/relay/hub/feed.js';
+import { Ledger, stateLedgerStore } from '../src/relay/hub/ledger.js';
+import { PolicyService } from '../src/relay/hub/policy.js';
+import { SessionGate } from '../src/relay/hub/session.js';
 import { PairingCode } from '../src/relay/pairing.js';
 import { Relay, type RelayOptions } from '../src/relay/relay.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
@@ -22,7 +26,8 @@ import { memoryIo } from './helpers/io.js';
 /**
  * `yomi relay --channel qq` end to end, against the mock gateway (src/mock/server.ts) and the mock
  * QQ (src/mock/qq.ts: token, REST, WebSocket gateway): `--set-app`, pairing with `/pair`, a
- * streamed reply, passive replies within their window and count, active messages and the queue,
+ * streamed reply (the AI notice first, also after the message waited for another bot's
+ * measurement), passive replies within their window and count, active messages and the queue,
  * `/budget` answered with a typed code (also after a restart), `/image`, content refusals, a bot
  * without the private-chat intent, and a Resume after a restart that relays nothing twice; then
  * the presenter on its own (recall when the stream diverged, the first message's length, QQ's
@@ -395,6 +400,43 @@ describe('the QQ relay', () => {
     }
     // One passive reply for the notice and the reply together.
     expect(qq.messages(OWNER).slice(before)).toHaveLength(1);
+  });
+
+  it('keeps the AI notice before the reply when the message waited for another bot', async () => {
+    // Services shared with another bot of the sign-in, which holds the spend window for a while.
+    const { gateway, account } = createContext(
+      memoryIo().io,
+      {},
+      { client: 'relay-qq', channel: 'cli_relay' },
+    );
+    const log = () => undefined;
+    const session = new SessionGate(gateway, { log });
+    const feed = new ImFeed(gateway, session, { log });
+    const ledgerPath = join(dir, 'hub-ledger.json');
+    rmSync(ledgerPath, { force: true });
+    const ledger = new Ledger(stateLedgerStore(new RelayState(ledgerPath, 'hub', account, 'qq')));
+    ledger.useAllowance(50, false);
+    const hub = { feed, session, policy: new PolicyService(gateway), ledger };
+    const started = start({}, { hub });
+    feed.start();
+    running.push(async () => {
+      feed.close();
+      session.close();
+    });
+    await started;
+    const held = ledger.window.tryAcquire('another bot')!;
+    const before = sends().length;
+    const earlier = qq.messages(OWNER).length;
+    const id = qq.userSends(OWNER, 'SLOW 窗外的雨');
+    // Long enough for the typing the wait shows (QQ: the reply's presenter opened early).
+    await sleep(600);
+    expect(sends()).toHaveLength(before);
+    held.release();
+    const reply = await streamed(id);
+    expect(reply.text).toBe(`${NOTICE}\n\n${NARRATION}\n\nSLOW 窗外的雨？这个问题，我想了很久。`);
+    // The notice went once, in the reply, not after it.
+    const since = qq.messages(OWNER).slice(earlier);
+    expect(since.filter((message) => message.text.includes(NOTICE))).toHaveLength(1);
   });
 
   it('answers within the reply window and count, then actively, then at the next message', async () => {

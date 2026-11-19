@@ -179,6 +179,20 @@ export class QqPresenter implements ReplyPresenter {
     if (this.outlet.streamingDisabled || !this.outlet.usable(context)) this.mode = 'buffered';
   }
 
+  /**
+   * Started early (the message waited its turn): the notices held since (the AI notice, the price
+   * line) join the prefix, taken again as a start now would take it. Nothing is streamed yet.
+   */
+  sending(): void {
+    const context = this.context;
+    if (!context || this.closed || this.streamId) return;
+    context.pending.unshift(...this.prefixItems);
+    this.prefix = '';
+    this.prefixItems = [];
+    this.leftover = 0;
+    this.takePrefix();
+  }
+
   update(paragraphs: readonly ImParagraph[]): void {
     if (this.closed) return;
     this.latest = paragraphs;

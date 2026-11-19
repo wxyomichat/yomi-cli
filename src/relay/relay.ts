@@ -13,7 +13,6 @@ import {
   INSUFFICIENT_GEMS,
   listMessages,
   openingOf,
-  pollMessages,
   replyCost,
   type SendAnswer,
   sendMessage,
@@ -45,7 +44,7 @@ import {
 } from '../gen/chatImage.js';
 import { download, extensionOf, type GenRefusal } from '../gen/common.js';
 import { sniffMime } from '../gen/raster.js';
-import { ImConnection, type SocketFactory } from '../im/connection.js';
+import type { SocketFactory } from '../im/connection.js';
 import {
   asidePlainText,
   type ImMessage,
@@ -53,13 +52,7 @@ import {
   Semantic,
   SenderType,
 } from '../im/models.js';
-import { BusinessType, Command } from '../im/packet.js';
-import {
-  type AsideEvent,
-  ConversationPurpose,
-  type StreamEvent,
-  StreamEventType,
-} from '../im/thrift.js';
+import { type AsideEvent, type StreamEvent, StreamEventType } from '../im/thrift.js';
 import { walletBalance } from '../ugc/api.js';
 import { TelegramChannel } from './channels/telegram.js';
 import {
@@ -81,6 +74,10 @@ import {
   type ReplyPresenter,
   type Sent,
 } from './channels/types.js';
+import { type FeedSubscriber, ImFeed } from './hub/feed.js';
+import { type Lease, Ledger, stateLedgerStore } from './hub/ledger.js';
+import { PolicyService } from './hub/policy.js';
+import { SessionGate, type SessionListener } from './hub/session.js';
 import { PairingCode } from './pairing.js';
 import {
   channelPolicy,
@@ -88,7 +85,6 @@ import {
   DEFAULT_POLICY,
   POLICY_REFETCH_MS,
   type RelayPolicy,
-  relayPolicy,
 } from './policy.js';
 import { renderReply } from './render.js';
 import { type BillingMode, type RelayCharacter, type RelayState } from './state.js';
@@ -147,20 +143,45 @@ import {
  *   never another device's.
  * - The long connection never gives up, reconnects after sleep, and reads `poll_message` on every
  *   connect; a reply that still did not arrive is read back from history.
+ * - What one Yomi sign-in shares is given to the relay (`RelayOptions.hub`), else made for it
+ *   alone: the long connection (`ImFeed`: every event to every relay, each keeps its own), the
+ *   sign-in (`SessionGate`: signed out, back, another account), the policy per kind of channel
+ *   (`PolicyService`) and the money (`Ledger`: the local ceiling and its running total, the charge
+ *   still to be measured, the spend window).
+ * - A message is a turn from the moment it is accepted: another one is told to wait, and `/stop`
+ *   stops it. Under a cap (free-only included) a send is measured by the balance, which is the
+ *   account's (under free-only, to catch a charged "free" reply), so it holds the spend window
+ *   from before its reading until its cost is known; a message that finds the window held (by
+ *   another relay of the same ledger) waits for it as its turn: typing shows after a moment,
+ *   `/stop` cancels it (nothing sent, nothing charged), and after 90 s it is not sent. Without a
+ *   cap nothing waits for the window.
  * - What the server promises lives in `relay/get_policy`; without it no server feature is assumed
  *   (FreeOnly, the spend cap, the notices): free-only sends nothing, a cap (a budget or
  *   `--max-spend`) needs a known price, and the relay shows its own notices. Without a cap none
  *   of that is needed.
  */
 
+/** What the relays of one Yomi sign-in share; a relay given none makes its own. */
+export type RelayServices = {
+  feed: ImFeed;
+  session: SessionGate;
+  policy: PolicyService;
+  ledger: Ledger;
+};
+
 export type RelayOptions = {
   /**
    * Gems the relay may spend at most, set on this computer (`--max-spend`): null, no local cap
-   * (Yomi charges by its normal rules); 0, free replies only.
+   * (Yomi charges by its normal rules); 0, free replies only. With `hub`, its ledger's instead.
    */
   maxSpend: number | null;
-  /** Start the local ceiling's running total over (`--reset-spend`). */
+  /** Start the local ceiling's running total over (`--reset-spend`); not with `hub`. */
   resetSpend?: boolean;
+  /**
+   * The services this relay shares with the other relays of the sign-in, started and stopped by
+   * whoever made them; without, the relay makes its own and runs them itself.
+   */
+  hub?: RelayServices;
   /** Character to start with (`--character`), '' to keep the saved one. */
   characterId: string;
   /** Pairing code while unpaired (foreground runs only), else null. */
@@ -208,7 +229,7 @@ type Turn = {
   streamId: string;
   assistantMid: string;
   cid: string;
-  presenter: ReplyPresenter;
+  presenter: LazyPresenter;
   lastSeq: number;
   settled: boolean;
   mode: BillingMode;
@@ -223,7 +244,63 @@ type Turn = {
   /** Once settled: shown and booked (`finishTurn`). */
   finished: Promise<void> | null;
   watchdog: ReturnType<typeof setTimeout> | null;
+  /** Not sent yet: waiting for the spend window, or being readied (its money checked). */
+  waiting: boolean;
+  /** Ends the wait: `/stop`, a sign-out, the end of the run. Nothing is sent after it. */
+  abort: AbortController;
+  /** The spend window, held while this send's cost is measured by the balance (under a cap). */
+  lease: Lease | null;
+  /** The wait for the window and the send after it, when they go on beside the chat. */
+  task: Promise<void> | null;
 };
+
+/**
+ * A turn's presenter, made by the channel only when the reply is first shown (`start`): a message
+ * refused before it is sent never makes one. Until then it has no stop control (`streamRef` '')
+ * and stopping it shows nothing.
+ */
+class LazyPresenter implements ReplyPresenter {
+  private made: ReplyPresenter | null = null;
+  private stoppedEarly = false;
+
+  constructor(private readonly make: () => ReplyPresenter) {}
+
+  /** Shown: `start` made it. */
+  get started(): boolean {
+    return this.made !== null;
+  }
+
+  get streamRef(): string {
+    return this.made?.streamRef ?? '';
+  }
+
+  get isClosed(): boolean {
+    return this.made ? this.made.isClosed : this.stoppedEarly;
+  }
+
+  /** Once: a second call (the send after typing was shown) tells the channel it is sent now. */
+  start() {
+    if (this.stoppedEarly) return;
+    if (this.made) return this.made.sending?.();
+    this.made = this.make();
+    this.made.start();
+  }
+
+  update(paragraphs: readonly ImParagraph[]) {
+    this.made?.update(paragraphs);
+  }
+
+  finish(paragraphs: readonly ImParagraph[], emptyText: string): Promise<string[]> {
+    if (!this.made) this.start();
+    return this.made ? this.made.finish(paragraphs, emptyText) : Promise.resolve([]);
+  }
+
+  stop(note?: string): Promise<void> {
+    if (this.made) return this.made.stop(note);
+    this.stoppedEarly = true;
+    return Promise.resolve();
+  }
+}
 
 /**
  * A requested image until its gems are settled, kept across restarts (one per bot: per channel
@@ -298,6 +375,8 @@ const NOTICE_SCENES = new Set([
 ]);
 const THREE_HOURS = 3 * 60 * 60 * 1000;
 const PRICE_TTL = 5 * 60 * 1000;
+/** A message waiting for the spend window shows typing after this long. */
+const TYPING_DELAY_MS = 300;
 /** How long a stop waits for the open reply's presenter at shutdown before giving up on it. */
 const SHUTDOWN_STOP_MS = 3000;
 
@@ -309,6 +388,18 @@ export function unknownOutcome(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.code !== ApiError.transport) return false;
   const status = error.httpStatus;
   return status === 0 || status === 408 || status >= 500;
+}
+
+/** Waits for `work`, at most `ms`. */
+async function within(ms: number, work: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    work,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /** A picture's download gives up after a minute: a stalled one must not hold the relay. */
@@ -344,7 +435,6 @@ function billingNote(status: number): ImageBillingNote {
 export class Relay {
   private turn: Turn | null = null;
   private early = new Map<string, StreamEvent[]>();
-  private connection: ImConnection | null = null;
   private policy: RelayPolicy = DEFAULT_POLICY;
   private readonly texts: RelayTexts;
   private price: { npcId: string; value: number | null; at: number } | null = null;
@@ -366,7 +456,6 @@ export class Relay {
   private readonly records: LocalState;
   private gate: Gate = '';
   private strangers = 0;
-  private resumeTimer: ReturnType<typeof setInterval> | null = null;
   private stopReason: RelayStopped | null = null;
   private readonly abort = new AbortController();
   private readonly userId: string;
@@ -381,6 +470,30 @@ export class Relay {
   /** The server has not confirmed this channel (production): asked again now and then. */
   private policyGated = false;
   private policyAt = 0;
+  private readonly feed: ImFeed;
+  private readonly session: SessionGate;
+  private readonly policies: PolicyService;
+  private readonly ledger: Ledger;
+  /** No `hub` was given: the services are this relay's own, started and stopped by it. */
+  private readonly ownsServices: boolean;
+  /** What leaves the feed and the sign-in; null while not subscribed. */
+  private leaveFeed: (() => void) | null = null;
+  private leaveSession: (() => void) | null = null;
+  private readonly feedSubscriber: FeedSubscriber = {
+    stream: (event) => this.onStream(event),
+    aside: (event) => this.onAside(event),
+    reconnected: async () => {
+      const turn = this.turn;
+      if (turn && !turn.settled && !turn.waiting) await this.catchUp(turn, false);
+    },
+    failed: (error) => void this.unexpected(error),
+  };
+  private readonly sessionListener: SessionListener = {
+    signedOut: () => this.pauseSignedOut(),
+    resumed: () => this.resume(),
+    otherAccount: () => this.otherAccount(),
+    failed: (error) => void this.unexpected(error),
+  };
 
   /** `channel`: a `RelayChannel`, or a `TelegramBot` (made Telegram's channel with `options`). */
   constructor(
@@ -416,6 +529,23 @@ export class Relay {
       pause: (reason, until) => this.pauseChannel(reason, until),
       resume: () => this.resumeChannel(),
     };
+    const hub = options.hub;
+    this.ownsServices = !hub;
+    const log = (line: string) => this.log(line);
+    const onError = (error: unknown) => void this.unexpected(error);
+    this.session =
+      hub?.session ??
+      new SessionGate(gateway, { log, resumeCheckMs: options.resumeCheckMs, onError });
+    this.feed =
+      hub?.feed ??
+      new ImFeed(gateway, this.session, { log, createSocket: options.createSocket, onError });
+    this.policies = hub?.policy ?? new PolicyService(gateway);
+    this.ledger = hub?.ledger ?? new Ledger(stateLedgerStore(state));
+  }
+
+  /** This relay in the shared ledger (and its spend window): its channel scope. */
+  private get botKey(): string {
+    return this.channel.scope;
   }
 
   private log(line: string) {
@@ -426,6 +556,7 @@ export class Relay {
   async run(signal: AbortSignal): Promise<void> {
     const onAbort = () => this.abort.abort();
     signal.addEventListener('abort', onAbort, { once: true });
+    this.leaveSession = this.session.subscribe(this.sessionListener);
     try {
       await this.prepare();
       await this.poll();
@@ -456,14 +587,18 @@ export class Relay {
           'Uma conta do Yomi diferente da última vez está conectada nesta máquina: orçamento, personagem e registros foram redefinidos',
         ),
       );
-    this.state.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
+    // A shared ledger's ceiling is set by whoever runs the relays.
+    if (this.ownsServices)
+      this.ledger.useAllowance(this.options.maxSpend, Boolean(this.options.resetSpend));
     this.liftStalePause();
     await this.readPolicy(true);
+    // Signed out before this relay listened (the sign-in is shared): it pauses as the others did.
+    if (this.session.signedOut && this.gate !== 'signedOut') await this.pauseSignedOut();
     if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
     const kept = this.keptImage();
     // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
     // next send) settles it, never a reading taken now.
-    if (this.state.data.pending && !kept && !(await this.settlePending()))
+    if (this.ledger.pending && !kept && !(await this.settlePending()))
       this.log(
         tr(
           '上次有一条消息的花费还没核对：读不到余额，下一条发送前再核对',
@@ -514,16 +649,17 @@ export class Relay {
 
   /** The money rules of this run, once at the start. */
   private logMoney() {
-    const { billing, allowance } = this.state.data;
-    const ceiling = this.options.maxSpend;
+    const billing = this.state.data.billing;
+    const spent = this.ledger.spent;
+    const ceiling = this.ledger.maxSpend;
     const left = Math.max(0, this.ceilingLeft());
     if (this.uncapped())
       this.log(
         tr(
-          `没有设花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示；通过 relay 已花 ${allowance.spent} 钻石`,
-          `No spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat; ${allowance.spent} gems spent through the relay so far`,
-          `Sin límite de gasto: Yomi cobra según sus reglas habituales, y si el saldo no alcanza se avisa en el chat; hasta ahora se gastaron ${allowance.spent} gemas a través del relay`,
-          `Sem limite de gastos: o Yomi cobra pelas regras normais, e saldo baixo é avisado no chat; até agora, ${allowance.spent} gemas foram gastas pelo relay`,
+          `没有设花费上限：按 Yomi 的正常规则扣费，钻石不足时会在聊天里提示；通过 relay 已花 ${spent} 钻石`,
+          `No spending cap: Yomi charges by its normal rules, and a low balance is reported in the chat; ${spent} gems spent through the relay so far`,
+          `Sin límite de gasto: Yomi cobra según sus reglas habituales, y si el saldo no alcanza se avisa en el chat; hasta ahora se gastaron ${spent} gemas a través del relay`,
+          `Sem limite de gastos: o Yomi cobra pelas regras normais, e saldo baixo é avisado no chat; até agora, ${spent} gemas foram gastas pelo relay`,
         ),
       );
     else if (this.freeOnly())
@@ -562,13 +698,17 @@ export class Relay {
       );
   }
 
-  /** The server's switches: off, too old, or back on. */
+  /**
+   * The server's switches: off, too old, or back on. A sign-out the owner was told of meanwhile
+   * stays: only the sign-in coming back lifts it (`resume`).
+   */
   private applyPolicy() {
-    if (!this.policy.enabled) this.gate = 'disabled';
+    let gate: Gate = '';
+    if (!this.policy.enabled) gate = 'disabled';
     else if (this.policy.minVersion && compareVersions(VERSION, this.policy.minVersion) < 0)
-      this.gate = 'tooOld';
-    else this.gate = '';
-    if (this.gate === 'tooOld')
+      gate = 'tooOld';
+    if (!(this.gate === 'signedOut' && this.session.signedOut)) this.gate = gate;
+    if (gate === 'tooOld')
       this.log(
         tr(
           `yomi ${VERSION} 低于服务端要求的 ${this.policy.minVersion}，relay 暂停`,
@@ -603,8 +743,10 @@ export class Relay {
   private async readPolicy(starting: boolean) {
     this.policyAt = Date.now();
     const kind = this.channel.kind;
+    const refetchMs = this.options.policyRefetchMs ?? POLICY_REFETCH_MS;
+    // A start takes what another relay of this kind read just now; a later read asks again.
     const read = channelPolicy(
-      await relayPolicy(this.gateway, kind),
+      await this.policies.read(kind, starting ? refetchMs : 0),
       kind,
       Boolean(this.options.requireServerPolicy),
     );
@@ -637,24 +779,32 @@ export class Relay {
   }
 
   private async shutdown() {
-    this.connection?.stop();
+    this.leaveFeed?.();
+    this.leaveFeed = null;
+    if (this.ownsServices) this.feed.stop();
     // The image's record stays: the next run follows it again.
     this.job?.stop.abort();
-    if (this.resumeTimer) clearInterval(this.resumeTimer);
-    this.resumeTimer = null;
+    this.leaveSession?.();
+    this.leaveSession = null;
+    if (this.ownsServices) this.session.close();
     const turn = this.turn;
     if (turn) {
       if (turn.watchdog) clearTimeout(turn.watchdog);
-      // Its charge, if any, stays pending in the state and is settled on the next run. A stop
-      // that hangs is given up on: the relay must end.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
+      // A message not sent yet never is.
+      turn.abort.abort();
+      // Its charge, if any, stays pending and is settled on the next run. A stop that hangs is
+      // given up on: the relay must end. So is a wait beside the chat that is slow to end, but
+      // its hold on the spend window is let go only once it ended: it may still be reading the
+      // balance, and another bot's measurement must not start meanwhile.
+      await within(
+        SHUTDOWN_STOP_MS,
         turn.presenter.stop().catch(() => undefined),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, SHUTDOWN_STOP_MS);
-        }),
-      ]);
-      clearTimeout(timer);
+      );
+      const task = turn.task;
+      if (task) {
+        await within(SHUTDOWN_STOP_MS, task);
+        void task.finally(() => this.release(turn));
+      } else this.release(turn);
     }
   }
 
@@ -1108,13 +1258,13 @@ export class Relay {
 
   /** No cap at all: no budget in the chat and no `--max-spend`. Measuring is bookkeeping then. */
   private uncapped(): boolean {
-    return this.state.data.billing.mode === 'open' && this.options.maxSpend === null;
+    return this.state.data.billing.mode === 'open' && this.ledger.maxSpend === null;
   }
 
   /** Free replies only: `/budget off`, or no budget under `--max-spend 0`. */
   private freeOnly(): boolean {
     const mode = this.state.data.billing.mode;
-    return mode === 'free' || (mode === 'open' && this.options.maxSpend === 0);
+    return mode === 'free' || (mode === 'open' && this.ledger.maxSpend === 0);
   }
 
   /**
@@ -1134,13 +1284,12 @@ export class Relay {
 
   /** What is left under `--max-spend`; Infinity without one (never printed). */
   private ceilingLeft(): number {
-    const ceiling = this.options.maxSpend;
-    return ceiling === null ? Infinity : ceiling - this.state.data.allowance.spent;
+    return this.ledger.ceilingLeft();
   }
 
   /** The local ceiling, not the budget, is what limits now: a budget cannot lift it. */
   private ceilingLimits(): boolean {
-    if (this.options.maxSpend === null) return false;
+    if (this.ledger.maxSpend === null) return false;
     const billing = this.state.data.billing;
     return billing.mode !== 'paid' || this.ceilingLeft() < billing.budget - billing.spent;
   }
@@ -1151,7 +1300,7 @@ export class Relay {
 
   /** How to leave free-only (or its pause): under `--max-spend 0` only the computer can. */
   private leaveHint(): string {
-    return this.options.maxSpend === 0
+    return this.ledger.maxSpend === 0
       ? this.texts.restartHint(this.rerunCommand())
       : this.texts.budgetNoneHint;
   }
@@ -1162,15 +1311,11 @@ export class Relay {
    * says so: the budget itself still has room.
    */
   private exhaustedText(): string {
-    const ceiling = this.options.maxSpend;
+    const ceiling = this.ledger.maxSpend;
     if (ceiling === 0)
       return this.texts.budgetTooHigh(0, 0, this.texts.restartHint(this.rerunCommand()));
     if (ceiling !== null && this.ceilingLeft() <= 0)
-      return this.texts.ceilingExhausted(
-        this.state.data.allowance.spent,
-        ceiling,
-        this.rerunCommand(),
-      );
+      return this.texts.ceilingExhausted(this.ledger.spent, ceiling, this.rerunCommand());
     const billing = this.state.data.billing;
     if (billing.mode === 'paid' && billing.spent < billing.budget)
       return this.texts.budgetPausedByCeiling(billing.budget - billing.spent);
@@ -1186,8 +1331,7 @@ export class Relay {
 
   /** A send whose cost nothing could measure: the total shown is a lower bound from now on. */
   private countUnmeasured() {
-    const allowance = this.state.data.allowance;
-    this.state.update({ allowance: { ...allowance, unmeasured: allowance.unmeasured + 1 } });
+    this.ledger.countUnmeasured();
   }
 
   private async priceAndBalance(): Promise<string> {
@@ -1198,16 +1342,16 @@ export class Relay {
   }
 
   private budgetLine(): string {
-    const { billing, allowance } = this.state.data;
+    const billing = this.state.data.billing;
     return this.texts.budgetLine({
       mode: billing.mode,
       freeOnly: this.freeOnly(),
       budget: billing.budget,
       spent: billing.spent,
-      total: allowance.spent,
-      ceiling: this.options.maxSpend,
+      total: this.ledger.spent,
+      ceiling: this.ledger.maxSpend,
       ceilingLeft: this.ceilingLeft(),
-      unmeasured: allowance.unmeasured,
+      unmeasured: this.ledger.unmeasured,
     });
   }
 
@@ -1267,7 +1411,7 @@ export class Relay {
   private tooHigh(): string {
     return this.texts.budgetTooHigh(
       this.ceilingLeft(),
-      this.options.maxSpend ?? 0,
+      this.ledger.maxSpend ?? 0,
       this.texts.restartHint(this.rerunCommand()),
     );
   }
@@ -1278,7 +1422,7 @@ export class Relay {
    * already without one, nothing widens. Under a spent (or 0) local ceiling it changes nothing.
    */
   private async budgetNone() {
-    const ceiling = this.options.maxSpend;
+    const ceiling = this.ledger.maxSpend;
     if (ceiling === 0) return void (await this.say(this.tooHigh()));
     if (ceiling !== null && this.ceilingLeft() <= 0)
       return void (await this.say(this.exhaustedText()));
@@ -1312,7 +1456,7 @@ export class Relay {
         'O dono escolheu não ter orçamento: o Yomi cobra pelas regras normais',
       ),
     );
-    const ceiling = this.options.maxSpend;
+    const ceiling = this.ledger.maxSpend;
     await this.say(this.texts.budgetNone(ceiling === null ? null : this.ceilingLeft()));
   }
 
@@ -1368,7 +1512,7 @@ export class Relay {
     if (button.kind === 'budget') {
       if (choice !== 'y') return void (await this.say(this.texts.budgetCancelled));
       // Spending may have gone on since the prompt: the ceiling is checked again.
-      if (button.amount === null && this.options.maxSpend !== null && this.ceilingLeft() <= 0)
+      if (button.amount === null && this.ledger.maxSpend !== null && this.ceilingLeft() <= 0)
         return void (await this.say(this.exhaustedText()));
       if (button.amount !== null && button.amount > this.ceilingLeft())
         return void (await this.say(this.tooHigh()));
@@ -1470,7 +1614,124 @@ export class Relay {
     if (blocked) return void (await this.say(blocked));
     const character = this.state.data.character;
     if (!character) return void (await this.say(this.texts.noCharacter));
+    // The message is a turn from here: another one is told to wait, and /stop stops it.
+    const turn = this.openTurn(event, character);
+    this.turn = turn;
+    // Under a cap (free-only included) a send is measured by the balance, which every relay of
+    // this ledger spends: one at a time, through the spend window. Without a cap nothing waits.
+    if (this.uncapped()) return this.send(turn, text);
+    const lease = this.ledger.window.tryAcquire(this.botKey);
+    if (lease) {
+      turn.lease = lease;
+      return this.send(turn, text);
+    }
+    // Held by another relay: the turn waits beside the chat, whose next events are still handled.
+    turn.task = this.awaitWindow(turn, text).catch((error) => this.unexpected(error));
+  }
+
+  private openTurn(event: InboundMessage, character: RelayCharacter): Turn {
+    return {
+      character,
+      chatId: event.chatId,
+      context: event.context,
+      streamId: '',
+      assistantMid: '',
+      cid: '',
+      presenter: new LazyPresenter(() =>
+        this.channel.presenter({
+          to: event.chatId,
+          context: event.context,
+          render: { characterName: character.name, group: character.group },
+          log: (line) => this.log(line),
+        }),
+      ),
+      lastSeq: 0,
+      settled: false,
+      mode: 'open',
+      booked: false,
+      ownPending: false,
+      settles: true,
+      unmeasured: false,
+      finished: null,
+      watchdog: null,
+      waiting: true,
+      abort: new AbortController(),
+      lease: null,
+      task: null,
+    };
+  }
+
+  /**
+   * The spend window, then the send: typing shows after a moment; `/stop`, a sign-out or the end
+   * of the run end the wait (already said), and after `SPEND_WAIT_MS` the message is not sent.
+   */
+  private async awaitWindow(turn: Turn, text: string) {
+    const typing = setTimeout(() => turn.presenter.start(), TYPING_DELAY_MS);
+    const lease = await this.ledger.window.acquire(this.botKey, turn.abort.signal);
+    clearTimeout(typing);
+    if (lease === 'aborted') return;
+    if (lease === 'busy') {
+      this.log(
+        tr(
+          '另一个 bot 的花费等了太久还没核对完：这条消息没有发出',
+          "Another bot's cost was still being measured after too long a wait: this message was not sent",
+          'El costo de otro bot seguía midiéndose tras una espera demasiado larga: este mensaje no se envió',
+          'O custo de outro bot ainda estava sendo medido depois de uma espera longa demais: esta mensagem não foi enviada',
+        ),
+      );
+      return this.dropWaiting(turn, this.texts.accountBusy);
+    }
+    turn.lease = lease;
+    await this.send(turn, text);
+  }
+
+  /**
+   * A turn that ends before its message is sent: nothing went, nothing is charged. Its hold on the
+   * window, if any, is let go by its own send once that stops (`send`).
+   */
+  private async dropWaiting(turn: Turn, note: string) {
+    turn.abort.abort();
+    this.endTurn(turn);
+    if (turn.presenter.started) await turn.presenter.stop(note).catch(() => undefined);
+    else if (note) await this.say(note);
+  }
+
+  /**
+   * Why the turn's message is not sent: said as usual, or, when the wait already showed typing,
+   * as the note that ends it (QQ: after what it held).
+   */
+  private async refuse(turn: Turn, text: string) {
+    if (turn.presenter.started && !turn.presenter.isClosed)
+      await turn.presenter.stop(text).catch(() => undefined);
+    else await this.say(text);
+  }
+
+  /** Readies and sends the turn's message; refused (or stopped) before it went, the turn ends. */
+  private async send(turn: Turn, text: string) {
+    try {
+      await this.sendTurn(turn, text);
+    } finally {
+      if (turn.waiting) {
+        this.release(turn);
+        this.endTurn(turn);
+        // Typing the wait showed ends with it, whatever ended the send.
+        if (turn.presenter.started && !turn.presenter.isClosed)
+          await turn.presenter.stop().catch(() => undefined);
+      }
+    }
+  }
+
+  private async sendTurn(turn: Turn, text: string) {
+    if (turn.abort.signal.aborted) return;
+    // The channel paused while the message waited (its login, refused content): it is not sent.
+    const pause = this.channelPaused();
+    if (pause) return this.refuse(turn, this.texts.channelPaused(this.channel.displayName, pause));
+    const { character } = turn;
+    const job = this.job;
     if (job) {
+      // One started while this message waited (a resumed picture) holds it back as before.
+      if (!(job.record.told && this.uncapped()))
+        return this.refuse(turn, this.imageWaitText(job.record));
       // Its follower stops before the reply goes, not beside it: concluding meanwhile, it could
       // read the balance before the reply's charge lands and lose that cost. The reply rides along
       // the image's measurement; a later send (or the next start) settles the picture.
@@ -1480,13 +1741,13 @@ export class Relay {
     // An image whose cost is still open is settled first: it is charged on delivery. Without a cap
     // a reply goes anyway and rides along the image's measurement.
     const open = await this.settleImage(true);
-    if (open) return void (await this.say(open));
+    if (open) return this.refuse(turn, open);
     const riding = this.keptImage() !== null;
     const uncapped = this.uncapped();
     // What earlier sends cost is booked before anything more is spent; without a cap that is
     // bookkeeping, and an unreadable balance blocks nothing (the reading comes later).
     if (!riding && !(await this.settlePending())) {
-      if (!uncapped) return void (await this.say(this.texts.walletUnavailable));
+      if (!uncapped) return this.refuse(turn, this.texts.walletUnavailable);
       this.log(
         tr(
           '读不到余额：之前的花费稍后再核对；没有设花费上限，这条照常发送',
@@ -1497,7 +1758,7 @@ export class Relay {
       );
     }
     const afterSettling = this.pausedText();
-    if (afterSettling) return void (await this.say(afterSettling));
+    if (afterSettling) return this.refuse(turn, afterSettling);
     const billing = this.state.data.billing;
     const freeOnly = this.freeOnly();
     let consumptionMode: number;
@@ -1506,7 +1767,7 @@ export class Relay {
     if (freeOnly) {
       // Without the server's word that FreeOnly is honoured, any message may be charged.
       if (!this.policy.freeOnly)
-        return void (await this.say(this.texts.freeOnlyUnsupported(this.leaveHint())));
+        return this.refuse(turn, this.texts.freeOnlyUnsupported(this.leaveHint()));
       consumptionMode = ConsumptionMode.freeOnly;
     } else if (uncapped) {
       // Yomi charges by its normal rules, whatever the policy offers; too few gems is the
@@ -1516,32 +1777,38 @@ export class Relay {
       const left = this.left();
       if (left <= 0) {
         this.state.update({ billingPause: 'budget' });
-        return void (await this.say(this.exhaustedText()));
+        return this.refuse(turn, this.exhaustedText());
       }
       price = await this.replyPrice(character.npcId);
       // An unknown price is "not free": without the server's cap it could overrun the cap.
       if (price === null && !this.policy.spendCap)
-        return void (await this.say(this.texts.priceUnknown));
-      if (price !== null && price > left) return void (await this.say(this.shortText(price, left)));
+        return this.refuse(turn, this.texts.priceUnknown);
+      if (price !== null && price > left) return this.refuse(turn, this.shortText(price, left));
       consumptionMode = ConsumptionMode.allowPaid;
       if (this.policy.spendCap) maxCost = left;
     }
+    // Stopped meanwhile (it waited beside the chat): nothing more is said for it.
+    if (turn.abort.signal.aborted) return;
     await this.notice(character, false);
     // Riding along an image's measurement, this reply takes no reading of its own.
     const before = riding ? null : await this.balance();
+    // Stopped while the balance was read: the measurement, shared by every relay of this ledger,
+    // is not touched (after a shutdown another bot's may be open by now).
+    if (turn.abort.signal.aborted) return;
     // A paid send under a cap needs something to measure its cost against.
     if (before === null && !riding && !uncapped && !freeOnly)
-      return void (await this.say(this.texts.walletUnavailable));
+      return this.refuse(turn, this.texts.walletUnavailable);
     if (billing.mode === 'paid' && !this.priceShown.has(character.npcId)) {
       await this.say(this.texts.priceLine(price) + this.texts.balanceLine(before));
       this.priceShown.add(character.npcId);
     }
+    if (turn.abort.signal.aborted) return;
     const mode: BillingMode = freeOnly ? 'free' : billing.mode;
-    const pending = this.state.data.pending;
+    const pending = this.ledger.pending;
     let ownPending = false;
     if (riding) {
       // The image's measurement (taken before it) holds this reply's cost too.
-      if (pending) this.state.update({ pending: { ...pending, extra: true, capped: false } });
+      if (pending) this.ledger.setPending({ ...pending, extra: true, capped: false });
       this.log(
         tr(
           '上一张图片的花费还没结算：没有设花费上限，这条照常发送，花费和图片的一起核对',
@@ -1553,7 +1820,7 @@ export class Relay {
     } else if (before === null) {
       if (pending) {
         // Without a cap: the earlier send's reading is still to come and measures this one too.
-        this.state.update({ pending: { ...pending, mode: 'open', price: null, capped: false } });
+        this.ledger.setPending({ ...pending, mode: 'open', price: null, capped: false });
         this.log(
           tr(
             '读不到余额：这条的花费和之前的一起核对',
@@ -1581,34 +1848,20 @@ export class Relay {
     } else {
       // A pending charge is replaced only once settled: this reading settles it first.
       if (pending) await this.settlePending(before);
-      this.state.update({ pending: { before, mode, price, at: Date.now(), capped: !uncapped } });
+      this.ledger.setPending({ before, mode, price, at: Date.now(), capped: !uncapped });
       ownPending = true;
     }
-    const presenter = this.channel.presenter({
-      to: event.chatId,
-      context: event.context,
-      render: { characterName: character.name, group: character.group },
-      log: (line) => this.log(line),
-    });
-    const turn: Turn = {
-      character,
-      chatId: event.chatId,
-      context: event.context,
-      streamId: '',
-      assistantMid: '',
-      cid: '',
-      presenter,
-      lastSeq: 0,
-      settled: false,
-      mode,
-      booked: false,
-      ownPending,
-      settles: !riding,
-      unmeasured: !ownPending && !this.state.data.pending,
-      finished: null,
-      watchdog: null,
-    };
-    this.turn = turn;
+    if (turn.abort.signal.aborted) {
+      // Stopped before it went: its own measurement goes with it.
+      if (ownPending) this.ledger.setPending(null);
+      return;
+    }
+    turn.mode = mode;
+    turn.ownPending = ownPending;
+    turn.settles = !riding;
+    turn.unmeasured = !ownPending && !this.ledger.pending;
+    turn.waiting = false;
+    const presenter = turn.presenter;
     this.early.clear();
     presenter.start();
     let answer: SendAnswer;
@@ -1623,8 +1876,8 @@ export class Relay {
     } catch (error) {
       // Refused for sure: nothing was charged. Unknown: the pending charge is settled later. A
       // measurement this send only joined still holds earlier costs: it stays.
-      if (!unknownOutcome(error) && ownPending) this.state.update({ pending: null });
-      this.turn = null;
+      if (!unknownOutcome(error) && ownPending) this.ledger.setPending(null);
+      this.endTurn(turn);
       this.early.clear();
       await presenter.stop().catch(() => undefined);
       await this.refused(error);
@@ -1646,13 +1899,13 @@ export class Relay {
     if (answer.chargedDiamonds !== null) {
       // The server says what it took: booked now, so a stop or restart cannot lose it. A
       // measurement this send only joined keeps the earlier costs: this charge leaves its drop.
-      const joined = this.state.data.pending;
-      if (ownPending) this.state.update({ pending: null });
+      const joined = this.ledger.pending;
+      if (ownPending) this.ledger.setPending(null);
       else if (joined)
-        this.state.update({
-          pending: { ...joined, before: joined.before - answer.chargedDiamonds },
-        });
+        this.ledger.setPending({ ...joined, before: joined.before - answer.chargedDiamonds });
       turn.booked = true;
+      // Its cost is known: the balance is free for the next measurement.
+      this.release(turn);
       await this.book(answer.chargedDiamonds, turn.mode);
     } else if (turn.unmeasured) this.countUnmeasured();
     for (const notice of answer.notices) await this.say(notice);
@@ -1734,8 +1987,8 @@ export class Relay {
   private onStream(event: StreamEvent) {
     if (event.type === StreamEventType.messagePersisted) return this.onPersisted(event);
     const turn = this.turn;
-    // Nothing in flight, or another character: not ours.
-    if (!turn || event.entityId !== turn.character.npcId) return;
+    // Nothing in flight (or not sent yet), or another character: not ours.
+    if (!turn || turn.waiting || event.entityId !== turn.character.npcId) return;
     if (!turn.streamId) {
       // The send's answer is still on its way: keep the events until it says which stream is ours.
       const list = this.early.get(event.streamId) ?? [];
@@ -1887,14 +2140,38 @@ export class Relay {
     }
   }
 
+  /**
+   * The turn is over for the chat. A message not sent yet keeps its hold on the spend window until
+   * its own send lets go (`send`): it may still be reading the balance.
+   */
   private endTurn(turn: Turn) {
     if (this.turn === turn) this.turn = null;
+    if (!turn.waiting) this.release(turn);
   }
 
-  /** `/stop` or the channel's Stop control: stop showing it; the server finishes (and charges). */
+  private release(turn: Turn) {
+    turn.lease?.release();
+    turn.lease = null;
+  }
+
+  /**
+   * `/stop` or the channel's Stop control: stop showing it; the server finishes (and charges). A
+   * message not sent yet is not sent at all.
+   */
   private async stopTurn() {
     const turn = this.turn;
     if (!turn && this.job) return this.stopImage();
+    if (turn?.waiting) {
+      this.log(
+        tr(
+          '主人取消了还没发出的消息：没有发送，没有扣费',
+          'The owner cancelled a message not sent yet: nothing sent, nothing charged',
+          'El dueño canceló un mensaje que aún no se había enviado: no se envió nada ni se cobró nada',
+          'O dono cancelou uma mensagem ainda não enviada: nada foi enviado nem cobrado',
+        ),
+      );
+      return this.dropWaiting(turn, this.texts.waitStopped);
+    }
     if (!turn || turn.settled || turn.presenter.isClosed)
       return void (await this.say(this.texts.nothingToStop));
     this.log(
@@ -1916,11 +2193,14 @@ export class Relay {
    * unmeasured. False when the balance cannot be read: it stays pending.
    */
   private async settlePending(reading?: number): Promise<boolean> {
-    const pending = this.state.data.pending;
+    const pending = this.ledger.pending;
     if (!pending) return true;
     const now = reading ?? (await this.balance());
     if (now === null) return false;
-    this.state.update({ pending: null });
+    // Settled or replaced while the balance was read (another send of this ledger): not this
+    // reading's to settle.
+    if (this.ledger.pending?.at !== pending.at) return true;
+    this.ledger.setPending(null);
     const drop = pending.before - now;
     if (drop >= 0) await this.book(drop, pending.mode);
     else if (pending.mode !== 'free' && !this.uncapped() && pending.capped !== false) {
@@ -1956,9 +2236,7 @@ export class Relay {
    */
   private async book(amount: number, mode: BillingMode) {
     if (amount <= 0) return;
-    const allowance = this.state.data.allowance;
-    const total = allowance.spent + amount;
-    this.state.update({ allowance: { ...allowance, spent: total } });
+    const total = this.ledger.book(this.botKey, amount);
     if (mode === 'free' && (this.freeOnly() || this.state.data.billing.mode === 'paid')) {
       this.log(
         tr(
@@ -1973,7 +2251,7 @@ export class Relay {
       return;
     }
     const billing = this.state.data.billing;
-    const ceiling = this.options.maxSpend;
+    const ceiling = this.ledger.maxSpend;
     const ceilingLeft = Math.max(0, this.ceilingLeft());
     if (billing.mode === 'paid') {
       const spent = billing.spent + amount;
@@ -2273,7 +2551,7 @@ export class Relay {
     // A resend keeps the first send's pending charge (measured from before that send). A new
     // measurement starts only when none is open: one that is (only without a cap) began before
     // this image and would take its charge too, so the image is then booked by its task alone.
-    const pending = this.state.data.pending;
+    const pending = this.ledger.pending;
     const kept = replay && record.measured !== false ? pending : null;
     const fresh = !kept && !pending && before !== null && !(replay && record.measured === false);
     record.measured = Boolean(kept) || fresh;
@@ -2281,16 +2559,14 @@ export class Relay {
     // An image shown as free that is charged anyway pauses the relay under free-only and under a
     // budget (`book`).
     if (kept && record.price > 0 && kept.mode === 'free')
-      this.state.update({ pending: { ...kept, mode: record.mode, price: record.price } });
+      this.ledger.setPending({ ...kept, mode: record.mode, price: record.price });
     else if (fresh && before !== null)
-      this.state.update({
-        pending: {
-          before,
-          mode: record.price > 0 ? record.mode : 'free',
-          price: record.price,
-          at: Date.now(),
-          capped: !this.uncapped(),
-        },
+      this.ledger.setPending({
+        before,
+        mode: record.price > 0 ? record.mode : 'free',
+        price: record.price,
+        at: Date.now(),
+        capped: !this.uncapped(),
       });
     let answer;
     try {
@@ -2320,7 +2596,7 @@ export class Relay {
       if (refusal || signedOut) {
         this.keepImage(null);
         // Only its own measurement goes: one it did not start still holds earlier costs.
-        if (record.measured) this.state.update({ pending: null });
+        if (record.measured) this.ledger.setPending(null);
         if (refusal) return this.imageRefused(refusal);
         return this.signedOut();
       }
@@ -2567,7 +2843,7 @@ export class Relay {
    * the rest of the drop.
    */
   private async settleImageCharge(record: ImageRecord, task: ChatImageTask) {
-    const pending = this.state.data.pending;
+    const pending = this.ledger.pending;
     const mode: BillingMode = record.price > 0 ? record.mode : 'free';
     const billing = task.billing;
     const known =
@@ -2596,7 +2872,7 @@ export class Relay {
         }
         return;
       }
-      if (pending) this.state.update({ pending: { ...pending, before: pending.before - known } });
+      if (pending) this.ledger.setPending({ ...pending, before: pending.before - known });
       await this.book(known, mode);
       return;
     }
@@ -2615,14 +2891,12 @@ export class Relay {
     }
     if (pending.extra) {
       // Replies rode along: the image is booked by its task, the rest of the drop is theirs.
-      this.state.update({
-        pending: {
-          before: pending.before - known,
-          mode: 'open',
-          price: null,
-          at: pending.at,
-          capped: false,
-        },
+      this.ledger.setPending({
+        before: pending.before - known,
+        mode: 'open',
+        price: null,
+        at: pending.at,
+        capped: false,
       });
       await this.book(known, mode);
       if (!(await this.settlePending()))
@@ -2637,7 +2911,7 @@ export class Relay {
       return;
     }
     const now = await this.balance();
-    this.state.update({ pending: null });
+    this.ledger.setPending(null);
     if (now !== null && pending.before - now !== known)
       this.log(
         tr(
@@ -2803,83 +3077,23 @@ export class Relay {
   // -------------------------------------------------------------------------------------------
   // The long connection and the session
 
+  /** Events from the long connection from now on; this relay's own feed connects too. */
   private connect() {
-    const credential = this.gateway.credential;
-    if (!credential) return;
-    this.connection?.stop();
-    const connection = new ImConnection({
-      url: () => {
-        if (this.gateway.reloadCredential() === 'otherAccount') this.otherAccount();
-        return this.gateway.connectionURL();
-      },
-      headers: () => this.gateway.connectionHeaders(),
-      userId: credential.userId,
-      deviceId: credential.deviceId,
-      businessTypes: [BusinessType.conversationStream, BusinessType.conversationAside],
-      purpose: ConversationPurpose.normal,
-      maxBackoffMs: 30_000,
-      watchWake: true,
-      createSocket: this.options.createSocket,
-      onConnected: () => {
-        this.drain(connection).catch((error) => this.unexpected(error));
-      },
-      onState: (state) => {
-        if (state === 'retrying' && connection.reconnects % 10 === 1)
-          this.log(
-            tr(
-              'Yomi 长连接断开，正在重连',
-              'Yomi connection dropped, reconnecting',
-              'Se cortó la conexión con Yomi, reconectando',
-              'A conexão com o Yomi caiu, reconectando',
-            ),
-          );
-      },
-    });
-    connection.on((event) => {
-      if (event.kind === 'stream') this.onStream(event.event);
-      else if (event.kind === 'aside') this.onAside(event.event);
-    });
-    this.connection = connection;
-    connection.start();
+    this.leaveFeed ??= this.feed.subscribe(this.feedSubscriber);
+    if (this.ownsServices) this.feed.start();
   }
 
-  /** What arrived while no socket was open (`poll_message`), then a missed reply from history. */
-  private async drain(connection: ImConnection) {
-    for (let page = 0; page < 10; page++) {
-      let result;
-      try {
-        result = await pollMessages(this.gateway, 50);
-      } catch (error) {
-        if (error instanceof NotSignedIn) await this.signedOut();
-        break;
-      }
-      result.packets
-        .filter(
-          (packet) =>
-            packet.command === Command.business || packet.command === Command.businessStreaming,
-        )
-        .sort((a, b) => a.sid - b.sid)
-        .forEach((packet) => connection.ingest(packet));
-      if (!result.hasMore) break;
-    }
-    const turn = this.turn;
-    if (turn && !turn.settled && connection.reconnects > 0) await this.catchUp(turn, false);
+  /** Signed out, as a request found: the sign-in pauses every relay of it (`pauseSignedOut`). */
+  private signedOut() {
+    return this.session.report();
   }
 
-  private async signedOut() {
-    if (this.gate === 'signedOut') return;
-    this.log(
-      tr(
-        'Yomi 登录已失效，relay 暂停；在这台电脑上运行 yomi login 后自动恢复',
-        'Yomi sign-in expired, relay paused; it resumes on its own after you run yomi login on this machine',
-        'La sesión de Yomi expiró, relay en pausa; se reanuda solo cuando ejecutes yomi login en este equipo',
-        'O login do Yomi expirou, relay pausado; ele volta sozinho depois que você executar yomi login nesta máquina',
-      ),
-    );
+  /** The sign-in expired: the open reply stops (a message not sent yet is not), the owner is told. */
+  private async pauseSignedOut() {
     this.gate = 'signedOut';
-    this.connection?.stop();
     const turn = this.turn;
-    if (turn && !turn.settled) {
+    if (turn?.waiting) await this.dropWaiting(turn, '');
+    else if (turn && !turn.settled) {
       // Its charge, if any, stays pending and is settled before the next send.
       turn.settled = true;
       if (turn.watchdog) clearTimeout(turn.watchdog);
@@ -2887,33 +3101,15 @@ export class Relay {
       this.endTurn(turn);
     }
     await this.say(this.texts.signedOut);
-    if (this.resumeTimer) clearInterval(this.resumeTimer);
-    this.resumeTimer = setInterval(
-      () => this.tryResume().catch((error) => this.unexpected(error)),
-      this.options.resumeCheckMs ?? 15_000,
-    );
-    this.resumeTimer.unref?.();
   }
 
-  private async tryResume() {
-    this.gateway.reloadCredential();
-    const credential = this.gateway.credential;
-    if (!credential) return;
-    if (credential.userId !== this.userId) return this.otherAccount();
-    if (this.resumeTimer) clearInterval(this.resumeTimer);
-    this.resumeTimer = null;
-    // Only the sign-in came back: a channel the server has not confirmed stays off.
-    if (this.gate === 'signedOut') this.gate = this.policyGated ? 'disabled' : '';
-    this.log(
-      tr(
-        'Yomi 登录已恢复',
-        'Yomi sign-in restored',
-        'Sesión de Yomi restablecida',
-        'Login do Yomi restabelecido',
-      ),
-    );
-    this.connect();
-    await this.say(this.texts.resumed);
+  private async resume() {
+    // Only the sign-in came back: a channel the server has not confirmed stays off. An owner never
+    // told of the sign-out (this relay started meanwhile) is not told it is back either.
+    if (this.gate === 'signedOut') {
+      this.gate = this.policyGated ? 'disabled' : '';
+      await this.say(this.texts.resumed);
+    }
     const kept = this.keptImage();
     if (kept?.taskId && !this.job) this.startImageJob(kept);
   }

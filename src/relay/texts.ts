@@ -69,6 +69,10 @@ const zh = {
   emptyReply: '（这条回复没有可显示的内容）',
   stopped: '已停止转发这条回复。服务端没有中止生成的接口，本轮仍会照常扣费。',
   nothingToStop: '现在没有正在转发的回复。',
+  /** `/stop` while the message waited for another bot's measurement (`accountBusy`). */
+  waitStopped: '已取消：这条消息没有发出，没有扣费。',
+  /** Another bot of this account held the spend window too long. */
+  accountBusy: '你的另一个 bot 正在回复，这条消息没有发出，没有扣费。请稍后再发。',
   stale: '这条消息是 relay 离线时发的，没有转发。需要的话请重新发送。',
   textOnly: '目前只支持文字消息。',
   unknownCommand: '不认识这个命令，/help 查看可用命令。',
@@ -287,6 +291,9 @@ const en: RelayTexts = {
   stopped:
     'Stopped relaying this reply. The server cannot stop generating, so this turn is still charged.',
   nothingToStop: 'No reply is being relayed right now.',
+  waitStopped: 'Cancelled: this message was not sent, and nothing was charged.',
+  accountBusy:
+    'Another of your bots is replying right now, so this message was not sent and nothing was charged. Send it again shortly.',
   stale:
     'This message was sent while the relay was offline, so it was not relayed. Send it again if you like.',
   textOnly: 'Only text messages are supported for now.',
@@ -511,6 +518,9 @@ const es: RelayTexts = {
   stopped:
     'Se dejó de transmitir esta respuesta. El servidor no puede detener la generación, así que este turno se cobra igual.',
   nothingToStop: 'No se está transmitiendo ninguna respuesta en este momento.',
+  waitStopped: 'Cancelado: este mensaje no se envió y no se cobró nada.',
+  accountBusy:
+    'Otro de tus bots está respondiendo ahora, así que este mensaje no se envió y no se cobró nada. Vuelve a enviarlo en un momento.',
   stale:
     'Este mensaje se envió mientras el relay estaba desconectado, así que no se transmitió. Envíalo de nuevo si quieres.',
   textOnly: 'Por ahora solo se admiten mensajes de texto.',
@@ -738,6 +748,9 @@ const pt: RelayTexts = {
   stopped:
     'Paramos de encaminhar esta resposta. O servidor não consegue parar a geração, então este turno ainda é cobrado.',
   nothingToStop: 'Nenhuma resposta está sendo encaminhada agora.',
+  waitStopped: 'Cancelado: esta mensagem não foi enviada e nada foi cobrado.',
+  accountBusy:
+    'Outro dos seus bots está respondendo agora, então esta mensagem não foi enviada e nada foi cobrado. Envie de novo daqui a pouco.',
   stale:
     'Esta mensagem foi enviada enquanto o relay estava offline, então não foi encaminhada. Envie novamente se quiser.',
   textOnly: 'Por enquanto, só mensagens de texto são aceitas.',

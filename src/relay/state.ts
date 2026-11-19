@@ -148,6 +148,21 @@ function migratedBilling(billing: Billing): Billing {
   return billing.mode === 'free' && !billing.setAt ? { ...billing, mode: 'open' } : billing;
 }
 
+/**
+ * The local ceiling for a run (null: none) over `allowance`: its running total starts over only
+ * when this computer says so, a different `--max-spend` (set, changed or taken away) or
+ * `--reset-spend`. Null when it stays as it is.
+ */
+export function allowanceFor(
+  allowance: Allowance,
+  maxSpend: number | null,
+  reset: boolean,
+): Allowance | null {
+  if (reset || allowance.maxSpend !== maxSpend || allowance.since === 0)
+    return { maxSpend, spent: 0, since: Date.now(), unmeasured: 0 };
+  return null;
+}
+
 export const freshBilling = (): Billing => ({ mode: 'open', budget: 0, spent: 0, setAt: 0 });
 
 function empty(botId: string, account: string, kind: ChannelKind = 'telegram'): RelayStateFile {
@@ -329,14 +344,10 @@ export class RelayState {
     this.update({ welcomed, welcomeDue: '' });
   }
 
-  /**
-   * The local ceiling for this run (null: none). Its running total starts over only when this
-   * computer says so: a different `--max-spend` (set, changed or taken away), or `--reset-spend`.
-   */
+  /** The local ceiling for this run (null: none), by `allowanceFor`'s rule. */
   useAllowance(maxSpend: number | null, reset: boolean) {
-    const allowance = this.data.allowance;
-    if (reset || allowance.maxSpend !== maxSpend || allowance.since === 0)
-      this.update({ allowance: { maxSpend, spent: 0, since: Date.now(), unmeasured: 0 } });
+    const allowance = allowanceFor(this.data.allowance, maxSpend, reset);
+    if (allowance) this.update({ allowance });
   }
 
   /** `messageId` as the channel persists it (`RelayChannel.persistId`: Telegram a number). */

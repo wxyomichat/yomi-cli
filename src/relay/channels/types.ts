@@ -169,6 +169,11 @@ export interface ReplyPresenter {
   readonly isClosed: boolean;
   /** Shows that a reply is coming (draft "Thinking…", typing, or nothing). */
   start(): void;
+  /**
+   * The message is sent now, though `start` came earlier (it waited its turn, typing shown): what
+   * was said since still leads the reply, as if `start` came now (QQ takes it as the prefix).
+   */
+  sending?(): void;
   /** The reviewed paragraphs so far (cumulative). Never raw text or thinking content. */
   update(paragraphs: readonly ImParagraph[]): void;
   /**
