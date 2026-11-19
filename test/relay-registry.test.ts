@@ -12,6 +12,7 @@ import { WechatChannel } from '../src/relay/channels/wechat.js';
 import {
   BotRegistry,
   characterOwner,
+  DuplicateCharacter,
   MAX_BOTS_PER_KIND,
   migrateRegistry,
   registryPath,
@@ -29,8 +30,9 @@ import { TelegramBot } from '../src/relay/telegram.js';
  * The bot registry (relay/registry.ts): the takeover of the bots each channel's credentials
  * stored before it (scope, secret name and lock kept, nothing else written, nothing resent), the
  * rule for two of them on one character, credentials set later (the same bot kept, another one
- * replacing it), the checks every change goes through, and what each channel reads offline from a
- * stored secret.
+ * replacing it), the checks every change goes through, what each channel reads offline from a
+ * stored secret, and one character per bot (binding another one, whom a character was shown to,
+ * the welcome it owes).
  */
 
 const ACCOUNT = 'test@http://127.0.0.1:1';
@@ -45,6 +47,7 @@ const WECHAT_SECRET = JSON.stringify({
   savedAt: 1,
 });
 const LIN = { npcId: '7300000000000009001', name: 'Lin', group: false };
+const HARBOR = { npcId: '7300000000000009002', name: 'Harbor', group: true };
 
 /** A credential store with what each channel kept before the registry. */
 function secrets(values: Partial<Record<ChannelKind, string>>) {
@@ -472,5 +475,128 @@ describe('the welcome baseline', () => {
     again.bindOwner(owner('openid-2'));
     again.welcomedBefore({ owner: ownerKey('openid-2'), npcId: LIN.npcId });
     expect(again.welcomeOwed).toBe(true);
+  });
+});
+
+describe('one character per bot', () => {
+  const qqBot = (appId: string) => ({
+    platformId: appId,
+    scope: `qq:${appId}`,
+    lockName: `qq-${appId}`,
+  });
+
+  it('binds a bot to another character, never to one another bot has', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    const a = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1020304') });
+    const b = registry.adopt({ kind: 'qq', secretName: 'qq-bot:b', stored: qqBot('1020305') });
+    const bound = registry.rebind(a.record.key, LIN, 7);
+    expect(bound).toMatchObject({ character: LIN, boundAt: 7, generation: 1 });
+    expect(registry.rebind(a.record.key, HARBOR, 9)).toMatchObject({
+      character: HARBOR,
+      boundAt: 9,
+      generation: 2,
+    });
+    // Another bot's character: refused by name, nothing written.
+    const revision = registry.data.revision;
+    let error: unknown;
+    try {
+      registry.rebind(b.record.key, HARBOR);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(DuplicateCharacter);
+    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: a.record.name });
+    expect((error as Error).message).toContain(`yomi relay --bot ${a.record.name} --character ID`);
+    expect(BotRegistry.open(ACCOUNT, dir).data.revision).toBe(revision);
+    expect(BotRegistry.open(ACCOUNT, dir).find(b.record.name)!.character).toBeNull();
+    // A bot removed meanwhile (another command): refused, not recreated.
+    registry.commit((file) => {
+      file.bots = file.bots.filter((record) => record.key !== b.record.key);
+    });
+    expect(() => registry.rebind(b.record.key, LIN)).toThrow(UsageError);
+    expect(registry.list()).toHaveLength(1);
+  });
+
+  it('names the bot that has the character, also when it comes later in the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    const a = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1020304') });
+    const b = registry.adopt({ kind: 'qq', secretName: 'qq-bot:b', stored: qqBot('1020305') });
+    registry.rebind(b.record.key, HARBOR);
+    let error: unknown;
+    try {
+      registry.rebind(a.record.key, HARBOR);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(DuplicateCharacter);
+    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: b.record.name });
+    expect((error as Error).message).toContain(`yomi relay --bot ${b.record.name} --character ID`);
+    expect(registry.find(a.record.name)!.character).toBeNull();
+  });
+
+  it('renames a character without binding it again, and remembers whom a character was shown to', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    const { record } = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1') });
+    registry.rebind(record.key, LIN, 7);
+    registry.bindCharacter(record.key, { ...LIN, name: 'Lin Xia' }, '', 99);
+    expect(registry.find(record.name)).toMatchObject({
+      character: { ...LIN, name: 'Lin Xia' },
+      boundAt: 7,
+      generation: 1,
+    });
+    expect(registry.shownTo(LIN.npcId)).toBeUndefined();
+    registry.showedCharacter(LIN.npcId, characterOwner('qq', 'openid-1'));
+    const revision = registry.data.revision;
+    registry.showedCharacter(LIN.npcId, characterOwner('qq', 'openid-1'));
+    expect(registry.data.revision).toBe(revision);
+    // Read from the file as it is now: another process may have written it.
+    BotRegistry.open(ACCOUNT, dir).showedCharacter(LIN.npcId, characterOwner('qq', 'openid-2'));
+    expect(registry.shownTo(LIN.npcId)).toBe(characterOwner('qq', 'openid-2'));
+    // Unreadable: someone, so a welcome shows nobody's conversation.
+    writeFileSync(registry.path, '{"version":2}');
+    expect(registry.shownTo(LIN.npcId)).toBe('?');
+  });
+
+  it('owes the owner the welcome with each other character the bot is bound to', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const state = new RelayState(relayStatePath(ACCOUNT, 'qq:1', dir), 'qq:1', ACCOUNT, 'qq');
+    // Nobody to welcome yet.
+    state.characterBound(LIN.npcId);
+    expect(state.data.welcomeDue).toBe('');
+    // Paired on a bot bound to Lin: owed, then given.
+    state.bindOwner(owner('openid-1'), LIN.npcId);
+    expect(state.welcomeOwed).toBe(true);
+    state.markWelcomed(LIN.npcId);
+    // Pairing again, bound to the same character: none.
+    state.bindOwner(owner('openid-1'), LIN.npcId);
+    expect(state.welcomeOwed).toBe(false);
+    // Bound to another character: owed again, with it.
+    state.characterBound(HARBOR.npcId);
+    expect(state.welcomeOwed).toBe(true);
+    state.markWelcomed(HARBOR.npcId);
+    // Bound back: the last welcome was Harbor's, so Lin's is owed again.
+    state.characterBound(LIN.npcId);
+    expect(state.welcomeOwed).toBe(true);
+    state.markWelcomed(LIN.npcId);
+    state.characterBound(LIN.npcId);
+    expect(state.welcomeOwed).toBe(false);
+    // A bot of its own choosing (no character given) keeps the rule of one welcome per owner.
+    state.bindOwner(owner('openid-1'));
+    expect(state.welcomeOwed).toBe(false);
+  });
+
+  it('drops a welcome owed for another character when the bot is bound back to the last one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const state = new RelayState(relayStatePath(ACCOUNT, 'qq:1', dir), 'qq:1', ACCOUNT, 'qq');
+    state.bindOwner(owner('openid-1'), LIN.npcId);
+    state.markWelcomed(LIN.npcId);
+    // Started bound to Harbor: owed, but the owner sent nothing before it was bound back.
+    state.characterBound(HARBOR.npcId);
+    expect(state.welcomeOwed).toBe(true);
+    state.characterBound(LIN.npcId);
+    expect(state.welcomeOwed).toBe(false);
   });
 });

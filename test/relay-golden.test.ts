@@ -11,6 +11,7 @@ import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.
 import {
   type MockBotCall,
   type MockTelegram,
+  type MockTelegramBot,
   type MockTelegramUser,
   startMockTelegram,
 } from '../src/mock/telegram.js';
@@ -22,11 +23,14 @@ import { memoryIo } from './helpers/io.js';
 
 /**
  * The golden transcript of `yomi relay --telegram`: one scripted session against the mock gateway
- * and the mock Bot API (pairing and its welcome, a chat with a single character, a group character, /price,
- * /budget with a press, /report with a press, /image, /stop, a stale message, a non-text message,
- * an unknown command, the bot added to a group, a second poller's 409), and a snapshot of what the
- * relay said, call for call. Taken before the channel refactor, it must not change through it; the
- * welcome at pairing (the character's cover, introduction and opening) came later.
+ * and the mock Bot API (pairing and its welcome, a chat with a single character, /character in a
+ * bot bound to it, a group character on a second bot, /price, /budget with a press, /report with a
+ * press, /image, /stop, a stale message, a non-text message, an unknown command, the bot added to a
+ * group, a second poller's 409), and a snapshot of what the relay said, call for call. Taken before
+ * the channel refactor, it must not change through it; the welcome at pairing (the character's
+ * cover, introduction and opening) came later, and so did one character per bot: the menu and the
+ * pairing leave /character out, /character says how to change it on the computer, and the group
+ * character is the second bot's (its calls under `bot@bot2`, its chat under `owner@bot2`).
  *
  * Only what is deterministic is in the snapshot: per chat, in order, `sendMessage`, `sendPhoto`,
  * `answerCallbackQuery` and `editMessageReplyMarkup`, plus `getWebhookInfo` and `setMyCommands`,
@@ -42,6 +46,8 @@ import { memoryIo } from './helpers/io.js';
 
 let mock: MockServer;
 let tg: MockTelegram;
+/** The second bot, bound to the group character. */
+let tg2: MockTelegramBot;
 let dir: string;
 const saved: Record<string, string | undefined> = {};
 const owner: MockTelegramUser = { id: 5570001, first_name: 'Lin', language_code: 'zh-hans' };
@@ -97,10 +103,10 @@ const images = (): MockChatImage => chatImageStore(mock.gen);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Waits for one more bot message matching `pattern` in `chatId` than now; call before acting. */
-function expectNew(chatId: number, pattern: RegExp) {
-  const matching = () => tg.messages(chatId).filter((message) => pattern.test(message.text));
+function expectNew(chatId: number, pattern: RegExp, bot: MockTelegramBot = tg) {
+  const matching = () => bot.messages(chatId).filter((message) => pattern.test(message.text));
   const before = matching().length;
-  return () => tg.waitFor(() => matching().length > before && matching().at(-1), 8000);
+  return () => bot.waitFor(() => matching().length > before && matching().at(-1), 8000);
 }
 
 /**
@@ -108,7 +114,12 @@ function expectNew(chatId: number, pattern: RegExp) {
  * (or photos) in its chat, so a button removal names the prompt it belongs to; callback ids and
  * button nonces are numbered in order of appearance.
  */
-function transcript(calls: MockBotCall[], presses: Map<string, number>) {
+function transcript(
+  calls: MockBotCall[],
+  presses: Map<string, number>,
+  bot: MockTelegramBot = tg,
+  suffix = '',
+) {
   const numbered = new Map<string, string>();
   const counts = new Map<string, number>();
   const number = (kind: string, value: string) => {
@@ -123,9 +134,9 @@ function transcript(calls: MockBotCall[], presses: Map<string, number>) {
     return label;
   };
   const messageLabel = (chatId: number, id: unknown) => {
-    const message = tg.messages(chatId).findIndex((item) => item.message_id === Number(id));
+    const message = bot.messages(chatId).findIndex((item) => item.message_id === Number(id));
     if (message >= 0) return `<message ${message + 1}>`;
-    const photo = tg.photos(chatId).findIndex((item) => item.message_id === Number(id));
+    const photo = bot.photos(chatId).findIndex((item) => item.message_id === Number(id));
     return photo >= 0 ? `<photo ${photo + 1}>` : '<message id>';
   };
   const scrub = (value: unknown, chatId: number, key = ''): unknown => {
@@ -160,7 +171,7 @@ function transcript(calls: MockBotCall[], presses: Map<string, number>) {
     if (call.method !== 'sendPhoto' || !call.ok) return {};
     const index = uploads.get(chatId) ?? 0;
     uploads.set(chatId, index + 1);
-    const photo = tg.photos(chatId)[index];
+    const photo = bot.photos(chatId)[index];
     return { photo: photo ? { type: photo.mime, width: photo.width, height: photo.height } : null };
   };
   const entry = (call: MockBotCall, chatId: number) => ({
@@ -169,24 +180,25 @@ function transcript(calls: MockBotCall[], presses: Map<string, number>) {
     ...upload(call, chatId),
     ...(call.ok ? {} : { error: call.error }),
   });
-  const bot: unknown[] = [];
+  const botCalls: unknown[] = [];
   const chats = new Map<string, unknown[]>();
   for (const call of calls) {
-    if (BOT_METHODS.has(call.method)) bot.push(entry(call, 0));
+    if (BOT_METHODS.has(call.method)) botCalls.push(entry(call, 0));
     if (!CHAT_METHODS.has(call.method)) continue;
     const chatId =
       call.method === 'answerCallbackQuery'
         ? (presses.get(String(call.params.callback_query_id)) ?? 0)
         : Number(call.params.chat_id);
-    const name = CHATS.get(chatId) ?? String(chatId);
+    const name = (CHATS.get(chatId) ?? String(chatId)) + suffix;
     chats.set(name, [...(chats.get(name) ?? []), entry(call, chatId)]);
   }
-  return { bot, chats: Object.fromEntries(chats) };
+  return { bot: botCalls, chats: Object.fromEntries(chats) };
 }
 
 beforeAll(async () => {
   mock = await startMockServer();
   tg = await startMockTelegram({ username: 'lin_golden_bot' });
+  tg2 = tg.addBot({ username: 'fog_golden_bot', botId: 8_123_456_790 });
   dir = mkdtempSync(join(tmpdir(), 'yomi-relay-golden-'));
   setEnv({
     YOMI_API_ORIGIN: mock.origin,
@@ -218,18 +230,21 @@ describe('the relay, golden transcript', () => {
   let relay: Relay;
   let controller: AbortController;
   let done: Promise<void> = Promise.resolve();
+  let second: { controller: AbortController; done: Promise<void> } | null = null;
 
-  const busy = () => {
-    const inside = relay as unknown as { job: unknown; turn: unknown };
+  const busy = (which = relay) => {
+    const inside = which as unknown as { job: unknown; turn: unknown };
     return Boolean(inside.job || inside.turn);
   };
-  const kept = () => (relay as unknown as { keptImage(): unknown }).keptImage();
+  const kept = (which = relay) => (which as unknown as { keptImage(): unknown }).keptImage();
   /** Nothing in flight: the reply (or picture) is shown and booked. */
-  const idle = () => tg.waitFor(() => !busy() && kept() === null, 8000);
+  const idle = (which = relay) => tg.waitFor(() => !busy(which) && kept(which) === null, 8000);
 
   afterAll(async () => {
     controller?.abort();
+    second?.controller.abort();
     await done.catch(() => undefined);
+    await second?.done.catch(() => undefined);
   });
 
   it('says the same things, in the same order, call for call', async () => {
@@ -238,25 +253,38 @@ describe('the relay, golden transcript', () => {
       {},
       { client: 'relay-telegram', channel: 'cli_relay' },
     );
-    const bot = new TelegramBot(tg.token, { apiOrigin: tg.origin });
-    const state = new RelayState(relayStatePath(context.account, bot.id), bot.id);
-    const pairing = new PairingCode();
     const logs: string[] = [];
-    relay = new Relay(context.gateway, bot, state, {
-      maxSpend: 50,
-      characterId: MOCK_NPCS.single,
-      pairing,
-      replyTimeoutMs: 1500,
-      intervalMs: 30,
-      staleMs: 10 * 60 * 1000,
-      pollTimeoutSeconds: 1,
-      drafts: true,
-      language: 'zh-Hans',
-      log: (line) => logs.push(line),
-      resumeCheckMs: 100,
-      imagePollMs: 100,
-      imageTimeoutMs: 4000,
-    });
+    /** A relay of the registry's kind: one bot, bound to one character. */
+    const relayOf = (
+      mockBot: MockTelegramBot,
+      character: { npcId: string; name: string; group: boolean },
+      pairing: PairingCode,
+    ) => {
+      const bot = new TelegramBot(mockBot.token, { apiOrigin: mockBot.origin });
+      const state = new RelayState(relayStatePath(context.account, bot.id), bot.id);
+      const engine = new Relay(context.gateway, bot, state, {
+        maxSpend: 50,
+        characterId: '',
+        boundCharacter: character,
+        botName: mockBot.username,
+        pairing,
+        replyTimeoutMs: 1500,
+        intervalMs: 30,
+        staleMs: 10 * 60 * 1000,
+        pollTimeoutSeconds: 1,
+        drafts: true,
+        language: 'zh-Hans',
+        log: (line) => logs.push(line),
+        resumeCheckMs: 100,
+        imagePollMs: 100,
+        imageTimeoutMs: 4000,
+      });
+      return { engine, state };
+    };
+    const pairing = new PairingCode();
+    const first = relayOf(tg, { npcId: MOCK_NPCS.single, name: '林夏', group: false }, pairing);
+    relay = first.engine;
+    const state = first.state;
     controller = new AbortController();
     const sockets = mock.state.sockets;
     done = relay.run(controller.signal);
@@ -281,6 +309,8 @@ describe('the relay, golden transcript', () => {
     tg.userSends(owner, `/start ${pairing.code}`);
     await next();
     expect(state.data.owner?.userId).toBe(owner.id);
+    // Saved once its last message is out.
+    await tg.waitFor(() => state.data.greeted.length > 0);
     expect(state.data.greeted).toEqual([MOCK_NPCS.single]);
     expect(tg.photos(owner.id)).toHaveLength(1);
 
@@ -293,14 +323,35 @@ describe('the relay, golden transcript', () => {
     await next();
     await idle();
 
-    // A group character: switched (notice and opening), then a reply naming its speakers.
-    next = expectNew(owner.id, /新来的？/);
+    // The bot talks as 林夏 only: /character says how to change that on the computer.
+    next = expectNew(owner.id, /固定和「林夏」聊天/);
     tg.userSends(owner, `/character ${MOCK_NPCS.group}`);
     await next();
-    next = expectNew(owner.id, /<b>小白<\/b>/);
-    tg.userSends(owner, '大家好');
-    const groupReply = await next();
-    await idle();
+
+    // A group character is a second bot's: paired and welcomed (notice, cover, introduction,
+    // opening), then a reply naming its speakers.
+    const secondPairing = new PairingCode();
+    const fog = relayOf(tg2, { npcId: MOCK_NPCS.group, name: '雾港', group: true }, secondPairing);
+    const polls = tg2.calls.filter((call) => call.method === 'getUpdates').length;
+    second = { controller: new AbortController(), done: Promise.resolve() };
+    second.done = fog.engine.run(second.controller.signal);
+    await tg2.waitFor(
+      () => tg2.calls.filter((call) => call.method === 'getUpdates').length > polls,
+    );
+    next = expectNew(owner.id, /新来的？/, tg2);
+    tg2.userSends(owner, `/start ${secondPairing.code}`);
+    await next();
+    next = expectNew(owner.id, /<b>小白<\/b>/, tg2);
+    tg2.userSends(owner, '大家好');
+    await next();
+    await idle(fog.engine);
+    second.controller.abort();
+    await second.done;
+    // The last reply in the first bot is 林夏's: /report and /image below name it.
+    const lastReply = tg
+      .messages(owner.id)
+      .filter((message) => /今天天气怎么样？/.test(message.text))
+      .at(-1)!;
 
     // /price, then /budget confirmed with its button.
     next = expectNew(owner.id, /本机上限 50 钻石/);
@@ -323,11 +374,11 @@ describe('the relay, golden transcript', () => {
     next = expectNew(owner.id, /已提交，谢谢反馈/);
     press(pick.message_id, reasons.inline_keyboard[0][0].callback_data);
     await next();
-    // The report names the group's reply the owner saw last, with the reason pressed.
-    const reportedMid = state.replyMid(groupReply.message_id);
+    // The report names the reply the owner saw last in this bot, with the reason pressed.
+    const reportedMid = state.replyMid(lastReply.message_id);
     expect(reportedMid).not.toBe('');
     const feedback = mock.state.feedback.at(-1);
-    expect(String(feedback?.entity_id)).toBe(MOCK_NPCS.group);
+    expect(String(feedback?.entity_id)).toBe(MOCK_NPCS.single);
     expect(String(feedback?.mid)).toBe(reportedMid);
     expect(feedback?.tag_keys).toEqual(['sexual_minor']);
 
@@ -408,29 +459,45 @@ describe('the relay, golden transcript', () => {
     ]);
     expect(calls('leaveChat').map((call) => call.params)).toEqual([{ chat_id: GROUP_CHAT }]);
 
-    // Drafts: how many depends on timing. Each of the three streamed replies (林夏's, the
-    // group's, the slow one) opens with an empty "Thinking…" draft; each draft is in the owner's
-    // chat with the Stop button, and one with text is HTML.
-    const drafts = calls('sendMessageDraft');
-    const draftIds = [...new Set(drafts.map((call) => call.params.draft_id))];
-    expect(draftIds).toHaveLength(3);
-    for (const id of draftIds)
-      expect(drafts.find((call) => call.params.draft_id === id)?.params).toEqual({
-        chat_id: owner.id,
-        draft_id: id,
-        text: '',
-        can_stop: true,
-      });
-    expect(drafts.some((call) => call.params.text)).toBe(true);
-    for (const call of drafts)
-      expect(call.params).toEqual({
-        chat_id: owner.id,
-        draft_id: call.params.draft_id,
-        text: call.params.text,
-        ...(call.params.text ? { parse_mode: 'HTML' } : {}),
-        can_stop: true,
-      });
+    // The second bot: nothing refused, no typing, no group left.
+    const secondMethods = (method: string) => tg2.calls.filter((call) => call.method === method);
+    expect(tg2.calls.filter((call) => !call.ok)).toEqual([]);
+    expect(secondMethods('sendChatAction')).toEqual([]);
+    expect(secondMethods('leaveChat')).toEqual([]);
 
-    expect(transcript(tg.calls, presses)).toMatchSnapshot();
+    // Drafts: how many depends on timing. Each streamed reply (林夏's and the slow one in the
+    // first bot, the group's in the second) opens with an empty "Thinking…" draft; each draft is
+    // in the owner's chat with the Stop button, and one with text is HTML.
+    for (const [drafts, count] of [
+      [calls('sendMessageDraft'), 2],
+      [secondMethods('sendMessageDraft'), 1],
+    ] as const) {
+      const draftIds = [...new Set(drafts.map((call) => call.params.draft_id))];
+      expect(draftIds).toHaveLength(count);
+      for (const id of draftIds)
+        expect(drafts.find((call) => call.params.draft_id === id)?.params).toEqual({
+          chat_id: owner.id,
+          draft_id: id,
+          text: '',
+          can_stop: true,
+        });
+      expect(drafts.some((call) => call.params.text)).toBe(true);
+      for (const call of drafts)
+        expect(call.params).toEqual({
+          chat_id: owner.id,
+          draft_id: call.params.draft_id,
+          text: call.params.text,
+          ...(call.params.text ? { parse_mode: 'HTML' } : {}),
+          can_stop: true,
+        });
+    }
+
+    const firstBot = transcript(tg.calls, presses);
+    const secondBot = transcript(tg2.calls, new Map(), tg2, '@bot2');
+    expect({
+      bot: firstBot.bot,
+      'bot@bot2': secondBot.bot,
+      chats: { ...firstBot.chats, ...secondBot.chats },
+    }).toMatchSnapshot();
   });
 });

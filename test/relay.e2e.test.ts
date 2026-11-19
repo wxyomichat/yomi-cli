@@ -31,6 +31,9 @@ const saved: Record<string, string | undefined> = {};
 const owner: MockTelegramUser = { id: 5550001, first_name: 'Lin', language_code: 'zh-hans' };
 const stranger: MockTelegramUser = { id: 5550999, first_name: 'Eve' };
 const example = resolve('examples/character.yaml');
+/** The characters the relay is bound to (its bot registry record), as the mock names them. */
+const LIN = { npcId: MOCK_NPCS.single, name: '林夏', group: false };
+const HARBOR = { npcId: MOCK_NPCS.group, name: '雾港', group: true };
 
 function setEnv(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
@@ -277,7 +280,9 @@ describe('the relay', () => {
       });
     relay = new Relay(context.gateway, bot, state, {
       maxSpend: 50,
-      characterId: MOCK_NPCS.single,
+      characterId: '',
+      boundCharacter: LIN,
+      botName: 'lin_relay_bot',
       pairing: null,
       replyTimeoutMs: 1500,
       intervalMs: 30,
@@ -355,14 +360,34 @@ describe('the relay', () => {
     expect(texts(owner.id).length).toBeGreaterThan(shown);
   });
 
-  it('names the speakers of a group chat', async () => {
+  it('keeps its character in the chat; bound to a group character on the computer, it names the speakers', async () => {
+    const sent = sends().length;
     tg.userSends(owner, `/character ${MOCK_NPCS.group}`);
-    await said(owner.id, /已切换到「雾港」/);
+    await saidNext(
+      owner.id,
+      /^这个 bot 固定和「林夏」聊天，不能在聊天里换角色。要换，在电脑上运行：yomi relay --bot lin_relay_bot --character ID$/,
+    );
+    expect(sends().length).toBe(sent);
+    // Bound to 雾港 (as `yomi relay --bot … --character` does while it is stopped): the owner is
+    // welcomed with it before the answer to their next message.
+    await stop();
+    await start({ boundCharacter: HARBOR });
+    const welcome = expectNext(owner.id, /^你正在与 AI 角色「雾港」聊天/);
+    const opening = expectNext(owner.id, /<b>阿青<\/b>：新来的？/);
     tg.userSends(owner, '大家好');
-    const reply = await said(owner.id, /<b>阿青<\/b>：大家好/);
+    const reply = await saidNext(owner.id, /<b>阿青<\/b>：大家好/);
     expect(reply.text).toContain('<b>小白</b>：');
-    tg.userSends(owner, `/character ${MOCK_NPCS.single}`);
-    await said(owner.id, /已切换到「林夏」/);
+    expect((await welcome()).message_id).toBeLessThan(reply.message_id);
+    expect((await opening()).message_id).toBeLessThan(reply.message_id);
+    expect(state.data.welcomed.at(-1)?.npcId).toBe(MOCK_NPCS.group);
+    // Bound back to 林夏: welcomed with her latest reply this time (a conversation exists).
+    await stop();
+    await start();
+    const back = expectNext(owner.id, /^你正在与 AI 角色「林夏」聊天/);
+    tg.userSends(owner, '好久不见');
+    const answer = await saidNext(owner.id, /好久不见/);
+    expect((await back()).message_id).toBeLessThan(answer.message_id);
+    expect(state.data.welcomed.at(-1)?.npcId).toBe(MOCK_NPCS.single);
   });
 
   it('stops at the end of the free replies, with the price and no charge', async () => {

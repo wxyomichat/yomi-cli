@@ -45,8 +45,10 @@ import {
 } from '../src/relay/render.js';
 import { servicePlan } from '../src/relay/service.js';
 import {
+  characterOwner,
   forgetRelayStates,
   ownerKey,
+  type RelayCharacter,
   RelayState,
   type RelayStateFile,
   relayStatePath,
@@ -262,6 +264,21 @@ describe('texts that depend on the channel', () => {
         expect(text(false), language).not.toMatch(quoting);
       }
       expect(texts.imageUsage(false), language).toContain('/image resume');
+    }
+  });
+
+  it('leave /character out of the help of a bot bound to one character, in every language', () => {
+    for (const language of LANGUAGES) {
+      const texts = relayTexts(language);
+      expect(texts.help(true, false), language).toContain('/character');
+      const bound = texts.help(true, true);
+      expect(bound, language).not.toContain('/character');
+      for (const command of ['/price', '/budget', '/image', '/report', '/stop'])
+        expect(bound, language).toContain(command);
+      expect(
+        texts.boundUnavailable('Lin', 'yomi relay --bot lin --character ID'),
+        language,
+      ).toContain('yomi relay --bot lin --character ID');
     }
   });
 
@@ -1541,6 +1558,147 @@ describe('the core on any channel', () => {
       ownerKey('openid-a'),
       ownerKey('openid-b'),
     ]);
+  });
+
+  describe('a bot bound to one character', () => {
+    const LIN: RelayCharacter = { npcId: MOCK_NPCS.single, name: '林夏', group: false };
+    const HARBOR: RelayCharacter = { npcId: MOCK_NPCS.group, name: '雾港', group: true };
+    const BIND = 'yomi relay --bot lin --character ID';
+    /** The registry's `characterOwners`, in memory. */
+    const owners = (entries: Record<string, string> = {}) => {
+      const map = new Map(Object.entries(entries));
+      return {
+        map,
+        get: (npcId: string) => map.get(npcId),
+        set: (npcId: string, owner: string) => void map.set(npcId, owner),
+      };
+    };
+    /** Its latest reply in a conversation with 林夏, from another device. */
+    async function conversation(text: string) {
+      mock.state.chats.delete(MOCK_NPCS.single);
+      const other = mock.replyFromAnotherDevice(MOCK_NPCS.single, text);
+      await waitFor(() =>
+        mock.state.chats
+          .get(MOCK_NPCS.single)
+          ?.messages.some((message) => String(message.mid) === other.assistantMid),
+      );
+    }
+    const LATEST = '（她合上书，看着你。）\n\n在吗？这个问题，我想了很久。';
+
+    it('welcomes with the opening, never the latest reply, a character last shown to someone else', async () => {
+      const cases = [
+        { name: 'another', last: characterOwner('qq', 'openid-earlier'), latest: false },
+        { name: 'unreadable', last: '?', latest: false },
+        { name: 'same', last: characterOwner('qq', 'openid-now'), latest: true },
+      ];
+      for (const item of cases) {
+        await conversation('在吗');
+        const shown = owners({ [LIN.npcId]: item.last });
+        const pairing = new PairingCode();
+        const fake = new FakeChannel({ scope: `fake:bound-${item.name}`, ownerId: 'openid-now' });
+        const { stop } = await start(fake, {
+          pairing,
+          unpaired: true,
+          characterId: '',
+          boundCharacter: LIN,
+          botName: 'lin',
+          characterOwners: { get: shown.get, set: item.last === '?' ? () => {} : shown.set },
+        });
+        await paired(fake, pairing);
+        expect(kinds(fake), item.name).toEqual(['text', 'text', 'text', 'photo', 'text', 'text']);
+        expect(fake.texts()[0], item.name).toMatch(/^已配对：这个 bot 现在只为你转发消息，\/help/);
+        expect(fake.texts().at(-1), item.name).toBe(item.latest ? LATEST : OPENING);
+        if (item.last !== '?')
+          expect(shown.map.get(LIN.npcId), item.name).toBe(characterOwner('qq', 'openid-now'));
+        await stop();
+      }
+    });
+
+    it("records the owner it is paired or started with, so a later welcome never shows that owner's reply to another", async () => {
+      mock.state.chats.delete(MOCK_NPCS.single);
+      const scope = 'fake:bound-owners';
+      const shown = owners();
+      const bound = (character: RelayCharacter) => ({
+        characterId: '',
+        boundCharacter: character,
+        botName: 'lin',
+        characterOwners: shown,
+      });
+      const pairAs = async (from: string, character: RelayCharacter) => {
+        const pairing = new PairingCode();
+        const fake = new FakeChannel({ scope, ownerId: from });
+        const run = await start(fake, { pairing, unpaired: true, ...bound(character) });
+        await paired(fake, pairing);
+        return { fake, ...run };
+      };
+      const alice = characterOwner('qq', 'openid-alice');
+      const bob = characterOwner('qq', 'openid-bob');
+      // Alice, then Bob, are welcomed with 林夏.
+      let run = await pairAs('openid-alice', LIN);
+      await run.stop();
+      run.state.resetOwner();
+      run = await pairAs('openid-bob', LIN);
+      expect(kinds(run.fake)).toEqual(['text', 'text', 'text', 'photo', 'text', 'text']);
+      expect(shown.map.get(LIN.npcId)).toBe(bob);
+      await run.stop();
+      // Bound to 雾港: Bob is welcomed with it before the answer to his next message.
+      const harbor = new FakeChannel({ scope, ownerId: 'openid-bob' });
+      run = { fake: harbor, ...(await start(harbor, bound(HARBOR))) };
+      const help = harbor.expect(/^直接发文字/);
+      harbor.say('/help');
+      await help();
+      await harbor.idle();
+      expect(harbor.photos).toHaveLength(1);
+      // Bound: no /character in its help.
+      expect(harbor.texts().at(-1)).not.toContain('/character');
+      await run.stop();
+      // Bound back to 林夏, Alice pairs again: welcomed with it before, so none, but she has it now.
+      run.state.resetOwner();
+      run = await pairAs('openid-alice', LIN);
+      expect(kinds(run.fake)).toEqual(['text', 'text']);
+      expect(shown.map.get(LIN.npcId)).toBe(alice);
+      await chatted(run.fake, run.relay, '只说给 Alice');
+      const hers = run.fake.texts().at(-1)!;
+      await run.stop();
+      // Bob pairs again, owed the welcome with 林夏 (his last was 雾港): its opening, not her reply.
+      run.state.resetOwner();
+      run = await pairAs('openid-bob', LIN);
+      expect(kinds(run.fake)).toEqual(['text', 'text', 'text', 'photo', 'text', 'text']);
+      expect(run.fake.texts().at(-1)).toBe(OPENING);
+      expect(run.fake.texts()).not.toContain(hers);
+      expect(shown.map.get(LIN.npcId)).toBe(bob);
+      await run.stop();
+      // Started again with the same owner, not owed a welcome: still recorded as theirs.
+      shown.map.set(LIN.npcId, alice);
+      const again = new FakeChannel({ scope, ownerId: 'openid-bob' });
+      run = { fake: again, ...(await start(again, bound(LIN))) };
+      expect(run.state.welcomeOwed).toBe(false);
+      expect(shown.map.get(LIN.npcId)).toBe(bob);
+      await run.stop();
+    });
+
+    it('answers an unavailable character with the command that binds the bot to another one', async () => {
+      const removed: RelayCharacter = { npcId: MOCK_NPCS.removed, name: '旧角色', group: false };
+      const fake = new FakeChannel({ scope: 'fake:bound-removed' });
+      const { logs, stop } = await start(fake, {
+        characterId: '',
+        boundCharacter: removed,
+        botName: 'lin',
+      });
+      expect(logs).toContain(
+        `角色「旧角色」暂时不可用：这个 bot 不能在聊天里换角色。要换，运行 ${BIND}`,
+      );
+      const before = sends().length;
+      const next = fake.expect(/在电脑上运行：yomi relay --bot lin --character ID$/);
+      fake.say('你好');
+      await next();
+      await fake.idle();
+      expect(fake.texts().at(-1)).toBe(relayTexts('zh').boundUnavailable('旧角色', BIND));
+      expect(fake.texts().join('\n')).not.toContain('请换一个角色');
+      expect(logs).toContain(`角色「旧角色」不可用：介绍等它恢复或换绑后再发（${BIND}）`);
+      expect(sends().length - before).toBeLessThanOrEqual(1);
+      await stop();
+    });
   });
 
   it('welcomes nobody on an upgrade: the owner of an older file chats as before', async () => {

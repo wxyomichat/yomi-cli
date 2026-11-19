@@ -12,9 +12,45 @@ exports[`the relay, golden transcript > says the same things, in the same order,
       "params": {
         "commands": [
           {
-            "command": "character",
-            "description": "查看或切换角色",
+            "command": "price",
+            "description": "价格、余额和预算",
           },
+          {
+            "command": "budget",
+            "description": "可选的钻石上限",
+          },
+          {
+            "command": "image",
+            "description": "根据回复生成图片",
+          },
+          {
+            "command": "report",
+            "description": "举报回复或角色",
+          },
+          {
+            "command": "stop",
+            "description": "停止转发当前回复（不退费）",
+          },
+          {
+            "command": "help",
+            "description": "帮助",
+          },
+        ],
+        "scope": {
+          "type": "all_private_chats",
+        },
+      },
+    },
+  ],
+  "bot@bot2": [
+    {
+      "method": "getWebhookInfo",
+      "params": {},
+    },
+    {
+      "method": "setMyCommands",
+      "params": {
+        "commands": [
           {
             "command": "price",
             "description": "价格、余额和预算",
@@ -56,7 +92,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
             "is_disabled": true,
           },
           "parse_mode": "HTML",
-          "text": "已配对：这个 bot 现在只为你转发消息。用 /character 选择角色，/help 查看命令。（@lin_golden_bot）",
+          "text": "已配对：这个 bot 现在只为你转发消息，/help 查看命令。（@lin_golden_bot）",
         },
       },
       {
@@ -137,44 +173,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
             "is_disabled": true,
           },
           "parse_mode": "HTML",
-          "text": "已切换到「雾港」。",
-        },
-      },
-      {
-        "method": "sendMessage",
-        "params": {
-          "chat_id": 5570001,
-          "link_preview_options": {
-            "is_disabled": true,
-          },
-          "parse_mode": "HTML",
-          "text": "你正在与 AI 角色「雾港」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。",
-        },
-      },
-      {
-        "method": "sendMessage",
-        "params": {
-          "chat_id": 5570001,
-          "link_preview_options": {
-            "is_disabled": true,
-          },
-          "parse_mode": "HTML",
-          "text": "<i>雾港的码头上，灯一盏盏亮起来。</i>
-
-<b>阿青</b>：新来的？",
-        },
-      },
-      {
-        "method": "sendMessage",
-        "params": {
-          "chat_id": 5570001,
-          "link_preview_options": {
-            "is_disabled": true,
-          },
-          "parse_mode": "HTML",
-          "text": "<b>阿青</b>：大家好？我先说两句。
-
-<b>小白</b>：我也在听。",
+          "text": "这个 bot 固定和「林夏」聊天，不能在聊天里换角色。要换，在电脑上运行：yomi relay --bot lin_golden_bot --character ID",
         },
       },
       {
@@ -225,7 +224,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
         "method": "editMessageReplyMarkup",
         "params": {
           "chat_id": 5570001,
-          "message_id": "<message 12>",
+          "message_id": "<message 9>",
           "reply_markup": {
             "inline_keyboard": [],
           },
@@ -285,7 +284,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
         "method": "editMessageReplyMarkup",
         "params": {
           "chat_id": 5570001,
-          "message_id": "<message 14>",
+          "message_id": "<message 11>",
           "reply_markup": {
             "inline_keyboard": [],
           },
@@ -316,7 +315,7 @@ exports[`the relay, golden transcript > says the same things, in the same order,
       {
         "method": "sendPhoto",
         "params": {
-          "caption": "「雾港」的图片",
+          "caption": "「林夏」的图片",
           "chat_id": "5570001",
           "parse_mode": "HTML",
         },
@@ -379,6 +378,89 @@ exports[`the relay, golden transcript > says the same things, in the same order,
           },
           "parse_mode": "HTML",
           "text": "不认识这个命令，/help 查看可用命令。",
+        },
+      },
+    ],
+    "owner@bot2": [
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "已配对：这个 bot 现在只为你转发消息，/help 查看命令。（@fog_golden_bot）",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "当前角色：雾港（ID 7300000000000009002）",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "你正在与 AI 角色「雾港」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。",
+        },
+      },
+      {
+        "method": "sendPhoto",
+        "params": {
+          "chat_id": "5570001",
+        },
+        "photo": {
+          "height": 80,
+          "type": "image/png",
+          "width": 60,
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "雾里的港口小镇，新来的人一眼就会被认出来。",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<i>雾港的码头上，灯一盏盏亮起来。</i>
+
+<b>阿青</b>：新来的？",
+        },
+      },
+      {
+        "method": "sendMessage",
+        "params": {
+          "chat_id": 5570001,
+          "link_preview_options": {
+            "is_disabled": true,
+          },
+          "parse_mode": "HTML",
+          "text": "<b>阿青</b>：大家好？我先说两句。
+
+<b>小白</b>：我也在听。",
         },
       },
     ],

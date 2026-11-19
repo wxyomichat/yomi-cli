@@ -329,7 +329,8 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     // The channel's bot is the new scanner's now, never refused as another bot's.
     expect(registered()).toMatchObject({ scope: wechatScope('q7_other@im.wechat') });
     const listed = await run(['relay', '--list', '--channel', 'wechat']);
-    expect(listed.out).toContain('  状态：没有运行');
+    // Ready to run, but bound to no character yet.
+    expect(listed.out).toContain('  状态：需要绑定角色：yomi relay --bot wechat-1 --character ID');
     expect(listed.out).not.toContain('凭证属于另一个 bot');
     // Back to the first owner, without its money state (the tests below chat with it).
     stateOf(wx.owner).update({

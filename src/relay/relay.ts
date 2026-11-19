@@ -87,7 +87,7 @@ import {
   type RelayPolicy,
 } from './policy.js';
 import { renderReply } from './render.js';
-import { type BillingMode, type RelayCharacter, type RelayState } from './state.js';
+import { type BillingMode, characterOwner, type RelayCharacter, type RelayState } from './state.js';
 import { TelegramBot } from './telegram.js';
 import {
   type ImageBillingNote,
@@ -122,16 +122,25 @@ import {
  *   send is never repeated.
  * - The channel only translates: its inbound events in, the core's sends out under its own reply
  *   rules. Every rule about money, consent, policy and Yomi is here, the same on every channel.
- * - Binding the bot to its owner (pairing in the chat, or WeChat's login) is followed once per
- *   owner by a free welcome: the AI notice, the character's cover, its introduction, then its
- *   opening, or its latest reply when a conversation exists. It goes at the pairing, else (WeChat,
- *   which cannot speak first; a character chosen later; a read that failed; a channel the server
- *   has not confirmed yet, or a paused one) before the answer to the owner's next message once it
- *   can go, or with the character first chosen by `/character` (also when the character at the
- *   binding is unavailable). A `/character` while it is held back leaves the opening to it. It is
- *   free: profile and history reads only, never a `send_message`. The same owner bound again, or
- *   a restart, gets none. `/character` later shows a character's opening once, when there is no
- *   conversation yet.
+ * - A bot of the bot registry talks as the one character it is bound to (`boundCharacter`, set on
+ *   the computer with `yomi relay --bot NAME --character ID`): `/character` names it and says how
+ *   to change it there, the menu and /help leave it out, a character that became unavailable is
+ *   answered with that same command, and a bot bound to none answers every owner message with how
+ *   to bind one, sending nothing to Yomi. Without `boundCharacter` (a relay made on its own)
+ *   `/character` chooses the character in the chat.
+ * - Binding the bot to its owner (pairing in the chat, or WeChat's login) is followed by a free
+ *   welcome, once per owner and again each time a bound bot is bound to a character other than the
+ *   one it last welcomed them with: the AI notice, the character's cover, its introduction, then
+ *   its opening, or its latest reply when a conversation exists. It goes at the pairing, else
+ *   (WeChat, which cannot speak first; a character chosen later or bound on the computer; a read
+ *   that failed; a channel the server has not confirmed yet, or a paused one) before the answer to
+ *   the owner's next message once it can go, or with the character first chosen by `/character`
+ *   (also when the character at the binding is unavailable). A `/character` while it is held back
+ *   leaves the opening to it. It is free: profile and history reads only, never a `send_message`.
+ *   The same owner bound again, or a restart, gets none. A character last shown to someone else
+ *   (`characterOwners`: the owner it was last welcomed, paired or started with) is welcomed with
+ *   its opening, never with the latest reply of a conversation that may be theirs. `/character`
+ *   later shows a character's opening once, when there is no conversation yet.
  * - `/image` asks for a picture of a reply (one at a time, like a reply): a priced one goes as a
  *   reply does (refused under free-only, within a cap when one is set) and is measured like a
  *   reply. The request is kept before it is sent and resent only as the same request (`/image
@@ -182,8 +191,26 @@ export type RelayOptions = {
    * whoever made them; without, the relay makes its own and runs them itself.
    */
   hub?: RelayServices;
-  /** Character to start with (`--character`), '' to keep the saved one. */
+  /** Character to start with (`--character`), '' to keep the saved one; not with `boundCharacter`. */
   characterId: string;
+  /**
+   * The one character this bot talks as (its record in the bot registry): `/character` cannot
+   * change it. null: none yet, every owner message is answered with how to bind one. Absent: the
+   * owner chooses with `/character` (a relay made on its own).
+   */
+  boundCharacter?: RelayCharacter | null;
+  /** The bot's name in the registry, for the command that binds it (`yomi relay --bot NAME …`). */
+  botName?: string;
+  /**
+   * Whom each character was last shown to on this computer (the registry's `characterOwners`, as
+   * `characterOwner` keys): a welcome shows the latest reply only when that is this owner or
+   * nobody. The owner is recorded when the welcome goes, or at the pairing and the start when none
+   * is owed. Absent: always allowed, nothing recorded.
+   */
+  characterOwners?: {
+    get(npcId: string): string | undefined;
+    set(npcId: string, owner: string): void;
+  };
   /** Pairing code while unpaired (foreground runs only), else null. */
   pairing: PairingCode | null;
   /** Called when a spent or expired code is replaced (the terminal shows the new one). */
@@ -554,6 +581,16 @@ export class Relay {
     this.options.log(line);
   }
 
+  /** The bot talks as one character (or none yet), set on the computer: no `/character`. */
+  private get bound(): boolean {
+    return this.options.boundCharacter !== undefined;
+  }
+
+  /** What binds this bot to a character on the computer. */
+  private get bindCommand(): string {
+    return `yomi relay --bot ${this.options.botName ?? 'NAME'} --character ID`;
+  }
+
   /** Runs until `signal` aborts or the relay has to stop (`RelayStopped`). */
   async run(signal: AbortSignal): Promise<void> {
     const onAbort = () => this.abort.abort();
@@ -579,9 +616,12 @@ export class Relay {
     this.identity = await this.channel.verify();
     this.state.update({ botUsername: this.identity.handle });
     await this.channel.connect(this.host);
-    await this.channel.setCommands(relayCommands(this.options.language)).catch(() => undefined);
+    await this.channel
+      .setCommands(relayCommands(this.options.language, this.bound))
+      .catch(() => undefined);
     if (this.state.bindAccount(this.userId)) {
-      this.options.onCharacter?.(null);
+      // A bound bot keeps its character: it is checked again below.
+      if (!this.bound) this.options.onCharacter?.(null);
       this.log(
         tr(
           '这台电脑上登录的 Yomi 账号和上次不同：预算、角色和记录已重置',
@@ -598,7 +638,8 @@ export class Relay {
     await this.readPolicy(true);
     // Signed out before this relay listened (the sign-in is shared): it pauses as the others did.
     if (this.session.signedOut && this.gate !== 'signedOut') await this.pauseSignedOut();
-    if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
+    if (this.bound) await this.takeBoundCharacter();
+    else if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
     const kept = this.keptImage();
     // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
     // next send) settles it, never a reading taken now.
@@ -854,14 +895,20 @@ export class Relay {
       return;
     }
     this.replyTo = event.context;
+    // Bound to no character yet: nothing reaches Yomi, whatever the message.
+    if (this.options.boundCharacter === null)
+      return void (await this.say(this.texts.needsCharacter(this.bindCommand)));
     await this.refreshPolicy();
     // Taken before a welcome, which takes a few seconds.
     const stale = Date.now() - event.sentAt > this.options.staleMs;
     // A welcome still owed goes first (WeChat cannot speak before the owner's first message);
-    // `/character <id>` gives it with the character it chooses.
+    // `/character <id>` gives it with the character it chooses (a bot of its own choosing only).
     const character = this.state.data.character;
     const choosing =
-      event.kind === 'command' && event.name.toLowerCase() === 'character' && event.argument;
+      !this.bound &&
+      event.kind === 'command' &&
+      event.name.toLowerCase() === 'character' &&
+      event.argument;
     if (character && !choosing) await this.welcome(character);
     if (stale) return void (await this.say(this.texts.stale));
     if (!event.text) return void (await this.say(this.texts.textOnly));
@@ -890,13 +937,17 @@ export class Relay {
       return;
     }
     this.options.pairing = null;
-    this.state.bindOwner({
-      userId: this.channel.persistId(event.from.id),
-      chatId: this.channel.persistId(event.chatId),
-      name: event.from.name.slice(0, 64),
-      language: event.from.language,
-      pairedAt: Date.now(),
-    });
+    this.state.bindOwner(
+      {
+        userId: this.channel.persistId(event.from.id),
+        chatId: this.channel.persistId(event.chatId),
+        name: event.from.name.slice(0, 64),
+        language: event.from.language,
+        pairedAt: Date.now(),
+      },
+      // A bound bot's owner was welcomed with its character, or is owed the welcome with it.
+      this.options.boundCharacter?.npcId,
+    );
     const name = this.channel.displayName;
     const who = event.from.name;
     const id = event.from.id;
@@ -911,11 +962,18 @@ export class Relay {
     this.replyTo = event.context;
     // The bot by its handle (Telegram), else its name, else the channel's: never an empty "()".
     const handle = this.identity.handle;
-    await this.say(this.texts.paired(handle ? `@${handle}` : this.identity.name || name));
+    const bot = handle ? `@${handle}` : this.identity.name || name;
+    await this.say(this.bound ? this.texts.pairedBound(bot) : this.texts.paired(bot));
     const character = this.state.data.character;
-    if (!character) return void (await this.say(this.texts.noCharacter));
+    if (!character)
+      return void (await this.say(
+        this.bound ? this.texts.needsCharacter(this.bindCommand) : this.texts.noCharacter,
+      ));
     await this.say(this.texts.characterIs(character.name, character.npcId));
     await this.welcome(character);
+    // Not owed one (welcomed with it before): the character goes on with this owner all the same.
+    // A welcome held back records them when it goes, after reading who had it before.
+    if (!this.state.welcomeOwed) this.recordShown(character.npcId);
   }
 
   private async command(event: InboundCommand) {
@@ -924,8 +982,17 @@ export class Relay {
     switch (event.name.toLowerCase()) {
       case 'start':
       case 'help':
-        return void (await this.say(this.texts.help(this.channel.caps.quotes)));
+        return void (await this.say(this.texts.help(this.channel.caps.quotes, this.bound)));
       case 'character':
+        // Bound on the computer: named, with how to change it there.
+        if (this.bound) {
+          const character = this.state.data.character;
+          return void (await this.say(
+            character
+              ? this.texts.characterFixed(character.name, this.bindCommand)
+              : this.texts.needsCharacter(this.bindCommand),
+          ));
+        }
         if (!argument) {
           const character = this.state.data.character;
           return void (await this.say(
@@ -1006,7 +1073,45 @@ export class Relay {
   // -------------------------------------------------------------------------------------------
   // Characters, notices, price
 
-  private async chooseCharacter(input: string, announce: boolean) {
+  /**
+   * The character the bot is bound to, from the registry: another one than it talked as last time
+   * owes its owner the welcome with it (`RelayState.characterBound`); an owner not owed one is the
+   * one it was shown to last (`characterOwners`). Its profile is read again for its name; when that
+   * fails the registry's is used, and an unavailable one is logged with the command that binds the
+   * bot to another. None: the bot talks as nobody (the command line said so).
+   */
+  private async takeBoundCharacter() {
+    const bound = this.options.boundCharacter ?? null;
+    if (!bound) {
+      if (this.state.data.character) this.state.update({ character: null });
+      return;
+    }
+    if (this.state.data.character?.npcId !== bound.npcId) this.state.characterBound(bound.npcId);
+    this.state.update({ character: bound });
+    // A welcome still owed reads who it was shown to before, and records this owner when it goes.
+    if (!this.state.welcomeOwed) this.recordShown(bound.npcId);
+    const failure = await this.chooseCharacter(bound.npcId, false);
+    if (failure instanceof ChatRefusal && failure.kind === 'unavailable')
+      this.log(
+        tr(
+          `角色「${bound.name}」暂时不可用：这个 bot 不能在聊天里换角色。要换，运行 ${this.bindCommand}`,
+          `"${bound.name}" is unavailable right now: this bot can't change its character in the chat. To change it, run ${this.bindCommand}`,
+          `"${bound.name}" no está disponible en este momento: este bot no puede cambiar de personaje en el chat. Para cambiarlo, ejecuta ${this.bindCommand}`,
+          `"${bound.name}" não está disponível agora: este bot não pode trocar de personagem no chat. Para trocar, execute ${this.bindCommand}`,
+        ),
+      );
+  }
+
+  /** The character cannot chat: a bound bot names the command that binds it to another one. */
+  private unavailableText(): string {
+    const character = this.state.data.character;
+    return this.bound && character
+      ? this.texts.boundUnavailable(character.name, this.bindCommand)
+      : this.texts.unavailable;
+  }
+
+  /** Returns why the profile could not be read; undefined when it was (or the id was bad). */
+  private async chooseCharacter(input: string, announce: boolean): Promise<unknown> {
     const npcId = /([1-9][0-9]{5,19})/.exec(input)?.[1] ?? '';
     if (!npcId) return void (await this.say(this.texts.characterBad));
     let profile;
@@ -1023,7 +1128,7 @@ export class Relay {
         ),
       );
       if (announce) await this.say(this.texts.characterBad);
-      return;
+      return error;
     }
     const character: RelayCharacter = { npcId, name: profile.name, group: profile.group };
     this.state.update({ character });
@@ -1062,9 +1167,11 @@ export class Relay {
   }
 
   /**
-   * The welcome the bound owner is owed (`RelayState.bindOwner`), with `character`: the AI notice,
-   * the cover, the introduction, then the opening when there is no conversation yet (it counts as
-   * shown), else the character's latest reply. Free: profile and history reads only, never a send.
+   * The welcome the bound owner is owed (`RelayState.bindOwner`, `characterBound`), with
+   * `character`: the AI notice, the cover, the introduction, then the opening when there is no
+   * conversation yet (it counts as shown), else the character's latest reply; only the opening when
+   * the character was last shown to someone else (`characterOwners`), whose conversation it may
+   * be. Free: profile and history reads only, never a send.
    * Not now (it stays owed) while the relay is paused or a reply is open. Never throws: an
    * unreadable profile keeps it owed, and so does an unavailable character (the next one chosen
    * gets it); a cover that cannot be had is left out, an unreadable history leaves out the last
@@ -1087,12 +1194,19 @@ export class Relay {
         if (error instanceof ChatRefusal && error.kind === 'unavailable') {
           if (this.welcomeUnavailable !== character.npcId)
             this.log(
-              tr(
-                `角色「${character.name}」不可用：介绍等选好角色后再发`,
-                `"${character.name}" is unavailable: the introduction goes with the character chosen next`,
-                `"${character.name}" no está disponible: la presentación se enviará con el próximo personaje que se elija`,
-                `"${character.name}" não está disponível: a apresentação será enviada com o próximo personagem escolhido`,
-              ),
+              this.bound
+                ? tr(
+                    `角色「${character.name}」不可用：介绍等它恢复或换绑后再发（${this.bindCommand}）`,
+                    `"${character.name}" is unavailable: the introduction goes once it is back, or with the character bound next (${this.bindCommand})`,
+                    `"${character.name}" no está disponible: la presentación se enviará cuando vuelva o con el próximo personaje que se le asigne (${this.bindCommand})`,
+                    `"${character.name}" não está disponível: a apresentação será enviada quando ele voltar ou com o próximo personagem vinculado (${this.bindCommand})`,
+                  )
+                : tr(
+                    `角色「${character.name}」不可用：介绍等选好角色后再发`,
+                    `"${character.name}" is unavailable: the introduction goes with the character chosen next`,
+                    `"${character.name}" no está disponible: la presentación se enviará con el próximo personaje que se elija`,
+                    `"${character.name}" não está disponível: a apresentação será enviada com o próximo personagem escolhido`,
+                  ),
             );
           this.welcomeUnavailable = character.npcId;
           return false;
@@ -1108,14 +1222,18 @@ export class Relay {
         return false;
       }
     }
+    // Asked before the welcome records this owner as the one it was shown to.
+    const foreign = this.shownToAnother(character.npcId);
     // Saved first: a crash or a restart halfway never gives it twice.
     this.state.markWelcomed(character.npcId);
+    this.recordShown(character.npcId);
     await this.notice(character, force);
     await this.sendCover(character, profile);
     await this.say(introductionOf(profile, this.channel.caps.maxText));
-    let history: { cid: string; recent: ImMessage[] };
+    // Shown to someone else last: as if there were no conversation yet (its opening, if any).
+    let history: { cid: string; recent: ImMessage[] } = { cid: '', recent: [] };
     try {
-      history = await this.recentHistory(character.npcId);
+      if (!foreign) history = await this.recentHistory(character.npcId);
     } catch {
       this.log(
         tr(
@@ -1182,6 +1300,24 @@ export class Relay {
       ),
     );
     return true;
+  }
+
+  /** The owner's key in `characterOwners` ('' when unpaired). */
+  private ownerShownKey(): string {
+    const owner = this.state.data.owner;
+    return owner ? characterOwner(this.channel.kind, owner.userId) : '';
+  }
+
+  /** Whether `npcId` was last shown to someone other than the owner (`characterOwners`). */
+  private shownToAnother(npcId: string): boolean {
+    const last = this.options.characterOwners?.get(npcId);
+    return Boolean(last && last !== this.ownerShownKey());
+  }
+
+  /** The owner is the one `npcId` was shown to last. */
+  private recordShown(npcId: string) {
+    const owner = this.ownerShownKey();
+    if (owner) this.options.characterOwners?.set(npcId, owner);
   }
 
   /**
@@ -1960,7 +2096,7 @@ export class Relay {
         case 'ageGate':
           return void (await this.say(this.texts.ageGate));
         case 'unavailable':
-          return void (await this.say(this.texts.unavailable));
+          return void (await this.say(this.unavailableText()));
         case 'disabled':
           this.gate = 'disabled';
           return void (await this.say(this.texts.disabled(error.message)));
@@ -2393,7 +2529,7 @@ export class Relay {
       if (error instanceof NotSignedIn || (error instanceof ApiError && error.needsSignIn))
         return this.signedOut();
       if (error instanceof ApiError && error.code === CHARACTER_REMOVED)
-        return void (await this.say(this.texts.unavailable));
+        return void (await this.say(this.unavailableText()));
       // An unknown price is "not free": nothing is asked for.
       this.log(
         tr(
@@ -2454,7 +2590,7 @@ export class Relay {
         return null;
       }
       const removed = error instanceof ChatRefusal && error.kind === 'unavailable';
-      await this.say(removed ? this.texts.unavailable : this.texts.imageHistoryUnavailable);
+      await this.say(removed ? this.unavailableText() : this.texts.imageHistoryUnavailable);
       return null;
     }
     if (event.replyTo) {

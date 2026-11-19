@@ -44,7 +44,7 @@ yomi relay --channel qq --character 7300000000000009001
 
 配对码 15 分钟内有效、只能用一次，只显示在这个终端里，不要发给别人。配对成功后，机器人在同一条消息下接着发介绍：「已配对」、当前角色和 AI 提示合成一条，然后是角色的封面图，再是简介和开场白（或最近一条回复，见 [docs/relay.md](relay.md#运行与配对)）。服务端还没确认 QQ 通道时，介绍等确认后你的下一条消息时再发。配对之后只有你的消息会转给 Yomi；别人的消息不会转发，也不会扣费。要换人，用 `--pair` 重新生成配对码。QQ 不提供对方的昵称，所以日志里的主人只记 QQ 给的 openid。
 
-可选：在 q.qq.com 控制台里给机器人配置指令菜单（`/help`、`/character`、`/price`、`/budget`、`/image`、`/report`、`/stop`），方便在手机上点选；不配置也可以直接打字。
+可选：在 q.qq.com 控制台里给机器人配置指令菜单（`/help`、`/price`、`/budget`、`/image`、`/report`、`/stop`），方便在手机上点选；不配置也可以直接打字。
 
 后台服务：`yomi relay --channel qq --install-service`（macOS 是 `io.yomichat.yomi-cli.relay.qq-<环境>`，Linux 是 `yomi-relay-qq-<环境>.service`）。同一个 Yomi 账号和环境，本机同时只能运行一个 relay。
 

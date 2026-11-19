@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { type CharacterProfile, ChatRefusal, characterProfile } from '../chat/api.js';
 import { describeEnvironment, type Environment, isProduction, UsageError } from '../core/env.js';
 import { configDir, ensurePrivateDir } from '../core/files.js';
 import { tr, language } from '../core/i18n.js';
@@ -18,7 +19,7 @@ import { PairingCode } from '../relay/pairing.js';
 import {
   type BotRecord,
   type BotRegistry,
-  characterOwner,
+  DuplicateCharacter,
   migrateRegistry,
 } from '../relay/registry.js';
 import { Relay, RelayStopped } from '../relay/relay.js';
@@ -29,7 +30,13 @@ import {
   uninstallService,
   runCommand,
 } from '../relay/service.js';
-import { forgetRelayStates, RelayState, relayStatePath } from '../relay/state.js';
+import {
+  forgetRelayStates,
+  ownerKey,
+  type RelayCharacter,
+  RelayState,
+  relayStatePath,
+} from '../relay/state.js';
 import { type Context, requireSignIn } from './context.js';
 import { confirmProduction } from './declaration.js';
 
@@ -45,6 +52,11 @@ import { confirmProduction } from './declaration.js';
  * stored credentials before anything else and made the bot new credentials belong to when they
  * are set: a run starts only when the stored credentials are still that bot's, and `yomi relay
  * --list` shows the bots without changing them.
+ *
+ * A bot talks as the one character of its record. `yomi relay --bot NAME --character ID` binds it
+ * to another one while it is not running (`relayRebind`); a run's `--character` binds a bot that
+ * has none, and is ignored with a warning for one bound to another character (an older service's
+ * arguments must not stop it). A character goes with one bot only.
  */
 
 export type RelayCommandOptions = {
@@ -574,6 +586,93 @@ function credentialsChanged(setup: ChannelSetup): string {
   );
 }
 
+/** The command that binds `name` to a character. */
+const bindCommand = (name: string) => `yomi relay --bot ${name} --character ID`;
+
+/** The character id in `input` (a number or a link with one), '' when there is none. */
+const characterIdOf = (input: string) => /([1-9][0-9]{5,19})/.exec(input)?.[1] ?? '';
+
+/** `--character` names no character that can chat (not found, removed, or not for this account). */
+function characterBad(input: string, detail: string): string {
+  return tr(
+    `没有找到角色 ${input}，或它暂时不能聊天${detail ? `（${detail}）` : ''}。`,
+    `Character ${input} was not found or cannot chat right now${detail ? ` (${detail})` : ''}.`,
+    `No se encontró el personaje ${input} o no puede chatear ahora${detail ? ` (${detail})` : ''}.`,
+    `O personagem ${input} não foi encontrado ou não pode conversar agora${detail ? ` (${detail})` : ''}.`,
+  );
+}
+
+/** The character `--character` names, read from Yomi; a UsageError when it cannot chat. */
+async function characterFor(context: Context, input: string): Promise<RelayCharacter> {
+  const npcId = characterIdOf(input);
+  if (!npcId) throw new UsageError(characterBad(input, ''));
+  let profile: CharacterProfile;
+  try {
+    profile = await characterProfile(context.gateway, npcId);
+  } catch (error) {
+    if (error instanceof ChatRefusal) throw new UsageError(characterBad(npcId, error.message));
+    throw error;
+  }
+  return { npcId, name: profile.name, group: profile.group };
+}
+
+/** A character in the terminal: its name and id. */
+const nameAndId = (character: RelayCharacter) =>
+  tr(
+    `${character.name}（${character.npcId}）`,
+    `${character.name} (${character.npcId})`,
+    `${character.name} (${character.npcId})`,
+    `${character.name} (${character.npcId})`,
+  );
+
+/** A run's `--character` for a bot bound to another one: the registry's stays. */
+function characterIgnored(record: BotRecord, character: RelayCharacter, input: string): string {
+  return tr(
+    `bot ${record.name} 固定和${nameAndId(character)}聊天：忽略这次的 --character ${input}。要换角色，先停止 relay，再运行 ${bindCommand(record.name)}。`,
+    `The bot ${record.name} always chats with ${nameAndId(character)}: --character ${input} is ignored. To change its character, stop the relay, then run ${bindCommand(record.name)}.`,
+    `El bot ${record.name} siempre chatea con ${nameAndId(character)}: se ignora --character ${input}. Para cambiar su personaje, detén el relay y luego ejecuta ${bindCommand(record.name)}.`,
+    `O bot ${record.name} sempre conversa com ${nameAndId(character)}: --character ${input} foi ignorado. Para trocar o personagem, pare o relay e depois execute ${bindCommand(record.name)}.`,
+  );
+}
+
+/** A bot without a character runs, but only says how to bind one. */
+function needsCharacter(record: BotRecord): string {
+  return tr(
+    `bot ${record.name} 还没有绑定角色：消息不会转发，只会提示主人在电脑上绑定。绑定：${bindCommand(record.name)}`,
+    `The bot ${record.name} has no character yet: messages are not forwarded, the owner is only told to bind one on the computer. To bind one: ${bindCommand(record.name)}`,
+    `El bot ${record.name} todavía no tiene personaje: los mensajes no se reenvían, solo se le dice al dueño que vincule uno en el equipo. Para vincularlo: ${bindCommand(record.name)}`,
+    `O bot ${record.name} ainda não tem personagem: as mensagens não são encaminhadas, o dono só é avisado para vincular um no computador. Para vincular: ${bindCommand(record.name)}`,
+  );
+}
+
+/**
+ * A run's `--character` (design §1.4): binds a bot that has none (unless another bot has it), and
+ * changes nothing for one bound to it already. For one bound to another character it is ignored
+ * with a warning, and so is anything that keeps it from binding: a background service started
+ * with an older `--character` must not stop over it. Returns the bot's record.
+ */
+async function characterAtStart(
+  context: Context,
+  registry: BotRegistry,
+  record: BotRecord,
+  input: string,
+): Promise<BotRecord> {
+  const npcId = characterIdOf(input);
+  const bound = record.character;
+  if (bound && bound.npcId === npcId) return record;
+  if (bound) {
+    warn(context.io, characterIgnored(record, bound, input));
+    return record;
+  }
+  try {
+    return registry.rebind(record.key, await characterFor(context, input));
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    warn(context.io, error.message);
+    return record;
+  }
+}
+
 /** A chat user id shown in part: its first and last two characters. */
 function masked(id: string): string {
   return id.length > 6 ? `${id.slice(0, 2)}…${id.slice(-2)}` : '…';
@@ -626,6 +725,13 @@ function botStatus(context: Context, record: BotRecord, state: RelayState | null
       `needs pairing: ${command} --pair`,
       `necesita vinculación: ${command} --pair`,
       `precisa de pareamento: ${command} --pair`,
+    );
+  if (!record.character)
+    return tr(
+      `需要绑定角色：${bindCommand(record.name)}`,
+      `needs a character: ${bindCommand(record.name)}`,
+      `necesita un personaje: ${bindCommand(record.name)}`,
+      `precisa de um personagem: ${bindCommand(record.name)}`,
     );
   return tr('没有运行', 'not running', 'no está en ejecución', 'não está em execução');
 }
@@ -747,6 +853,117 @@ export async function relayList(context: Context, kind: ChannelKind | null) {
           ),
     ),
   );
+}
+
+/** `--bot NAME` names no registered bot. */
+function unknownBot(name: string, registry: BotRegistry): string {
+  const names = registry.list().map((record) => record.name);
+  if (!names.length)
+    return tr(
+      `没有叫 "${name}" 的 bot：这台电脑上还没有 bot。`,
+      `There is no bot named "${name}": there are no bots on this computer yet.`,
+      `No hay ningún bot llamado "${name}": todavía no hay bots en este equipo.`,
+      `Não há nenhum bot chamado "${name}": ainda não há bots neste computador.`,
+    );
+  return tr(
+    `没有叫 "${name}" 的 bot。这台电脑上的 bot：${names.join('、')}（yomi relay --list）。`,
+    `There is no bot named "${name}". The bots on this computer: ${names.join(', ')} (yomi relay --list).`,
+    `No hay ningún bot llamado "${name}". Los bots de este equipo: ${names.join(', ')} (yomi relay --list).`,
+    `Não há nenhum bot chamado "${name}". Os bots deste computador: ${names.join(', ')} (yomi relay --list).`,
+  );
+}
+
+/** `--bot NAME` with a channel flag naming another channel than the bot's. */
+function otherChannel(record: BotRecord, kind: ChannelKind): string {
+  const its = channelSetup(record.kind).displayName;
+  const given = channelSetup(kind).displayName;
+  return tr(
+    `"${record.name}" 是${inChinese(its)}的 bot，不是${inChinese(given)}的。`,
+    `"${record.name}" is a ${its} bot, not ${given}.`,
+    `"${record.name}" es un bot de ${its}, no de ${given}.`,
+    `"${record.name}" é um bot do ${its}, não do ${given}.`,
+  );
+}
+
+/**
+ * `yomi relay --bot NAME --character ID`: binds the bot to another character, on this computer
+ * only (design §1.3). Refused while the bot runs (its lock is held while this changes it), and
+ * for a character another bot has (`DuplicateCharacter`, checked again in the registry's
+ * commit). Its owner, budget, records and cursor stay; its owner is welcomed with the new
+ * character before the answer to their next message (the relay finds the change at its start).
+ */
+export async function relayRebind(
+  context: Context,
+  options: { bot: string; characterId: string; channel: ChannelKind | null },
+) {
+  const { io } = context;
+  const registry = openRegistry(context);
+  const record = registry.find(options.bot);
+  if (!record) throw new UsageError(unknownBot(options.bot, registry));
+  if (options.channel && options.channel !== record.kind)
+    throw new UsageError(otherChannel(record, options.channel));
+  const npcId = characterIdOf(options.characterId);
+  if (!npcId) throw new UsageError(characterBad(options.characterId, ''));
+  if (record.character?.npcId === npcId)
+    return void say(
+      io,
+      tr(
+        `bot ${record.name} 已经绑定${nameAndId(record.character)}，没有改动。`,
+        `The bot ${record.name} is bound to ${nameAndId(record.character)} already: nothing changed.`,
+        `El bot ${record.name} ya está vinculado a ${nameAndId(record.character)}: no se cambió nada.`,
+        `O bot ${record.name} já está vinculado a ${nameAndId(record.character)}: nada mudou.`,
+      ),
+    );
+  const holder = registry.byCharacter(npcId);
+  if (holder) throw new DuplicateCharacter(npcId, holder.name);
+  const setup = channelSetup(record.kind);
+  // Never under a running relay of this bot: it would go on as the old character.
+  const lock = acquireProcessLock(lockPath(record.lockName));
+  if ('heldBy' in lock)
+    throw new UsageError(
+      runningRefusal(
+        { pid: lock.heldBy, setup, bot: record.label, flag: '' },
+        `--bot ${record.name} --character`,
+      ),
+    );
+  try {
+    requireSignIn(context);
+    const character = await characterFor(context, npcId);
+    const bound = registry.rebind(record.key, character);
+    say(
+      io,
+      tr(
+        `已把 bot ${bound.name} 换绑到${nameAndId(character)}，下次启动 relay 时生效。`,
+        `Bound the bot ${bound.name} to ${nameAndId(character)}; it takes effect when the relay starts next.`,
+        `Se vinculó el bot ${bound.name} a ${nameAndId(character)}; se aplica la próxima vez que se inicie el relay.`,
+        `O bot ${bound.name} foi vinculado a ${nameAndId(character)}; vale a partir da próxima vez que o relay iniciar.`,
+      ),
+    );
+    const path = relayStatePath(context.account, bound.scope);
+    const state = existsSync(path)
+      ? new RelayState(path, bound.scope, context.account, bound.kind)
+      : null;
+    const owner = state?.data.owner;
+    const welcomed = state?.data.welcomed.some(
+      (item) => owner && item.owner === ownerKey(owner.userId) && item.npcId === npcId,
+    );
+    if (owner && !welcomed)
+      say(
+        io,
+        paint(
+          io,
+          'dim',
+          tr(
+            '主人发下一条消息时，会先收到这个角色的介绍。',
+            "The owner gets this character's introduction before the answer to their next message.",
+            'El dueño recibe la presentación de este personaje antes de la respuesta a su próximo mensaje.',
+            'O dono recebe a apresentação deste personagem antes da resposta à próxima mensagem.',
+          ),
+        ),
+      );
+  } finally {
+    lock.release();
+  }
 }
 
 export async function relay(context: Context, options: RelayCommandOptions) {
@@ -905,7 +1122,19 @@ export async function relay(context: Context, options: RelayCommandOptions) {
               `Ainda não pareado: execute ${setup.command} uma vez em um terminal para parear e depois instale o serviço em segundo plano.`,
             ),
       );
-    const plan = planFor(context, setup, options);
+    // --character binds a bot without one at the service's start; it never changes a bound one.
+    let serviceOptions = options;
+    if (record.character) {
+      if (options.characterId && characterIdOf(options.characterId) !== record.character.npcId)
+        warn(io, characterIgnored(record, record.character, options.characterId));
+      // Left out, so the service's log never repeats that warning.
+      serviceOptions = { ...options, characterId: '' };
+    } else if (options.characterId) {
+      const holder = registry.byCharacter(characterIdOf(options.characterId));
+      if (holder && holder.key !== record.key)
+        throw new DuplicateCharacter(holder.character!.npcId, holder.name);
+    } else warn(io, needsCharacter(record));
+    const plan = planFor(context, setup, serviceOptions);
     if (/[\\/](_npx|\.npm|tmp|temp)[\\/]/i.test(plan.content))
       warn(
         io,
@@ -988,7 +1217,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       warn(io, otherBotCredentials(setup, record));
       return;
     }
-    const bot = registry.refresh(record, {
+    let bot = registry.refresh(record, {
       stored: setup.storedBot(store.getSecret(secretName) ?? '') ?? {
         platformId: identity.id,
         scope: channel.scope,
@@ -1000,22 +1229,19 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     registry.bindAccount(credential.userId);
     // Its owner then had their start before the registry: never welcomed again.
     if (bot.welcomeBaseline) state.welcomedBefore(bot.welcomeBaseline);
-    // The character the bot talks as follows the relay's (the state file has the last one).
     const log = (line: string) => io.stderr.write(`${new Date().toISOString()} ${line}\n`);
-    const bindCharacter = () => {
-      const owner = state.data.owner;
+    // The registry's character is the one it talks as; --character binds one only when it has none.
+    if (options.characterId)
+      bot = await characterAtStart(context, registry, bot, options.characterId);
+    if (!bot.character) warn(io, needsCharacter(bot));
+    /** Registry writes the relay asks for: it goes on when one fails (logged), as before. */
+    const write = (change: () => void) => {
       try {
-        registry.bindCharacter(
-          bot.key,
-          state.data.character,
-          owner ? characterOwner(bot.kind, owner.userId) : '',
-        );
+        change();
       } catch (error) {
-        // The relay goes on: the registry catches up on the next start.
         log(error instanceof Error ? error.message : String(error));
       }
     };
-    bindCharacter();
     // Another person may pair now: their consent to spend starts over.
     if (options.pair) state.resetOwner();
     let pairing: PairingCode | null = null;
@@ -1087,7 +1313,13 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     const engine = new Relay(context.gateway, channel, state, {
       maxSpend: options.maxSpend,
       resetSpend: options.resetSpend,
-      characterId: options.characterId,
+      characterId: '',
+      boundCharacter: bot.character,
+      botName: bot.name,
+      characterOwners: {
+        get: (npcId) => registry.shownTo(npcId),
+        set: (npcId, owner) => write(() => registry.showedCharacter(npcId, owner)),
+      },
       pairing,
       onPairingCode: (code) => {
         say(
@@ -1116,7 +1348,9 @@ export async function relay(context: Context, options: RelayCommandOptions) {
       rerunCommand: setup.command,
       // QQ and WeChat relay in production only on a policy the server sent for them.
       requireServerPolicy: channel.kind !== 'telegram' && isProduction(context.env),
-      onCharacter: bindCharacter,
+      // The bound character's name as Yomi says it now.
+      onCharacter: (character) =>
+        write(() => character && registry.bindCharacter(bot.key, character, '')),
     });
     try {
       await engine.run(controller.signal);

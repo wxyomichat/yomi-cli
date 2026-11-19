@@ -10,7 +10,15 @@ import { withFileLockSync } from '../core/lock.js';
 import { sha256 } from '../core/state.js';
 import { CHANNEL_KINDS, type ChannelKind, channelSetup } from './channels/index.js';
 import type { StoredBot } from './channels/setup.js';
-import { ownerKey, type RelayCharacter, RelayState, relayStatePath } from './state.js';
+import {
+  characterOwner,
+  ownerKey,
+  type RelayCharacter,
+  RelayState,
+  relayStatePath,
+} from './state.js';
+
+export { characterOwner };
 
 /**
  * The bots of one Yomi account and environment on this computer, in
@@ -26,7 +34,14 @@ import { ownerKey, type RelayCharacter, RelayState, relayStatePath } from './sta
  *   channel's bot the one they belong to (`adopt`): the same bot is kept, another one replaces it.
  * - A run checks the stored credentials against the record: credentials of another bot (written
  *   by something that did not update the registry) are never run as this one.
- * - One character goes with one bot: a second bot set to it is registered without one.
+ * - Each bot talks as the one character of its record, set when it is added or with `yomi relay
+ *   --bot NAME --character ID` (`rebind`), never from the chat. One character goes with one bot: a
+ *   second bot set to it is refused (`DuplicateCharacter`), or registered without one when it is
+ *   taken over or adopted.
+ * - `characterOwners` remembers whom each character was last shown to (the owner a bot of it was
+ *   last paired, started or welcomed with), so a welcome after the character changed hands shows
+ *   its opening, never the earlier owner's latest reply. It outlives the bots: the conversation
+ *   stays on the account.
  *
  * Every change is a short read-modify-write under `locks/relay-registry-<hash>.lock` (`commit`),
  * checked again there (names, characters, limits). A registry that cannot be read is an error, never
@@ -77,7 +92,10 @@ export type BotRegistryFile = {
   /** Counts the changes to the file. */
   revision: number;
   bots: BotRecord[];
-  /** npcId → whom it was last bound for (`characterOwner`): never a chat user id itself. */
+  /**
+   * npcId → whom a bot of this computer last showed it to (`characterOwner`: the owner it was
+   * paired, started or welcomed with, or had when it was taken over): never a chat user id itself.
+   */
   characterOwners: Record<string, string>;
   /** When the channels' earlier credentials were first taken over. */
   migratedAt?: number;
@@ -95,10 +113,6 @@ export function registryPath(account: string, dir = configDir()): string {
 
 const lockPath = (account: string, dir: string) =>
   join(dir, 'locks', `relay-registry-${hashOf(account)}.lock`);
-
-/** Whom a character was bound for (`characterOwners`): the channel and the owner's hash. */
-export const characterOwner = (kind: ChannelKind, userId: number | string) =>
-  `${kind}:${ownerKey(userId)}`;
 
 const empty = (account: string): BotRegistryFile => ({
   version: 1,
@@ -156,44 +170,67 @@ function readRegistry(path: string, account: string): BotRegistryFile {
   } as BotRegistryFile;
 }
 
-/** What a registry may not hold: null when it is fine. */
-function problem(file: BotRegistryFile): string | null {
+/**
+ * A character already bound to another bot: a character goes with one bot only (one conversation
+ * per character on the account, and its replies could not be told apart).
+ */
+export class DuplicateCharacter extends UsageError {
+  constructor(
+    readonly npcId: string,
+    /** The name of the bot that has it. */
+    readonly holder: string,
+  ) {
+    super(
+      tr(
+        `角色 ${npcId} 已经绑在 bot "${holder}" 上：一个角色只能绑一个 bot。要把它给别的 bot，先给 ${holder} 换一个角色：yomi relay --bot ${holder} --character ID`,
+        `Character ${npcId} is already bound to the bot "${holder}": a character goes with one bot only. To give it to another bot, give ${holder} another character first: yomi relay --bot ${holder} --character ID`,
+        `El personaje ${npcId} ya está vinculado al bot "${holder}": un personaje va con un solo bot. Para dárselo a otro bot, primero dale otro personaje a ${holder}: yomi relay --bot ${holder} --character ID`,
+        `O personagem ${npcId} já está vinculado ao bot "${holder}": um personagem fica com um bot só. Para dá-lo a outro bot, primeiro dê outro personagem a ${holder}: yomi relay --bot ${holder} --character ID`,
+      ),
+    );
+    this.name = 'DuplicateCharacter';
+  }
+}
+
+/** What a registry may not hold (a UsageError to throw): null when it is fine. */
+function problem(file: BotRegistryFile): UsageError | null {
+  const refuse = (message: string) => new UsageError(message);
   if (file.bots.length > MAX_BOTS)
-    return tr(
-      `bot 太多了：这台电脑上最多登记 ${MAX_BOTS} 个。`,
-      `Too many bots: at most ${MAX_BOTS} can be registered on this computer.`,
-      `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS} en este equipo.`,
-      `Bots demais: no máximo ${MAX_BOTS} podem ser registrados neste computador.`,
+    return refuse(
+      tr(
+        `bot 太多了：这台电脑上最多登记 ${MAX_BOTS} 个。`,
+        `Too many bots: at most ${MAX_BOTS} can be registered on this computer.`,
+        `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS} en este equipo.`,
+        `Bots demais: no máximo ${MAX_BOTS} podem ser registrados neste computador.`,
+      ),
     );
   for (const kind of CHANNEL_KINDS)
     if (file.bots.filter((record) => record.kind === kind).length > MAX_BOTS_PER_KIND)
-      return tr(
-        `bot 太多了：每个通道最多登记 ${MAX_BOTS_PER_KIND} 个。`,
-        `Too many bots: at most ${MAX_BOTS_PER_KIND} per channel can be registered.`,
-        `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS_PER_KIND} por canal.`,
-        `Bots demais: no máximo ${MAX_BOTS_PER_KIND} por canal podem ser registrados.`,
+      return refuse(
+        tr(
+          `bot 太多了：每个通道最多登记 ${MAX_BOTS_PER_KIND} 个。`,
+          `Too many bots: at most ${MAX_BOTS_PER_KIND} per channel can be registered.`,
+          `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS_PER_KIND} por canal.`,
+          `Bots demais: no máximo ${MAX_BOTS_PER_KIND} por canal podem ser registrados.`,
+        ),
       );
   const names = new Set<string>();
   const characters = new Map<string, string>();
   for (const record of file.bots) {
     if (!NAME.test(record.name) || names.has(record.name))
-      return tr(
-        `bot 名字 "${record.name}" 不能用：要用小写字母、数字、- 或 _，最多 32 个字符，不能和别的 bot 重名。`,
-        `The bot name "${record.name}" cannot be used: use lowercase letters, digits, - or _, at most 32 characters, unlike any other bot's.`,
-        `El nombre de bot "${record.name}" no se puede usar: usa letras minúsculas, dígitos, - o _, como máximo 32 caracteres, distinto del de cualquier otro bot.`,
-        `O nome de bot "${record.name}" não pode ser usado: use letras minúsculas, dígitos, - ou _, no máximo 32 caracteres, diferente do de qualquer outro bot.`,
+      return refuse(
+        tr(
+          `bot 名字 "${record.name}" 不能用：要用小写字母、数字、- 或 _，最多 32 个字符，不能和别的 bot 重名。`,
+          `The bot name "${record.name}" cannot be used: use lowercase letters, digits, - or _, at most 32 characters, unlike any other bot's.`,
+          `El nombre de bot "${record.name}" no se puede usar: usa letras minúsculas, dígitos, - o _, como máximo 32 caracteres, distinto del de cualquier otro bot.`,
+          `O nome de bot "${record.name}" não pode ser usado: use letras minúsculas, dígitos, - ou _, no máximo 32 caracteres, diferente do de qualquer outro bot.`,
+        ),
       );
     names.add(record.name);
     const npcId = record.character?.npcId;
     if (!npcId) continue;
     const other = characters.get(npcId);
-    if (other !== undefined)
-      return tr(
-        `角色 ${npcId} 已经绑在 bot "${other}" 上：一个角色只能绑一个 bot。`,
-        `Character ${npcId} is already bound to the bot "${other}": a character goes with one bot only.`,
-        `El personaje ${npcId} ya está vinculado al bot "${other}": un personaje va con un solo bot.`,
-        `O personagem ${npcId} já está vinculado ao bot "${other}": um personagem fica com um bot só.`,
-      );
+    if (other !== undefined) return new DuplicateCharacter(npcId, other);
     characters.set(npcId, record.name);
   }
   return null;
@@ -329,7 +366,8 @@ export class BotRegistry {
   /**
    * Changes the registry: `change` gets the file as it is on disk now (read again under the lock)
    * and returns false when it changed nothing (nothing is written). The result is checked
-   * (names, characters, limits: a UsageError) before it is written with the next revision.
+   * (names, limits: a UsageError; characters: `DuplicateCharacter`) before it is written with the
+   * next revision.
    */
   commit(change: (file: BotRegistryFile) => boolean | void): void {
     withFileLockSync(lockPath(this.account, this.dir), () => {
@@ -339,7 +377,7 @@ export class BotRegistry {
         return;
       }
       const refusal = problem(file);
-      if (refusal) throw new UsageError(refusal);
+      if (refusal) throw refusal;
       file.revision += 1;
       writeJsonFile(this.path, file);
       this.data = file;
@@ -403,9 +441,55 @@ export class BotRegistry {
   }
 
   /**
+   * The bot `key` talks as `character` from now on (`yomi relay --bot NAME --character ID`, or a
+   * run's `--character` for a bot without one): its `boundAt` and `generation` move on. A
+   * character another bot has is refused (`DuplicateCharacter`, checked again under the lock), and
+   * so is a bot that is gone. Returns the record.
+   */
+  rebind(key: string, character: RelayCharacter, now = Date.now()): BotRecord {
+    let updated: BotRecord | undefined;
+    this.commit((file) => {
+      const record = file.bots.find((item) => item.key === key);
+      if (!record) throw new UsageError(gone());
+      // Named before the record changes: the bot that has it, wherever it is in the file.
+      const holder = file.bots.find(
+        (other) => other.key !== key && other.character?.npcId === character.npcId,
+      );
+      if (holder) throw new DuplicateCharacter(character.npcId, holder.name);
+      record.character = character;
+      record.boundAt = now;
+      record.generation += 1;
+      updated = record;
+    });
+    return updated!;
+  }
+
+  /**
+   * Whom `npcId` was shown to last (a `characterOwner`), as the file says now; undefined: nobody.
+   * A registry that cannot be read says '?': someone, so the welcome shows nobody's conversation.
+   */
+  shownTo(npcId: string): string | undefined {
+    try {
+      this.commit(() => false);
+    } catch {
+      return '?';
+    }
+    return this.data.characterOwners[npcId];
+  }
+
+  /** `owner` (a `characterOwner`) was shown `npcId` last: paired, started or welcomed with it. */
+  showedCharacter(npcId: string, owner: string) {
+    if (this.data.characterOwners[npcId] === owner) return;
+    this.commit((file) => {
+      if (file.characterOwners[npcId] === owner) return false;
+      file.characterOwners[npcId] = owner;
+    });
+  }
+
+  /**
    * The bot's character is now `character` (null: none), for the owner `owner` (a
    * `characterOwner`, '' when none). Another bot's character is not taken: the bot is left
-   * without one.
+   * without one. The same character under a new name (or group) is only renamed.
    */
   bindCharacter(key: string, character: RelayCharacter | null, owner: string, now = Date.now()) {
     this.commit((file) => {
@@ -422,8 +506,9 @@ export class BotRegistry {
       const ownerChanged = Boolean(next && owner && file.characterOwners[next.npcId] !== owner);
       if (same && !ownerChanged) return false;
       if (!same) {
+        const renamed = Boolean(next && record.character?.npcId === next.npcId);
         record.character = next;
-        record.boundAt = next ? now : 0;
+        if (!renamed) record.boundAt = next ? now : 0;
       }
       if (next && owner) file.characterOwners[next.npcId] = owner;
     });
@@ -451,6 +536,16 @@ export class BotRegistry {
     });
     return removed;
   }
+}
+
+/** A bot changed while this command ran (removed or replaced by another one). */
+function gone(): string {
+  return tr(
+    '这个 bot 刚刚被删除或换掉了：用 yomi relay --list 看看现在的 bot。',
+    'This bot was just removed or replaced: see the bots now with yomi relay --list.',
+    'Este bot se acaba de eliminar o reemplazar: mira los bots actuales con yomi relay --list.',
+    'Este bot acabou de ser removido ou substituído: veja os bots atuais com yomi relay --list.',
+  );
 }
 
 const sameNpc = (record: BotRecord, other: BotRecord) =>

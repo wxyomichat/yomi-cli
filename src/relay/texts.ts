@@ -42,12 +42,17 @@ const zh = {
     `你正在与 AI 角色「${name}」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。`,
   paired: (bot: string) =>
     `已配对：这个 bot 现在只为你转发消息。用 /character 选择角色，/help 查看命令。（${bot}）`,
+  /** A bot bound to one character (the bot registry): nothing to pick in the chat. */
+  pairedBound: (bot: string) => `已配对：这个 bot 现在只为你转发消息，/help 查看命令。（${bot}）`,
   badCode: '配对码不对或已过期，请看电脑终端上显示的配对码。',
-  /** `quotes`: the chat can answer a message (Telegram), so /image can name one. */
-  help: (quotes: boolean) =>
+  /**
+   * `quotes`: the chat can answer a message (Telegram), so /image can name one. `bound`: the bot
+   * talks as one character, so there is no /character.
+   */
+  help: (quotes: boolean, bound = false) =>
     [
       '直接发文字，就会转给当前角色。',
-      '/character [ID] 查看或切换角色',
+      ...(bound ? [] : ['/character [ID] 查看或切换角色']),
       '/price 每条回复的价格、余额和预算',
       '/budget [数量|none|off] 可选的钻石上限（默认不设上限，按 Yomi 的正常规则扣费；off：只用免费额度）',
       `/image 根据最近一条回复生成一张图片${quotes ? '（回复角色的某条消息再发，则根据那一条）' : ''}`,
@@ -55,6 +60,12 @@ const zh = {
       '/stop 停止转发当前回复（不退费）',
     ].join('\n'),
   noCharacter: '还没有选择角色：发送 /character 加角色 ID。',
+  /** `/character` in a bot bound to `name`; `command` binds it to another one on the computer. */
+  characterFixed: (name: string, command: string) =>
+    `这个 bot 固定和「${name}」聊天，不能在聊天里换角色。要换，在电脑上运行：${command}`,
+  /** Any message to a bot bound to no character yet. */
+  needsCharacter: (command: string) =>
+    `这个 bot 还没有绑定角色，消息没有转发，也没有扣费。在电脑上运行：${command}`,
   characterIs: (name: string, id: string) => `当前角色：${name}（ID ${id}）`,
   characterSet: (name: string) => `已切换到「${name}」。`,
   characterBad: '没有找到这个角色，或它暂时不能聊天。',
@@ -144,6 +155,9 @@ const zh = {
     `发送太快了${seconds ? `，请 ${seconds} 秒后再试` : '，请稍后再试'}。`,
   ageGate: '这个账号暂时不能和该角色在这里聊天（年龄验证或内容分级限制）。',
   unavailable: '这个角色暂时不可用，请换一个角色。',
+  /** `unavailable` in a bot bound to `name`: it is changed on the computer, with `command`. */
+  boundUnavailable: (name: string, command: string) =>
+    `「${name}」暂时不可用。这个 bot 不能在聊天里换角色；要换，在电脑上运行：${command}`,
   disabled: (detail: string) => `relay 已被服务端关闭${detail ? `：${detail}` : ''}。`,
   tooOld: '这个版本的 yomi 太旧了，relay 已暂停。请在电脑上升级 yomi 后重新启动。',
   refused: (detail: string) => `发送失败${detail ? `：${detail}` : ''}。`,
@@ -262,11 +276,13 @@ const en: RelayTexts = {
     `You are chatting with the AI character "${name}": replies are AI-generated, not a person. Companion chatbots may not be suitable for some minors.`,
   paired: (bot) =>
     `Paired: this bot now relays your messages only. Pick a character with /character; /help lists commands. (${bot})`,
+  pairedBound: (bot) =>
+    `Paired: this bot now relays your messages only; /help lists commands. (${bot})`,
   badCode: 'That pairing code is wrong or expired. Use the code shown in your terminal.',
-  help: (quotes) =>
+  help: (quotes, bound = false) =>
     [
       'Send text and it goes to the current character.',
-      '/character [ID] show or switch the character',
+      ...(bound ? [] : ['/character [ID] show or switch the character']),
       '/price price per reply, balance and budget',
       '/budget [amount|none|off] optional gem cap (default: none, Yomi charges by its normal rules; off: free replies only)',
       `/image make a picture of the last reply${quotes ? ' (or of the reply you answer with it)' : ''}`,
@@ -274,6 +290,10 @@ const en: RelayTexts = {
       '/stop stop relaying the current reply (no refund)',
     ].join('\n'),
   noCharacter: 'No character yet: send /character with a character ID.',
+  characterFixed: (name, command) =>
+    `This bot always chats with "${name}": the character can't be changed in the chat. To change it, run this on your computer: ${command}`,
+  needsCharacter: (command) =>
+    `This bot has no character yet, so nothing was forwarded and nothing was charged. Run this on your computer: ${command}`,
   characterIs: (name, id) => `Current character: ${name} (ID ${id})`,
   characterSet: (name) => `Switched to "${name}".`,
   characterBad: 'That character was not found or cannot chat right now.',
@@ -372,6 +392,8 @@ const en: RelayTexts = {
     `Too fast${seconds ? `; try again in ${seconds} seconds` : '; try again shortly'}.`,
   ageGate: "This account can't chat with that character here (age verification or content rating).",
   unavailable: 'That character is unavailable right now; pick another one.',
+  boundUnavailable: (name, command) =>
+    `"${name}" is unavailable right now. This bot can't change its character in the chat; to change it, run this on your computer: ${command}`,
   disabled: (detail) => `The server has switched relays off${detail ? `: ${detail}` : ''}.`,
   tooOld:
     'This version of yomi is too old; the relay is paused. Upgrade yomi on your computer and restart it.',
@@ -487,12 +509,14 @@ const es: RelayTexts = {
     `Estás chateando con el personaje de IA "${name}": las respuestas las genera una IA, no una persona. Los chatbots de compañía pueden no ser adecuados para algunos menores de edad.`,
   paired: (bot) =>
     `Vinculado: este bot ahora solo transmite tus mensajes. Elige un personaje con /character; /help muestra los comandos. (${bot})`,
+  pairedBound: (bot) =>
+    `Vinculado: este bot ahora solo transmite tus mensajes; /help muestra los comandos. (${bot})`,
   badCode:
     'Ese código de vinculación es incorrecto o expiró. Usa el código que aparece en tu terminal.',
-  help: (quotes) =>
+  help: (quotes, bound = false) =>
     [
       'Envía texto y llegará al personaje actual.',
-      '/character [ID] ver o cambiar el personaje',
+      ...(bound ? [] : ['/character [ID] ver o cambiar el personaje']),
       '/price precio por respuesta, saldo y presupuesto',
       '/budget [cantidad|none|off] límite opcional de gemas (por defecto: ninguno, Yomi cobra según sus reglas habituales; off: solo respuestas gratis)',
       `/image generar una imagen de la última respuesta${quotes ? ' (o de la respuesta a la que contestes con este comando)' : ''}`,
@@ -500,6 +524,10 @@ const es: RelayTexts = {
       '/stop dejar de transmitir la respuesta actual (sin reembolso)',
     ].join('\n'),
   noCharacter: 'Aún no hay personaje: envía /character con el ID de un personaje.',
+  characterFixed: (name, command) =>
+    `Este bot siempre chatea con "${name}": el personaje no se puede cambiar en el chat. Para cambiarlo, ejecuta esto en tu equipo: ${command}`,
+  needsCharacter: (command) =>
+    `Este bot todavía no tiene personaje, así que no se reenvió nada ni se cobró nada. Ejecuta esto en tu equipo: ${command}`,
   characterIs: (name, id) => `Personaje actual: ${name} (ID ${id})`,
   characterSet: (name) => `Cambiaste a "${name}".`,
   characterBad: 'No se encontró ese personaje o no puede chatear ahora.',
@@ -601,6 +629,8 @@ const es: RelayTexts = {
   ageGate:
     'Esta cuenta no puede chatear con ese personaje aquí (verificación de edad o clasificación de contenido).',
   unavailable: 'Ese personaje no está disponible en este momento; elige otro.',
+  boundUnavailable: (name, command) =>
+    `"${name}" no está disponible en este momento. Este bot no puede cambiar de personaje en el chat; para cambiarlo, ejecuta esto en tu equipo: ${command}`,
   disabled: (detail) => `El servidor desactivó el relay${detail ? `: ${detail}` : ''}.`,
   tooOld:
     'Esta versión de yomi es demasiado antigua; el relay está en pausa. Actualiza yomi en tu computadora y reinícialo.',
@@ -718,12 +748,14 @@ const pt: RelayTexts = {
     `Você está conversando com o personagem de IA "${name}": as respostas são geradas por IA, não por uma pessoa. Chatbots de companhia podem não ser adequados para alguns menores de idade.`,
   paired: (bot) =>
     `Pareado: este bot agora só encaminha as suas mensagens. Escolha um personagem com /character; /help lista os comandos. (${bot})`,
+  pairedBound: (bot) =>
+    `Pareado: este bot agora só encaminha as suas mensagens; /help lista os comandos. (${bot})`,
   badCode:
     'Esse código de pareamento está errado ou expirou. Use o código mostrado no seu terminal.',
-  help: (quotes) =>
+  help: (quotes, bound = false) =>
     [
       'Envie texto e ele vai para o personagem atual.',
-      '/character [ID] ver ou trocar o personagem',
+      ...(bound ? [] : ['/character [ID] ver ou trocar o personagem']),
       '/price preço por resposta, saldo e orçamento',
       '/budget [quantidade|none|off] limite opcional de gemas (padrão: nenhum, o Yomi cobra pelas regras normais; off: só respostas grátis)',
       `/image gerar uma imagem da última resposta${quotes ? ' (ou da resposta à qual você responder com este comando)' : ''}`,
@@ -731,6 +763,10 @@ const pt: RelayTexts = {
       '/stop parar de encaminhar a resposta atual (sem reembolso)',
     ].join('\n'),
   noCharacter: 'Ainda não há personagem: envie /character com o ID de um personagem.',
+  characterFixed: (name, command) =>
+    `Este bot sempre conversa com "${name}": o personagem não pode ser trocado no chat. Para trocar, execute isto no seu computador: ${command}`,
+  needsCharacter: (command) =>
+    `Este bot ainda não tem personagem, então nada foi encaminhado nem cobrado. Execute isto no seu computador: ${command}`,
   characterIs: (name, id) => `Personagem atual: ${name} (ID ${id})`,
   characterSet: (name) => `Você trocou para "${name}".`,
   characterBad: 'Esse personagem não foi encontrado ou não pode conversar agora.',
@@ -830,6 +866,8 @@ const pt: RelayTexts = {
   ageGate:
     'Esta conta não pode conversar com esse personagem aqui (verificação de idade ou classificação de conteúdo).',
   unavailable: 'Esse personagem não está disponível agora; escolha outro.',
+  boundUnavailable: (name, command) =>
+    `"${name}" não está disponível agora. Este bot não pode trocar de personagem no chat; para trocar, execute isto no seu computador: ${command}`,
   disabled: (detail) => `O servidor desativou o relay${detail ? `: ${detail}` : ''}.`,
   tooOld:
     'Esta versão do yomi é antiga demais; o relay está pausado. Atualize o yomi no seu computador e reinicie-o.',
@@ -949,12 +987,19 @@ export function relayTexts(language: string): RelayTexts {
   return en;
 }
 
-/** The bot's command menu for a language, as relayTexts picks. */
-export function relayCommands(language: string) {
-  if (/^zh/i.test(language)) return COMMANDS.zh;
-  if (/^es/i.test(language)) return COMMANDS.es;
-  if (/^pt/i.test(language)) return COMMANDS.pt;
-  return COMMANDS.en;
+/**
+ * The bot's command menu for a language, as relayTexts picks; `bound`: the bot talks as one
+ * character, so there is no /character.
+ */
+export function relayCommands(language: string, bound = false) {
+  const table = /^zh/i.test(language)
+    ? COMMANDS.zh
+    : /^es/i.test(language)
+      ? COMMANDS.es
+      : /^pt/i.test(language)
+        ? COMMANDS.pt
+        : COMMANDS.en;
+  return bound ? table.filter((item) => item.command !== 'character') : table;
 }
 
 export const COMMANDS = {

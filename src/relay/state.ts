@@ -14,9 +14,10 @@ import type { ChannelKind, ChannelStore } from './channels/types.js';
  * secret on its own: useless without the bot_token in the keychain). Plus a short map from the
  * chat's messages to Yomi message ids for `/report`.
  *
- * The welcome (`bindOwner`, `markWelcomed`) remembers whom this bot welcomed, by a hash of the user
- * id (never the id itself) and the character it was given with, so a re-pairing or re-login by the
- * same owner and a restart never repeat it; `resetOwner` keeps that list.
+ * The welcome (`bindOwner`, `characterBound`, `markWelcomed`) remembers whom this bot welcomed, by
+ * a hash of the user id (never the id itself) and the character it was given with, so a re-pairing
+ * or re-login by the same owner and a restart never repeat it; `resetOwner` keeps that list. A bot
+ * bound to one character (the bot registry) owes it again when it is bound to another one.
  *
  * Money state is bound to who agreed to it: the in-chat budget (optional: none by default, and Yomi
  * charges by its normal rules) belongs to the paired owner and the Yomi account (`bindAccount`,
@@ -138,6 +139,13 @@ const MAX_WELCOMED = 20;
 
 /** How an owner is kept in the welcome's records: never the chat user id itself. */
 export const ownerKey = (userId: number | string) => sha256(String(userId)).slice(0, 16);
+
+/**
+ * Whom a character was shown to through a bot of this computer (the bot registry's
+ * `characterOwners`): the channel and the owner's hash, never a chat user id itself.
+ */
+export const characterOwner = (kind: ChannelKind, userId: number | string) =>
+  `${kind}:${ownerKey(userId)}`;
 
 /**
  * Before budgets were optional, `free` with `setAt` 0 was the default nobody chose: it becomes
@@ -317,12 +325,31 @@ export class RelayState {
 
   /**
    * The bot is bound to `owner` (a pairing in the chat, WeChat's login): owed the welcome unless
-   * this bot welcomed them before. The only place that rule lives.
+   * this bot welcomed them before (with `npcId` when given: the character the bot is bound to).
+   * With `characterBound`, the only place that rule lives.
    */
-  bindOwner(owner: RelayOwner) {
+  bindOwner(owner: RelayOwner, npcId?: string) {
     const key = ownerKey(owner.userId);
-    const welcomed = this.data.welcomed.some((record) => record.owner === key);
-    this.update({ owner, welcomeDue: welcomed ? '' : key });
+    this.update({ owner, welcomeDue: this.welcomedWith(key, npcId) ? '' : key });
+  }
+
+  /**
+   * The bot is bound to the character `npcId` now (the bot registry), another than before: its
+   * owner is owed the welcome with it, unless this bot welcomed them with it last.
+   */
+  characterBound(npcId: string) {
+    const owner = this.data.owner;
+    if (!owner) return;
+    const key = ownerKey(owner.userId);
+    // Bound back to the character they were welcomed with last: one owed for another is dropped.
+    this.update({ welcomeDue: this.welcomedWith(key, npcId) ? '' : key });
+  }
+
+  /** Whether `owner` was welcomed here: with `npcId` when given, else with any character. */
+  private welcomedWith(owner: string, npcId?: string): boolean {
+    return this.data.welcomed.some(
+      (record) => record.owner === owner && (npcId === undefined || record.npcId === npcId),
+    );
   }
 
   /** The bound owner is owed the welcome. */
