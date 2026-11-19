@@ -72,6 +72,17 @@ async function signIn() {
 const texts = (chatId: number) => tg.messages(chatId).map((message) => message.text);
 const said = (chatId: number, pattern: RegExp) =>
   tg.waitFor(() => tg.messages(chatId).find((message) => pattern.test(message.text)), 8000);
+/** Like `said`, for an answer sent after this call: one an earlier test got does not count. */
+const saidNext = (chatId: number, pattern: RegExp) => {
+  const seen = new Set(tg.messages(chatId).map((message) => message.message_id));
+  return tg.waitFor(
+    () =>
+      tg
+        .messages(chatId)
+        .find((message) => !seen.has(message.message_id) && pattern.test(message.text)),
+    8000,
+  );
+};
 const sends = () =>
   mock.state.requests.filter((request) => request.path === 'conversation/send_message');
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -433,13 +444,15 @@ describe('the relay', () => {
     expect(sends().length).toBe(before);
     await stop();
     await start({ maxSpend: 0 });
+    // Earlier tests left the same answers in the chat: wait for this relay's own, or the stop
+    // below comes before it read the message and the next relay (another limit) answers it.
     tg.userSends(owner, '不许花了');
-    await said(owner.id, /预算已用完/);
+    await saidNext(owner.id, /预算已用完/);
     expect(sends().length).toBe(before);
     await stop();
     await start();
     tg.userSends(owner, '/budget off');
-    await said(owner.id, /改回只用免费额度/);
+    await saidNext(owner.id, /改回只用免费额度/);
     mock.state.chatFreeLimit = 1000;
   });
 
