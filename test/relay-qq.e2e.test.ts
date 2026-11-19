@@ -1,58 +1,863 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { main } from '../src/cli.js';
+import { createContext } from '../src/commands/context.js';
+import { ParagraphType } from '../src/im/models.js';
+import { chatImageStore, type MockChatImage } from '../src/mock/gen/chatImage.js';
+import { solidPngBytes } from '../src/mock/gen/png.js';
+import { type MockQq, startMockQq } from '../src/mock/qq.js';
+import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
+import { QqChannel, type QqChannelOptions } from '../src/relay/channels/qq.js';
+import { type ChannelHost, type InboundEvent, RelayStopped } from '../src/relay/channels/types.js';
+import { Relay, type RelayOptions } from '../src/relay/relay.js';
+import { RelayState, relayStatePath } from '../src/relay/state.js';
+import { relayTexts } from '../src/relay/texts.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
- * `yomi relay --channel qq` while QQ is a stub (design step A5). Owned by the QQ work (§7.2): it
- * replaces this file with the channel's end-to-end tests against the mock QQ.
+ * `yomi relay --channel qq` end to end, against the mock gateway (src/mock/server.ts) and the mock
+ * QQ (src/mock/qq.ts: token, REST, WebSocket gateway): `--set-app`, pairing with `/pair`, a
+ * streamed reply, passive replies within their window and count, active messages and the queue,
+ * `/budget` answered with a typed code (also after a restart), `/image`, content refusals, a bot
+ * without the private-chat intent, and a Resume after a restart that relays nothing twice; then
+ * the presenter on its own (recall when the stream diverged, the first message's length, QQ's
+ * stream rate limit). Nothing reaches the network.
  */
 
+let mock: MockServer;
+let qq: MockQq;
+let dir: string;
 const saved: Record<string, string | undefined> = {};
+const OWNER = 'OPENID_OWNER_E2E';
+const STRANGER = 'OPENID_STRANGER_E2E';
+const npc = MOCK_NPCS.single;
+const NOTICE =
+  '你正在与 AI 角色「林夏」聊天：回复由 AI 生成，不是真人。陪伴类聊天机器人可能不适合部分未成年人。';
+const NARRATION = '（她合上书，看着你。）';
 
-beforeAll(() => {
-  const values = {
-    YOMI_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'yomi-relay-qq-')),
-    YOMI_CREDENTIAL_STORE: 'file',
-    NO_COLOR: '1',
-  };
+function setEnv(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
-    saved[key] = process.env[key];
+    if (!(key in saved)) saved[key] = process.env[key];
     process.env[key] = value;
   }
+}
+
+async function run(args: string[], options: Parameters<typeof memoryIo>[0] = {}) {
+  process.exitCode = undefined;
+  const terminal = memoryIo(options);
+  const code = await main(args, terminal.io);
+  return { code, out: terminal.out, err: terminal.err };
+}
+
+/** The web authorize page's part of `yomi login`, as the other e2e tests do it. */
+async function signIn() {
+  const terminal = memoryIo();
+  const pending = main(['login', '--no-browser', '--timeout', '20'], terminal.io);
+  const [url] = await terminal.waitFor(/http:\/\/127\.0\.0\.1:\d+\/cli\/auth#\S+/);
+  const link = new URL(url);
+  const params = new URLSearchParams(link.hash.slice(1));
+  const page = await (await fetch(link.origin + link.pathname)).text();
+  const form = [...page.matchAll(/<form method="POST" data-kind="(\w+)">([\s\S]*?)<\/form>/g)].find(
+    (match) => match[1] === 'authorize',
+  )!;
+  const fields = Object.fromEntries(
+    [...form[2].matchAll(/name="([^"]+)" value="([^"]*)"/g)].map((match) => [match[1], match[2]]),
+  );
+  fields.state = params.get('state') ?? '';
+  await fetch(`http://127.0.0.1:${params.get('port')}/callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: mock.origin },
+    body: new URLSearchParams(fields).toString(),
+  });
+  expect(await pending).toBe(0);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sends = () =>
+  mock.state.requests.filter((request) => request.path === 'conversation/send_message');
+const shown = (openid = OWNER) => qq.messages(openid).filter((message) => !message.recalled);
+const said = (pattern: RegExp, openid = OWNER) =>
+  qq.waitFor(() => shown(openid).find((message) => pattern.test(message.text)), 10_000);
+/** Waits for one more message matching `pattern`; call before sending. */
+function expectNew(pattern: RegExp, openid = OWNER) {
+  const matching = () => shown(openid).filter((message) => pattern.test(message.text));
+  const before = matching().length;
+  return () => qq.waitFor(() => matching().length > before && matching().at(-1), 10_000);
+}
+/** The finished reply streamed to the message `id`. */
+const streamed = (id: string) =>
+  qq.waitFor(
+    () =>
+      qq
+        .messages(OWNER)
+        .find((message) => message.kind === 'stream' && message.replyTo === id && message.done),
+    15_000,
+  );
+
+const running: (() => Promise<unknown>)[] = [];
+
+/** A relay on a QQ channel with short timings, paired with OWNER unless `unpaired`. */
+async function start(
+  channelOptions: Partial<QqChannelOptions> = {},
+  relayOptions: Partial<RelayOptions> = {},
+  { fresh = true, unpaired = false, origin = qq } = {},
+) {
+  const context = createContext(memoryIo().io, {}, { client: 'relay-qq', channel: 'cli_relay' });
+  const channel = new QqChannel({
+    appId: origin.appId,
+    secret: origin.secret,
+    apiOrigin: origin.origin,
+    streamIntervalMs: 100,
+    retryDelayMs: 50,
+    backgroundFlushMs: 50,
+    closeWaitMs: 1000,
+    gateway: {
+      backoffMinMs: 50,
+      backoffMaxMs: 200,
+      identifyIntervalMs: 0,
+      invalidSessionDelayMs: () => 50,
+    },
+    ...channelOptions,
+  });
+  const path = relayStatePath(context.account, channel.scope);
+  if (fresh) rmSync(path, { force: true });
+  const state = new RelayState(path, channel.scope, context.account, 'qq');
+  if (!unpaired && !state.data.owner)
+    state.update({
+      owner: { userId: OWNER, chatId: OWNER, name: '', language: '', pairedAt: Date.now() },
+    });
+  const logs: string[] = [];
+  const relay = new Relay(context.gateway, channel, state, {
+    maxSpend: 50,
+    characterId: npc,
+    pairing: null,
+    replyTimeoutMs: 5000,
+    intervalMs: 30,
+    staleMs: 10 * 60 * 1000,
+    pollTimeoutSeconds: 1,
+    drafts: true,
+    language: 'zh-Hans',
+    log: (line) => logs.push(line),
+    resumeCheckMs: 100,
+    ...relayOptions,
+  });
+  const controller = new AbortController();
+  const connections = origin.identifies + origin.resumes;
+  const sockets = mock.state.sockets;
+  const done = relay.run(controller.signal).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  const stop = () => {
+    controller.abort();
+    return done;
+  };
+  running.push(stop);
+  await origin.waitFor(
+    () => origin.identifies + origin.resumes > connections && mock.state.sockets > sockets,
+  );
+  // Let READY (or RESUMED) reach the channel.
+  await sleep(50);
+  return { relay, state, logs, channel, stop, done, path };
+}
+
+/** The owner chats: forwarded, and the streamed reply finished before this returns. */
+async function chatted(text: string) {
+  const before = sends().length;
+  const id = qq.userSends(OWNER, text);
+  await qq.waitFor(() => sends().length > before, 10_000);
+  expect(sends().at(-1)!.body.text).toBe(text);
+  return { id, reply: await streamed(id) };
+}
+
+beforeAll(async () => {
+  mock = await startMockServer();
+  qq = await startMockQq({ botName: 'Lin QQ bot' });
+  dir = mkdtempSync(join(tmpdir(), 'yomi-relay-qq-'));
+  setEnv({
+    YOMI_API_ORIGIN: mock.origin,
+    YOMI_WEB_ORIGIN: mock.origin,
+    YOMI_QQ_API_ORIGIN: qq.origin,
+    YOMI_CONFIG_DIR: dir,
+    YOMI_CREDENTIAL_STORE: 'file',
+    YOMI_LANG: 'zh-Hans',
+    NO_COLOR: '1',
+  });
+  mock.state.relayPolicy = { enabled: true, features: { free_only: true, spend_cap: true } };
+  mock.state.chatFreeLimit = 1000;
+  mock.state.gems = 500;
+  await signIn();
 });
 
-afterAll(() => {
+afterEach(async () => {
+  for (const stop of running.splice(0)) await stop();
+  // A failure a test set up and did not use must not hit the next test.
+  qq.clearFailures();
+});
+
+afterAll(async () => {
+  await qq.shutdown();
+  await mock.close();
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
 });
 
-describe('the QQ stub', () => {
-  it('says QQ is not available yet, in each language, before the keychain and sign-in', async () => {
-    const expected = {
-      zh: 'QQ 通道还在开发中，暂时不能使用',
-      en: 'The QQ channel is not available yet',
-      es: 'El canal de QQ todavía no está disponible',
-      pt: 'O canal do QQ ainda não está disponível',
+describe('yomi relay --channel qq', () => {
+  it('saves the AppID and AppSecret from stdin after checking them and the private-chat permission', async () => {
+    const identifies = qq.identifies;
+    const saved = await run(
+      ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+      { input: [qq.appId, qq.secret] },
+    );
+    expect(saved.code).toBe(0);
+    expect(saved.out).toContain('已保存 QQ bot Lin QQ bot 的 AppID 和 AppSecret');
+    expect(saved.out).toContain('接下来在 QQ 里加这个 bot 为好友');
+    expect(saved.err).not.toContain('单聊');
+    expect(saved.out + saved.err).not.toContain(qq.secret);
+    // The gateway was tried once with the private-chat intent.
+    expect(qq.identifies).toBe(identifies + 1);
+    const stored = readFileSync(join(dir, 'secrets.json'), 'utf8');
+    expect(stored).toContain(`qq-bot:`);
+    expect(stored).toContain(qq.appId);
+
+    const wrong = await run(
+      ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+      { input: [qq.appId, 'not-the-secret-1234'] },
+    );
+    expect(wrong.code).toBe(1);
+    expect(wrong.err).toContain('QQ 不接受这个 AppID/AppSecret');
+    expect(readFileSync(join(dir, 'secrets.json'), 'utf8')).not.toContain('not-the-secret');
+    const badId = await run(
+      ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+      { input: ['12ab', qq.secret] },
+    );
+    expect(badId.code).toBe(1);
+    expect(badId.err).toContain('这不像是 QQ 机器人的 AppID');
+
+    // A bot without the private-chat intent: saved, with a warning.
+    const closed = await startMockQq({ c2c: false, appId: '102000077' });
+    try {
+      setEnv({ YOMI_QQ_API_ORIGIN: closed.origin });
+      const warned = await run(
+        ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+        { input: [closed.appId, closed.secret] },
+      );
+      expect(warned.code).toBe(0);
+      expect(warned.err).toContain('这个 bot 还没有私聊（单聊）消息事件的权限');
+    } finally {
+      setEnv({ YOMI_QQ_API_ORIGIN: qq.origin });
+      await closed.shutdown();
+    }
+    const again = await run(
+      ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+      { input: [qq.appId, qq.secret] },
+    );
+    expect(again.code).toBe(0);
+  });
+
+  it('pairs with /pair in the private chat, ignores strangers, and stops when QQ delists the bot', async () => {
+    const terminal = memoryIo();
+    const identifies = qq.identifies + qq.resumes;
+    const pending = main(
+      ['relay', '--channel', 'qq', '--allow-file-store', '--pair', '--character', npc],
+      terminal.io,
+    );
+    const code = (await terminal.waitFor(/\/pair ([A-Z2-9]{4}-[A-Z2-9]{4})/))[1];
+    expect(terminal.out).toContain('先在 QQ 里加 bot（Lin QQ bot）为好友');
+    await terminal.waitFor(/relay 运行中：Lin QQ bot ⇄ Yomi/);
+    expect(terminal.out).toContain('仅限个人使用');
+    await qq.waitFor(() => qq.identifies + qq.resumes > identifies);
+    await sleep(100);
+    qq.userSends(STRANGER, '/pair AAAA-BBBB');
+    await said(/配对码不对或已过期/, STRANGER);
+    // QQ may put a space before the text: the command is trimmed.
+    const pairing = qq.userSends(OWNER, `/pair ${code}`, { lead: ' ' });
+    const paired = await said(/已配对/);
+    expect(paired.text).toContain('（Lin QQ bot）');
+    expect(paired.replyTo).toBe(pairing);
+    expect(paired.kind).toBe('text');
+    const strangerMessages = qq.messages(STRANGER).length;
+    qq.userSends(STRANGER, '你好');
+    await sleep(300);
+    expect(qq.messages(STRANGER)).toHaveLength(strangerMessages);
+    qq.close(4914);
+    expect(await pending).toBe(0);
+    expect(terminal.err).toContain('QQ 说这个 bot 已下架，只能连接沙箱（4914）');
+    expect(terminal.err).toContain('已配对：QQ 用户 ' + OWNER);
+  });
+
+  it('stops when the bot may not receive private chats (4014), without retrying', async () => {
+    const closed = await startMockQq({ c2c: false, appId: '102000078' });
+    try {
+      const context = createContext(
+        memoryIo().io,
+        {},
+        { client: 'relay-qq', channel: 'cli_relay' },
+      );
+      const channel = new QqChannel({
+        appId: closed.appId,
+        secret: closed.secret,
+        apiOrigin: closed.origin,
+      });
+      const path = relayStatePath(context.account, channel.scope);
+      const state = new RelayState(path, channel.scope, context.account, 'qq');
+      const relay = new Relay(context.gateway, channel, state, {
+        maxSpend: 0,
+        characterId: npc,
+        pairing: null,
+        replyTimeoutMs: 5000,
+        intervalMs: 30,
+        staleMs: 600_000,
+        pollTimeoutSeconds: 1,
+        drafts: true,
+        language: 'zh-Hans',
+        log: () => undefined,
+      });
+      const error = await relay
+        .run(new AbortController().signal)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(RelayStopped);
+      expect(error).toMatchObject({ reason: 'intents' });
+      expect((error as Error).message).toContain('4014');
+      expect(closed.calls.filter((call) => call.path === '/gateway/bot')).toHaveLength(1);
+    } finally {
+      await closed.shutdown();
+    }
+  });
+});
+
+describe('the QQ relay', () => {
+  it('streams the finished paragraphs of a reply, with the AI notice as its first lines', async () => {
+    await start();
+    const before = qq.messages(OWNER).length;
+    const { id, reply } = await chatted('SLOW 窗外的雨');
+    const chunks = qq.streams(OWNER).filter((chunk) => chunk.replyTo === id);
+    // The narration grew over several updates: streamed once complete, then the end.
+    expect(chunks.map((chunk) => chunk.state)).toEqual([1, 10]);
+    expect(chunks[0]).toMatchObject({ index: 0, streamMsgId: '', seq: 1 });
+    expect(chunks[0].content).toBe(`${NOTICE}\n\n${NARRATION}`);
+    // Each chunk names the id the previous response returned.
+    for (let index = 1; index < chunks.length; index++) {
+      expect(chunks[index].streamMsgId).toBe(reply.ids[index - 1]);
+      expect(chunks[index].seq).toBe(1);
+    }
+    expect(reply.text).toBe(`${NOTICE}\n\n${NARRATION}\n\nSLOW 窗外的雨？这个问题，我想了很久。`);
+    for (const chunk of chunks) {
+      expect(chunk.content).not.toMatch(/RAW-UNREVIEWED|THINKING/);
+      if (chunk.content.includes('（')) expect(chunk.content).toContain(NARRATION);
+    }
+    // One passive reply for the notice and the reply together.
+    expect(qq.messages(OWNER).slice(before)).toHaveLength(1);
+  });
+
+  it('answers within the reply window and count, then actively, then at the next message', async () => {
+    const { state, logs } = await start({ passiveMax: 3, passiveWindowMs: 1500 });
+    const help = qq.userSends(OWNER, '/help');
+    const helped = await said(/\/budget/);
+    expect(helped).toMatchObject({ replyTo: help, seq: 1, kind: 'text' });
+    mock.pushAside(npc, { scene: 'ai_disclosure', text: '提醒一' });
+    expect(await said(/提醒一/)).toMatchObject({ replyTo: help, seq: 2 });
+    mock.pushAside(npc, { scene: 'break_reminder', text: '提醒二' });
+    expect(await said(/提醒二/)).toMatchObject({ replyTo: help, seq: 3 });
+    // The message's replies are used up: an active message.
+    mock.pushAside(npc, { scene: 'minor_notice', text: '提醒三' });
+    expect(await said(/提醒三/)).toMatchObject({ replyTo: '', seq: 0 });
+    // The owner switched active messages off: it waits for their next message.
+    qq.rejectActive(OWNER);
+    mock.pushAside(npc, { scene: 'crisis_support', text: '提醒四' });
+    await qq.waitFor(() => logs.some((line) => line.includes('主人关闭了 QQ 主动消息')));
+    expect(shown().some((message) => message.text.includes('提醒四'))).toBe(false);
+    expect(state.data.channel?.activeOff).toBe(true);
+    const price = qq.userSends(OWNER, '/price');
+    const delivered = await said(/你不在时的消息（1 条）：\n\n提醒四/);
+    expect(delivered.replyTo).toBe(price);
+    // The queue and the answer share one message.
+    expect(delivered.text).toMatch(/提醒四\n\n[\s\S]*每条回复/);
+    expect(qq.messages(OWNER).filter((message) => message.replyTo === price)).toHaveLength(1);
+    // Switched back on (C2C_MSG_RECEIVE), and the window is over: active again.
+    qq.receiveOn(OWNER);
+    await qq.waitFor(() => state.data.channel?.activeOff === false);
+    await sleep(1600);
+    mock.pushAside(npc, { scene: 'ai_disclosure', text: '提醒五' });
+    expect(await said(/提醒五/)).toMatchObject({ replyTo: '' });
+  });
+
+  it('confirms /budget with a typed code; a wrong number, a stray "1" and "haha 2" do not', async () => {
+    const first = await start();
+    let next = expectNew(/最多花 10 钻石吗/);
+    qq.userSends(OWNER, '/budget 10');
+    const question = await next();
+    const code = /回复「([A-Z2-9]{4}) 1」/.exec(question.text)![1];
+    expect(question.text).toContain(`\n1. 允许最多 10 钻石\n2. 取消\n回复「${code} 1」`);
+    next = expectNew(/没有这个选项/);
+    qq.userSends(OWNER, `${code} 3`);
+    await next();
+    await chatted('1');
+    await chatted('haha 2');
+    expect(first.state.data.billing.mode).toBe('free');
+    next = expectNew(/已设置预算 10 钻石/);
+    // A Chinese keyboard's full-width colon and digit.
+    qq.userSends(OWNER, `${code}：１`);
+    await next();
+    expect(first.state.data.billing).toMatchObject({ mode: 'paid', budget: 10 });
+    next = expectNew(/这个选择已过期/);
+    qq.userSends(OWNER, `${code.toLowerCase()} 1`);
+    await next();
+    // A restart between the question and the answer: "expired", nothing relayed.
+    next = expectNew(/最多花 20 钻石吗/);
+    qq.userSends(OWNER, '/budget 20');
+    const again = /回复「([A-Z2-9]{4}) 1」/.exec((await next()).text)![1];
+    await first.stop();
+    const second = await start({}, {}, { fresh: false });
+    const before = sends().length;
+    next = expectNew(/这个选择已过期/);
+    qq.userSends(OWNER, `${again} 1`);
+    await next();
+    expect(sends().length).toBe(before);
+    expect(second.state.data.billing).toMatchObject({ mode: 'paid', budget: 10 });
+  });
+
+  it('uploads the /image picture and sends it as a passive media message', async () => {
+    await start();
+    await chatted('画一下窗外的雨');
+    const images = (): MockChatImage => chatImageStore(mock.gen);
+    const started = expectNew(/正在生成图片（免费）/);
+    const asked = qq.userSends(OWNER, '/image');
+    await started();
+    const photo = await qq.waitFor(
+      () =>
+        qq.messages(OWNER).find((message) => message.kind === 'media' && message.replyTo === asked),
+      15_000,
+    );
+    expect(photo.text).toBe('「林夏」的图片');
+    const requestId = String(images().creates.at(-1)!.client_request_id);
+    const task = images().tasks.get(images().requests.get(requestId)!)!;
+    const served = Buffer.from(await (await fetch(task.url)).arrayBuffer());
+    expect(photo.bytes!.equals(served)).toBe(true);
+    const upload = qq.calls.filter((call) => call.path === `/v2/users/${OWNER}/files`).at(-1)!;
+    expect(upload.body).toMatchObject({ file_type: 1, srv_send_msg: false });
+    expect(String(upload.body.file_data)).toBe(`<${served.toString('base64').length}>`);
+  });
+
+  it('never sends refused text again, tells the owner once, and pauses after three refusals', async () => {
+    const { logs } = await start();
+    qq.refuseContent('违规');
+    const refusals = () =>
+      qq.calls.filter((call) => call.code === 40034006 && call.path.endsWith('/stream_messages'));
+    for (const n of [1, 2, 3]) {
+      const id = qq.userSends(OWNER, `违规${n}`);
+      await streamed(id);
+      await qq.waitFor(() => refusals().length === n);
+    }
+    // Streaming stayed on: each turn streamed its narration before the refused end.
+    const notice = await said(/按内容规则拒绝了一条回复，它没有送达/);
+    expect(notice.text).toContain('一次运行中被拒 3 次后会暂停转发');
+    expect(shown().filter((message) => /按内容规则拒绝了一条回复/.test(message.text))).toHaveLength(
+      1,
+    );
+    expect(qq.messages(OWNER).some((message) => message.text.includes('违规'))).toBe(false);
+    expect(refusals()).toHaveLength(3);
+    await qq.waitFor(() => logs.some((line) => line.includes('转发已暂停')));
+    const before = sends().length;
+    const paused = expectNew(/转发已暂停：QQ 拒绝了多条回复/);
+    qq.userSends(OWNER, '还在吗');
+    await paused();
+    expect(sends().length).toBe(before);
+    // Commands still work.
+    const helped = expectNew(/\/budget/);
+    qq.userSends(OWNER, '/help');
+    await helped();
+  });
+
+  it('keeps the AI notice when the send is refused right after the reply started', async () => {
+    await start();
+    mock.state.nextSendFailure = {
+      base_resp: { status_code: 1504011011, status_msg: 'insufficient gems' },
+      model_unavailable_dialog: { title: '钻石不足', content: '去充值' },
     };
-    for (const [lang, message] of Object.entries(expected))
-      for (const args of [
-        ['--channel', 'qq'],
-        ['--channel', 'qq', '--set-app', '--token-stdin'],
-        ['--channel', 'qq', '--pair', '--install-service'],
-      ]) {
-        // No --allow-file-store either: this comes first.
-        const terminal = memoryIo();
-        const code = await main(['relay', ...args, '--lang', lang], terminal.io);
-        expect(code, `${lang} ${args.join(' ')}`).toBe(1);
-        expect(terminal.err, `${lang} ${args.join(' ')}`).toContain(message);
-        expect(terminal.err).not.toMatch(/Error:|at .*\.ts:/);
-      }
+    const id = qq.userSends(OWNER, '钻石不够');
+    const message = await said(/钻石不足/);
+    expect(message.replyTo).toBe(id);
+    expect(message.text.startsWith(NOTICE)).toBe(true);
+    expect(message.text.indexOf('钻石不足')).toBeGreaterThan(NOTICE.length);
+    expect(qq.messages(OWNER).filter((item) => item.replyTo === id)).toHaveLength(1);
+  });
+
+  it('relays nothing twice after a restart resumes the session, and says what an offline gap lost', async () => {
+    const first = await start();
+    const hello = await chatted('你好');
+    await first.stop();
+    // A crash before the position was written: the Resume replays from the start of the session.
+    const file = JSON.parse(readFileSync(first.path, 'utf8')) as {
+      channel: { gateway: { seq: number; at: number } };
+    };
+    expect(file.channel.gateway.seq).toBeGreaterThan(0);
+    file.channel.gateway.seq = 0;
+    writeFileSync(first.path, JSON.stringify(file));
+    const missed = qq.userSends(OWNER, '离线时发的');
+    const resumes = qq.resumes;
+    const identifies = qq.identifies;
+    const second = await start({}, {}, { fresh: false });
+    expect(qq.resumes).toBe(resumes + 1);
+    expect(qq.identifies).toBe(identifies);
+    await streamed(missed);
+    expect(sends().filter((request) => request.body.text === '你好')).toHaveLength(1);
+    expect(sends().filter((request) => request.body.text === '离线时发的')).toHaveLength(1);
+    expect(qq.messages(OWNER).filter((message) => message.replyTo === hello.id)).toHaveLength(1);
+    await second.stop();
+    // Ten minutes away: the session is not resumed, and the owner learns what was lost.
+    const later = JSON.parse(readFileSync(first.path, 'utf8')) as typeof file;
+    later.channel.gateway.at = Date.now() - 10 * 60_000;
+    writeFileSync(first.path, JSON.stringify(later));
+    await start({}, {}, { fresh: false });
+    expect(qq.identifies).toBe(identifies + 1);
+    const help = qq.userSends(OWNER, '/help');
+    const told = await said(/relay 离线期间发给这个 QQ bot 的消息没有收到/);
+    expect(told.replyTo).toBe(help);
+    expect(told.text).toContain('/budget');
+  });
+});
+
+describe('the QQ relay after the AppSecret was reset', () => {
+  it('stops with the command to set it again', async () => {
+    const { done } = await start();
+    qq.resetSecret();
+    qq.userSends(OWNER, '/help');
+    const error = (await done) as RelayStopped;
+    expect(error).toBeInstanceOf(RelayStopped);
+    expect(error.reason).toBe('token');
+    expect(error.message).toContain('yomi relay --channel qq --set-app');
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+
+const narration = (text: string) => ({
+  type: ParagraphType.narration,
+  text,
+  npcId: '',
+  npcName: '',
+});
+const line = (text: string) => ({
+  type: ParagraphType.dialogue,
+  text,
+  npcId: npc,
+  npcName: '林夏',
+});
+
+describe('the QQ presenter', () => {
+  /** A connected channel and one owner message's event, for a presenter of its own. */
+  async function opened(options: Partial<QqChannelOptions> = {}, origin = qq) {
+    const context = createContext(memoryIo().io, {}, { client: 'relay-qq', channel: 'cli_relay' });
+    const channel = new QqChannel({
+      appId: origin.appId,
+      secret: origin.secret,
+      apiOrigin: origin.origin,
+      streamIntervalMs: 50,
+      retryDelayMs: 50,
+      backgroundFlushMs: 50,
+      ...options,
+    });
+    const path = relayStatePath(context.account, `${channel.scope}:presenter`);
+    rmSync(path, { force: true });
+    const state = new RelayState(path, channel.scope, context.account, 'qq');
+    const controller = new AbortController();
+    const logs: string[] = [];
+    const host: ChannelHost = {
+      state,
+      store: state.channelStore(),
+      texts: relayTexts('zh-Hans'),
+      language: 'zh-Hans',
+      log: (entry) => logs.push(entry),
+      signal: controller.signal,
+      staleMs: 600_000,
+      owner: () => ({ userId: OWNER, chatId: OWNER }),
+      pause: () => undefined,
+      resume: () => undefined,
+    };
+    const connections = origin.identifies + origin.resumes;
+    await channel.connect(host);
+    running.push(async () => {
+      controller.abort();
+      await channel.close();
+    });
+    await origin.waitFor(() => origin.identifies + origin.resumes > connections);
+    await sleep(50);
+    const events = channel.events()[Symbol.asyncIterator]();
+    /** The owner's next message, handled at once (as the core does with a command). */
+    const next = async (text = 'x', flush = true) => {
+      const id = origin.userSends(OWNER, text);
+      const event = (await events.next()).value as InboundEvent & { kind: 'message' };
+      if (flush) await channel.flush();
+      const presenter = channel.presenter({
+        to: OWNER,
+        context: event.context,
+        render: { characterName: '林夏', group: false },
+        log: (entry) => logs.push(entry),
+      });
+      return { id, event, presenter };
+    };
+    const { id, event, presenter } = await next();
+    return { channel, presenter, id, logs, event, next, state, events };
+  }
+
+  const chunksOf = (id: string) => qq.streams(OWNER).filter((chunk) => chunk.replyTo === id);
+
+  it('recalls a stream that review changed, and sends the final text once', async () => {
+    const { presenter, id } = await opened();
+    presenter.start();
+    presenter.update([narration('她看着窗外。'), line('早')]);
+    await qq.waitFor(() => chunksOf(id).length === 1);
+    // Review changed the paragraph already shown.
+    presenter.update([narration('她看着窗外的雨。'), line('早上好')]);
+    await sleep(150);
+    expect(chunksOf(id)).toHaveLength(1);
+    const refs = await presenter.finish([narration('她看着窗外的雨。'), line('早上好')], '');
+    const stream = qq
+      .messages(OWNER)
+      .find((message) => message.kind === 'stream' && message.replyTo === id)!;
+    expect(stream).toMatchObject({ recalled: true, done: true, text: '（她看着窗外。）' });
+    const final = shown().filter((message) => message.replyTo === id);
+    expect(final).toHaveLength(1);
+    expect(final[0]).toMatchObject({
+      kind: 'text',
+      text: '（她看着窗外的雨。）\n\n早上好',
+      seq: 2,
+    });
+    expect(refs).toEqual([final[0].refIdx]);
+  });
+
+  it('still sends the final text when the recall is refused, and says so', async () => {
+    const { presenter, id, logs } = await opened();
+    qq.refuseRecall(true);
+    try {
+      presenter.start();
+      presenter.update([narration('雨。'), line('嗯')]);
+      await qq.waitFor(() => chunksOf(id).length === 1);
+      await presenter.finish([narration('雪。'), line('嗯')], '');
+      expect(logs.some((entry) => entry.includes('没能撤回'))).toBe(true);
+      expect(
+        shown()
+          .filter((message) => message.replyTo === id)
+          .map((message) => message.text),
+      ).toEqual(['（雨。）', '（雪。）\n\n嗯']);
+    } finally {
+      qq.refuseRecall(false);
+    }
+  });
+
+  it('never lets the notices and the reply pass the length limit in the first message', async () => {
+    const { channel, presenter, id, event } = await opened({ maxText: 600, prefixMax: 300 });
+    // A notice held for this message (the core is handling it): it becomes the prefix.
+    (event.context as unknown as { handling: boolean }).handling = true;
+    await channel.send(OWNER, { text: '注'.repeat(190) }, event.context);
+    (event.context as unknown as { handling: boolean }).handling = false;
+    presenter.start();
+    const long = [narration('雨'.repeat(500)), line('风'.repeat(300)), line('完')];
+    presenter.update(long.slice(0, 2));
+    await qq.waitFor(() => chunksOf(id).length >= 1);
+    await presenter.finish(long, '');
+    for (const chunk of chunksOf(id)) expect(chunk.content.length).toBeLessThanOrEqual(600);
+    const messages = qq.messages(OWNER).filter((message) => message.replyTo === id);
+    expect(messages.length).toBeGreaterThan(1);
+    for (const message of messages) expect(message.text.length).toBeLessThanOrEqual(600);
+    expect(messages[0].text.startsWith('注'.repeat(190) + '\n\n（')).toBe(true);
+    const all = messages.map((message) => message.text).join('');
+    expect(all.replace(/[注（）\n]/g, '')).toBe('雨'.repeat(500) + '风'.repeat(300) + '完');
+  });
+
+  it('waits out QQ’s stream rate limit (50002) and keeps the stream', async () => {
+    const { presenter, id } = await opened();
+    qq.failNext('stream_messages', { code: 50002, status: 429 });
+    presenter.start();
+    presenter.update([narration('一'), line('二')]);
+    await qq.waitFor(() => chunksOf(id).length === 1, 5000);
+    const limited = qq.calls.filter((call) => call.code === 50002);
+    expect(limited.length).toBeGreaterThanOrEqual(1);
+    const accepted = chunksOf(id)[0];
+    // The refused index was not used again.
+    expect(accepted.index).toBe(1);
+    await presenter.finish([narration('一'), line('二')], '');
+    const stream = qq
+      .messages(OWNER)
+      .find((message) => message.kind === 'stream' && message.replyTo === id)!;
+    expect(stream).toMatchObject({ done: true, recalled: false, text: '（一）\n\n二' });
+  });
+
+  it('retries a transient failure once with the same msg_seq', async () => {
+    const { channel, id, event } = await opened();
+    qq.failNext('messages', { code: 40054006 });
+    await channel.send(OWNER, { text: '重试一次' }, event.context);
+    const message = await said(/重试一次/);
+    expect(message).toMatchObject({ replyTo: id, seq: 1 });
+    const tries = qq.calls.filter(
+      (call) => call.path === `/v2/users/${OWNER}/messages` && call.body.msg_id === id,
+    );
+    expect(tries.map((call) => [call.code, call.body.msg_seq])).toEqual([
+      [40054006, 1],
+      [0, 1],
+    ]);
+  });
+
+  it('sends whole replies for the run when QQ refuses the first chunk', async () => {
+    const { channel, presenter, id, logs, next } = await opened();
+    qq.failNext('stream_messages', { code: 304061 });
+    presenter.start();
+    presenter.update([narration('一'), line('二')]);
+    await qq.waitFor(() => qq.calls.some((call) => call.code === 304061));
+    await presenter.finish([narration('一'), line('二')], '');
+    expect(shown().filter((message) => message.replyTo === id)).toMatchObject([
+      { kind: 'text', text: '（一）\n\n二' },
+    ]);
+    expect(logs.some((entry) => entry.includes('QQ 流式消息不可用（304061）'))).toBe(true);
+    expect(channel.streamingDisabled).toBe(true);
+    const later = await next('y');
+    later.presenter.start();
+    later.presenter.update([narration('三'), line('四')]);
+    await later.presenter.finish([narration('三'), line('四')], '');
+    expect(chunksOf(later.id)).toHaveLength(0);
+    expect(await said(/（三）\n\n四/)).toMatchObject({ replyTo: later.id, kind: 'text' });
+  });
+
+  it('falls back from refused markdown to plain text for the rest of the run', async () => {
+    const broken = await startMockQq({ markdownBroken: true, appId: '102000079' });
+    try {
+      const { channel, presenter, id, logs } = await opened({ markdown: true }, broken);
+      expect(channel.caps.format.name).toBe('qq-markdown');
+      presenter.start();
+      presenter.update([narration('一'), line('二')]);
+      await broken.waitFor(() => broken.streams(OWNER).length === 1);
+      await presenter.finish([narration('一'), line('二')], '');
+      const stream = broken.messages(OWNER).find((message) => message.replyTo === id)!;
+      expect(stream).toMatchObject({ kind: 'stream', done: true, text: '（一）\n\n二' });
+      expect(broken.streams(OWNER).every((chunk) => !chunk.content.includes('*'))).toBe(true);
+      expect(broken.calls.filter((call) => call.code === 40034011)).toHaveLength(1);
+      expect(channel.caps.format.name).toBe('plain');
+      expect(logs.some((entry) => entry.includes('QQ 不接受 markdown'))).toBe(true);
+    } finally {
+      await broken.shutdown();
+    }
+  });
+
+  it('delivers one queued picture per message, the rest as text in the reply’s first lines', async () => {
+    const { channel, event, next, state } = await opened();
+    // The first message can no longer be answered, and active messages are off.
+    (event.context as unknown as { usedUp: boolean }).usedUp = true;
+    qq.rejectActive(OWNER);
+    const picture = { bytes: solidPngBytes(8, 8, [10, 200, 10]), mime: 'image/png', name: 'p.png' };
+    for (const n of [1, 2, 3]) {
+      const sent = await channel.sendPhoto(OWNER, picture, `图${n}`, event.context);
+      expect(sent.status).toBe('queued');
+    }
+    expect((state.data.channel?.queue as unknown[]).length).toBe(3);
+    qq.allowActive(OWNER);
+    // A chat message: the reply starts before the core is done with the message.
+    const { id, presenter } = await next('回来了', false);
+    presenter.start();
+    await channel.flush();
+    const photo = await qq.waitFor(() =>
+      qq.messages(OWNER).find((message) => message.kind === 'media' && message.replyTo === id),
+    );
+    expect(photo).toMatchObject({ text: '图1', seq: 1 });
+    expect(photo.bytes!.equals(picture.bytes)).toBe(true);
+    presenter.update([narration('一'), line('二')]);
+    await qq.waitFor(() => chunksOf(id).length === 1);
+    await presenter.finish([narration('一'), line('二')], '');
+    const reply = qq
+      .messages(OWNER)
+      .find((message) => message.kind === 'stream' && message.replyTo === id)!;
+    expect(reply.seq).toBe(2);
+    expect(reply.text).toMatch(
+      /^你不在时的消息（2 条）：\n\n图片已经生成[^]*\n\n图片已经生成[^]*\n\n（一）\n\n二$/,
+    );
+    expect(qq.messages(OWNER).filter((message) => message.replyTo === id)).toHaveLength(2);
+  });
+
+  it('hands the held notices back when stopped, and queues what cannot go out at shutdown', async () => {
+    const { channel, presenter, event, id, state } = await opened({ closeWaitMs: 300 });
+    (event.context as unknown as { handling: boolean }).handling = true;
+    await channel.send(OWNER, { text: '先说一句' }, event.context);
+    (event.context as unknown as { handling: boolean }).handling = false;
+    presenter.start();
+    // Stopped before anything was streamed (the send was refused, the watchdog gave up, ...).
+    await presenter.stop('后来的话');
+    expect(await said(/先说一句\n\n后来的话/)).toMatchObject({ replyTo: id, seq: 1 });
+    // At shutdown, QQ cannot be reached: the held text waits for the owner's next message.
+    (event.context as unknown as { handling: boolean }).handling = true;
+    await channel.send(OWNER, { text: '关机前的话' }, event.context);
+    qq.failNext('messages', { code: 500 }, 4);
+    await channel.close();
+    expect(state.data.channel?.queue).toMatchObject([{ text: '关机前的话' }]);
+  });
+
+  it('sends the held notices once when a finished reply is stopped again', async () => {
+    const { channel, presenter, event, id } = await opened();
+    (event.context as unknown as { handling: boolean }).handling = true;
+    await channel.send(OWNER, { text: '只说一次的提示' }, event.context);
+    (event.context as unknown as { handling: boolean }).handling = false;
+    presenter.start();
+    await presenter.finish([line('早')], '');
+    expect(await said(/只说一次的提示\n\n早/)).toMatchObject({ replyTo: id });
+    // The watchdog after /stop, or shutdown while the reply is being booked, stops it again.
+    await presenter.stop();
+    await presenter.stop('');
+    await sleep(200);
+    expect(shown().filter((message) => message.text.includes('只说一次的提示'))).toHaveLength(1);
+  });
+
+  it('keeps notices too long to lead the reply before it when nothing was streamed', async () => {
+    const { channel, presenter, event, id } = await opened({ prefixMax: 50 });
+    const notice = '长'.repeat(80);
+    (event.context as unknown as { handling: boolean }).handling = true;
+    await channel.send(OWNER, { text: notice }, event.context);
+    (event.context as unknown as { handling: boolean }).handling = false;
+    presenter.start();
+    // One paragraph: never streamed, the reply goes out at finish().
+    await presenter.finish([line('早')], '');
+    const messages = shown().filter((message) => message.replyTo === id);
+    expect(messages.map((message) => message.text)).toEqual([`${notice}\n\n早`]);
+  });
+
+  it('sends one reply whole when its first chunk fails twice, and streams the next', async () => {
+    const { channel, presenter, id, next } = await opened();
+    const failures = () =>
+      qq.calls.filter(
+        (call) => call.path === `/v2/users/${OWNER}/stream_messages` && call.code === 500,
+      ).length;
+    const before = failures();
+    qq.failNext('stream_messages', { code: 500 }, 2);
+    presenter.start();
+    presenter.update([narration('一'), line('二')]);
+    await qq.waitFor(() => failures() === before + 2);
+    await presenter.finish([narration('一'), line('二')], '');
+    expect(shown().filter((message) => message.replyTo === id)).toMatchObject([
+      { kind: 'text', text: '（一）\n\n二' },
+    ]);
+    expect(channel.streamingDisabled).toBe(false);
+    const later = await next('y');
+    later.presenter.start();
+    later.presenter.update([narration('三'), line('四')]);
+    await qq.waitFor(() => chunksOf(later.id).length === 1);
+    await later.presenter.finish([narration('三'), line('四')], '');
+    expect(qq.messages(OWNER).find((message) => message.replyTo === later.id)).toMatchObject({
+      kind: 'stream',
+      done: true,
+      text: '（三）\n\n四',
+    });
+  });
+
+  it('counts the reply window from when a message arrived, not from when it was handled', async () => {
+    const { events } = await opened();
+    qq.userSends(OWNER, '等了一会儿');
+    await sleep(300);
+    const event = (await events.next()).value as InboundEvent & { kind: 'message' };
+    expect(event.text).toBe('等了一会儿');
+    expect(Date.now() - event.context.receivedAt).toBeGreaterThanOrEqual(250);
   });
 });

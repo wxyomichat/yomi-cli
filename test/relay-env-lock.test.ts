@@ -285,12 +285,13 @@ describe('one relay per Yomi account and environment', () => {
       const token = await run(['relay', '--telegram', '--set-token', '--token-stdin']);
       expect(token.err).toContain('--allow-file-store');
       expect(token.err).not.toContain('relay 正在运行');
-      // What a channel cannot do at all it says first, relay or not: the stubs are not available.
+      // The real QQ setup (no fake) is refused the same way, before it asks for anything.
       fake.on = false;
-      const stub = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
-      expect(stub.code).toBe(1);
-      expect(stub.err).toContain('QQ 通道还在开发中，暂时不能使用');
-      expect(stub.err).not.toContain('relay 正在运行');
+      const real = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
+      expect(real.code).toBe(1);
+      expect(real.err).toContain(
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --set-app。`,
+      );
       fake.on = true;
     } finally {
       await running.stop();
@@ -316,11 +317,12 @@ describe('one relay per Yomi account and environment', () => {
       expect.objectContaining({ pid: process.pid, note: { channel: 'wechat', flag: '--login' } }),
     ]);
     expect(existsSync(environmentLock())).toBe(false);
-    // And the stubs say what they always said.
+    // The real QQ setup, with no terminal to type into, says how to pass the secret instead, and
+    // releases the lock all the same.
     fake.on = false;
-    const stub = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
-    expect(stub.code).toBe(1);
-    expect(stub.err).toContain('QQ 通道还在开发中，暂时不能使用');
+    const real = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
+    expect(real.code).toBe(1);
+    expect(real.err).toContain('没有终端可输入：用 --token-stdin 从标准输入传入');
     expect(existsSync(environmentLock())).toBe(false);
   });
 

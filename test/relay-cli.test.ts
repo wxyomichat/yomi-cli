@@ -29,8 +29,8 @@ import { memoryIo } from './helpers/io.js';
  *
  * Shared by every channel: what is asserted here is the shared flow, and a channel's own texts
  * (secret label, hints, label) are read from its setup, so the QQ and WeChat work never edits this
- * file. Each channel's own behaviour (its stub's "not available yet" until it lands) is tested in
- * its own file: test/relay-qq.e2e.test.ts, test/relay-wechat.e2e.test.ts.
+ * file. Each channel's own behaviour is tested in its own file: test/relay-qq.e2e.test.ts,
+ * test/relay-wechat.e2e.test.ts.
  */
 
 const fake: FakeSwitch = vi.hoisted(() => ({ on: false, opened: [] }));
