@@ -12,8 +12,10 @@ import { setTimeout as delay } from 'node:timers/promises';
  * HTML that does not parse, text over 4096 code points, an edit that changes nothing, drafts
  * outside private chats, per-chat flood (429). `sendPhoto` takes a multipart/form-data upload (a
  * JPEG, PNG or WebP of 10 MB at most, a caption of 1024 characters at most) and keeps the bytes.
- * Error strings follow the Bot API server source. It listens on 127.0.0.1 only; nothing here
- * reaches the network.
+ * Error strings follow the Bot API server source. Several bots can share the server (`addBot`), as
+ * several bots of one Telegram account share the Bot API: the token in the URL picks the bot, and
+ * each has its own updates, chats, message ids, calls and failures. It listens on 127.0.0.1 only;
+ * nothing here reaches the network.
  */
 
 /** A Telegram user as a test describes one; `is_bot` defaults to false. */
@@ -52,14 +54,18 @@ export type MockBotPhoto = {
   height: number;
 };
 
-export type MockTelegram = {
-  /** `http://127.0.0.1:<port>`, for `new TelegramBot(token, { apiOrigin })`. */
+/** One bot of the mock: what it was asked, what its chats show, and the updates it is given. */
+export type MockTelegramBot = {
+  /** `http://127.0.0.1:<port>`, for `new TelegramBot(token, { apiOrigin })` (every bot's). */
   origin: string;
-  /** `<botId>:<35 url-safe characters>`, the only token this bot accepts. */
+  /** `<botId>:<35 url-safe characters>`, the only token this bot accepts (until `rotateToken`). */
   token: string;
   botId: number;
   username: string;
-  /** Every Bot API call in arrival order. */
+  /**
+   * Every Bot API call to this bot in arrival order: those with its token, and those with a wrong
+   * token that starts with its id. A call naming no bot of the mock is the first bot's.
+   */
   calls: MockBotCall[];
   /** What the chat shows now (after edits): the bot's messages, oldest first, as sent (raw text). */
   messages(chatId: number): {
@@ -104,16 +110,29 @@ export type MockTelegram = {
    * second and starts a fresh window. 0 (the default) turns it off.
    */
   floodLimit: number;
-  /** Every later call answers 401 "Unauthorized". */
+  /** Every later call answers 401 "Unauthorized" (until `rotateToken`). */
   revokeToken(): void;
+  /**
+   * BotFather's /revoke: the bot gets a new token (returned; same bot id) and the old one answers
+   * 401 "Unauthorized" from now on.
+   */
+  rotateToken(): string;
   /** Polls `check` every 10 ms until it returns something other than undefined/null/false. */
   waitFor<T>(check: () => T | undefined | null | false, timeoutMs?: number): Promise<T>;
-  /** Answers a waiting getUpdates with [] first, then stops listening. */
+};
+
+/** The mock: its first bot, more bots on the same server, and the server's end. */
+export type MockTelegram = MockTelegramBot & {
+  /** Another bot on this server, with its own token, updates, chats and calls. */
+  addBot(options: { username: string; botId: number }): MockTelegramBot;
+  /** Every bot, the first one first. */
+  readonly bots: MockTelegramBot[];
+  /** Answers every waiting getUpdates with [] first, then stops listening. */
   close(): Promise<void>;
 };
 
 type Json = Record<string, unknown>;
-type Failure = Parameters<MockTelegram['failNext']>[1];
+type Failure = Parameters<MockTelegramBot['failNext']>[1];
 type Entity = { type: string; offset: number; length: number; url?: string };
 type Parsed = { text: string; entities: Entity[] };
 /** Text as sent (`text`, `parseMode`) and as shown (`parsed`). */
@@ -144,6 +163,17 @@ type Poll = {
 };
 type Handler = (params: Json, response: ServerResponse, files: Map<string, Upload>) => unknown;
 type Outcome = Update[] | BotApiError;
+/** A bot inside the mock: the test's handle, its calls, and the end of its long poll. */
+type Bot = {
+  mock: MockTelegramBot;
+  serve(
+    request: IncomingMessage,
+    response: ServerResponse,
+    given: string,
+    method: string,
+  ): Promise<void>;
+  release(): Promise<void>;
+};
 
 const NOT_MODIFIED =
   'message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message';
@@ -365,449 +395,516 @@ function describeCalls(calls: MockBotCall[]): string {
   return calls.slice(-10).map(line).join('\n') || '  (none)';
 }
 
-/** Starts the mock on a free loopback port. */
+/** A bot's token: its id, a colon and 35 url-safe characters. */
+const newToken = (botId: number) =>
+  `${botId}:AA${randomBytes(25).toString('base64url').slice(0, 33)}`;
+
+/** Starts the mock on a free loopback port, with one bot (`addBot` adds more). */
 export async function startMockTelegram(
   options: { username?: string; botId?: number } = {},
 ): Promise<MockTelegram> {
-  const botId = options.botId ?? 8_123_456_789;
-  if (!Number.isSafeInteger(botId) || botId < 10_000) throw new Error('botId: 5+ digit integer');
-  const username = options.username ?? 'yomi_mock_bot';
-  const token = `${botId}:AA${randomBytes(25).toString('base64url').slice(0, 33)}`;
-  const botUser = { id: botId, is_bot: true, first_name: 'Yomi Mock', username };
-
-  const calls: MockBotCall[] = [];
-  const chats = new Map<number, ChatState>();
-  const queue: Update[] = [];
-  const callbacks = new Set<string>();
-  const commands = new Map<string, unknown>();
-  const failures = new Map<string, Failure[]>();
-  const flood = new Map<string, { times: number[]; until: number }>();
-  let nextUpdateId = 100_000 + Math.floor(Math.random() * 900_000);
-  let nextMessageId = 100;
-  let nextFileId = 1;
-  let callbackCount = 0;
-  let allowed: string[] | undefined;
-  let webhook = '';
-  let revoked = false;
-  let waiting: Poll | undefined;
+  const bots: Bot[] = [];
   let closing: Promise<void> | undefined;
-
-  const userJson = (from: MockTelegramUser) => ({ ...from, is_bot: from.is_bot ?? false });
-  const messageJson = (state: ChatState, message: BotMessage) => ({
-    message_id: message.message_id,
-    from: botUser,
-    chat: state.chat,
-    date: message.date,
-    ...(message.editDate ? { edit_date: message.editDate } : {}),
-    text: message.parsed.text,
-    ...(message.parsed.entities.length ? { entities: message.parsed.entities } : {}),
-    ...(message.markup ? { reply_markup: message.markup } : {}),
-  });
-
-  const photoJson = (state: ChatState, photo: BotPhoto) => ({
-    message_id: photo.message_id,
-    from: botUser,
-    chat: state.chat,
-    date: photo.date,
-    photo: photo.sizes,
-    ...(photo.parsed.text ? { caption: photo.parsed.text } : {}),
-    ...(photo.parsed.entities.length ? { caption_entities: photo.parsed.entities } : {}),
-  });
-
-  function find(state: ChatState, messageId: number): Json | undefined {
-    const mine = state.bot.get(messageId);
-    if (mine) return messageJson(state, mine);
-    const photo = state.photos.get(messageId);
-    return photo ? photoJson(state, photo) : state.users.get(messageId);
-  }
-
-  /** Telegram keeps a photo in a few sizes: a thumbnail and the original here. */
-  function photoSizes(width: number, height: number, size: number): Json[] {
-    const id = () => `mock-photo-${nextFileId++}`;
-    const scale = Math.min(1, 90 / Math.max(width, height, 1));
-    const small = {
-      file_id: id(),
-      file_unique_id: `mock-u-${nextFileId}`,
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale)),
-    };
-    const original = { file_id: id(), file_unique_id: `mock-u-${nextFileId}`, width, height };
-    return [small, { ...original, file_size: size }];
-  }
-
-  function ensureChat(id: number, type: string, from?: MockTelegramUser): ChatState {
-    const known = chats.get(id);
-    if (known) return known;
-    const names =
-      type === 'private'
-        ? { first_name: from?.first_name, username: from?.username }
-        : { title: `Group ${Math.abs(id)}` };
-    const state = {
-      chat: { id, type, ...names },
-      users: new Map(),
-      bot: new Map(),
-      photos: new Map(),
-      draft: null,
-      left: false,
-    };
-    chats.set(id, state);
-    return state;
-  }
-
-  /** The chat a call names; it exists once someone wrote to the bot there. */
-  function chatOf(params: Json, privateOnly = false): ChatState {
-    const id = privateOnly ? params.chat_id : Number(params.chat_id);
-    const state = Number.isInteger(id) ? chats.get(id as number) : undefined;
-    if (!state || (privateOnly && state.chat.type !== 'private')) throw bad('chat not found');
-    if (state.left) throw new BotApiError(403, 'Forbidden: bot is not a member of the group chat');
-    return state;
-  }
-
-  function botMessage(state: ChatState, params: Json): BotMessage {
-    const message = state.bot.get(Number(params.message_id));
-    if (!message) throw bad('message to edit not found');
-    return message;
-  }
-
-  function edit(state: ChatState, message: BotMessage, content: Content, markup: unknown) {
-    const before = JSON.stringify([message.parsed, message.markup]);
-    if (before === JSON.stringify([content.parsed, markup])) throw bad(NOT_MODIFIED);
-    Object.assign(message, content, { markup, editDate: now() });
-    return messageJson(state, message);
-  }
-
-  function enqueue(update: Json): void {
-    queue.push({ update_id: nextUpdateId++, ...update });
-    const updates = waiting ? ready(waiting.limit) : [];
-    if (waiting && updates.length) settle(waiting, updates);
-  }
-
-  function userMessage(from: MockTelegramUser, state: ChatState, body: Json, date = now()) {
-    const message_id = nextMessageId++;
-    const message = { message_id, from: userJson(from), chat: state.chat, date, ...body };
-    state.users.set(message_id, message);
-    enqueue({ message });
-    return message_id;
-  }
-
-  function ready(limit: number): Update[] {
-    const wanted = (update: Update) => {
-      const type = Object.keys(update).find((key) => key !== 'update_id') ?? '';
-      return allowed ? allowed.includes(type) : !NOT_BY_DEFAULT.includes(type);
-    };
-    return queue.filter(wanted).slice(0, limit);
-  }
-
-  /** Answers the waiting long poll (once) with updates or a 409. */
-  function settle(poll: Poll, outcome: Outcome): void {
-    if (waiting !== poll) return;
-    waiting = undefined;
-    clearTimeout(poll.timer);
-    poll.answer(outcome);
-  }
-
-  function getUpdates(params: Json, response: ServerResponse): unknown {
-    if (webhook) throw new BotApiError(409, WEBHOOK_ACTIVE);
-    if (waiting) settle(waiting, new BotApiError(409, CONFLICT));
-    const offset = Math.trunc(Number(params.offset)) || 0;
-    if (offset < 0) queue.splice(0, Math.max(0, queue.length + offset));
-    while (offset > 0 && queue.length && queue[0].update_id < offset) queue.shift();
-    if (Array.isArray(params.allowed_updates))
-      allowed = params.allowed_updates.length ? params.allowed_updates.map(String) : undefined;
-    const limit = clamp(Number(params.limit ?? 100), 1, 100);
-    const timeout = clamp(Number(params.timeout ?? 0), 0, 50);
-    const updates = ready(limit);
-    if (updates.length || !timeout) return updates;
-    return new Promise<Update[]>((resolve, reject) => {
-      const answer = (outcome: Outcome) =>
-        outcome instanceof BotApiError ? reject(outcome) : resolve(outcome);
-      const timer = setTimeout(() => settle(poll, []), timeout * 1000);
-      const poll: Poll = { response, limit, timer, answer };
-      waiting = poll;
-      response.once('close', () => settle(poll, []));
-    });
-  }
-
-  function checkFlood(method: string, params: Json): void {
-    if (!mock.floodLimit || !FLOOD_METHODS.includes(method)) return;
-    const key = String(params.chat_id);
-    const entry = flood.get(key) ?? { times: [], until: 0 };
-    flood.set(key, entry);
-    const at = Date.now();
-    const tooMany = new BotApiError(429, 'Too Many Requests: retry after 1', 1);
-    if (at < entry.until) throw tooMany;
-    entry.times = entry.times.filter((time) => at - time < FLOOD_WINDOW_MS);
-    if (entry.times.length >= mock.floodLimit) {
-      entry.times = [];
-      entry.until = at + 1000;
-      throw tooMany;
-    }
-    entry.times.push(at);
-  }
-
-  const methods: Record<string, Handler> = {
-    getMe: () => ({ ...botUser, has_topics_enabled: false }),
-    getWebhookInfo: () => ({
-      url: webhook,
-      has_custom_certificate: false,
-      pending_update_count: queue.length,
-    }),
-    deleteWebhook: (params) => {
-      webhook = '';
-      if (params.drop_pending_updates === true) queue.length = 0;
-      return true;
-    },
-    setMyCommands: (params) => {
-      commands.set(String(params.language_code ?? ''), params.commands);
-      return true;
-    },
-    getUpdates,
-    sendMessage: (params) => {
-      const state = chatOf(params);
-      const content = readText(params, false);
-      const markup = inlineKeyboard(params.reply_markup);
-      const message: BotMessage = { ...content, message_id: nextMessageId++, date: now(), markup };
-      state.bot.set(message.message_id, message);
-      state.draft = null;
-      return messageJson(state, message);
-    },
-    sendPhoto: (params, _response, files) => {
-      const state = chatOf(params);
-      const named = typeof params.photo === 'string' ? params.photo : '';
-      const upload = named.startsWith('attach://')
-        ? files.get(named.slice('attach://'.length))
-        : files.get('photo');
-      // A file id or a link: this mock keeps uploads only.
-      if (!upload)
-        throw bad(
-          named ? 'wrong file identifier/HTTP URL specified' : 'there is no photo in the request',
-        );
-      if (upload.bytes.length > MAX_PHOTO_BYTES)
-        throw new BotApiError(413, 'Request Entity Too Large');
-      if (!pictureType(upload.bytes)) throw bad('IMAGE_PROCESS_FAILED');
-      const caption = readText({ text: params.caption ?? '', parse_mode: params.parse_mode }, true);
-      if ([...caption.parsed.text].length > 1024) throw bad('message caption is too long');
-      const { width, height } = pictureSize(upload.bytes);
-      const photo: BotPhoto = {
-        message_id: nextMessageId++,
-        date: now(),
-        caption: caption.text,
-        ...(caption.parseMode ? { parse_mode: caption.parseMode } : {}),
-        bytes: upload.bytes,
-        mime: upload.type,
-        name: upload.name,
-        width,
-        height,
-        parsed: caption.parsed,
-        sizes: photoSizes(width, height, upload.bytes.length),
-      };
-      state.photos.set(photo.message_id, photo);
-      state.draft = null;
-      return photoJson(state, photo);
-    },
-    editMessageText: (params) => {
-      const state = chatOf(params);
-      const message = botMessage(state, params);
-      return edit(state, message, readText(params, false), inlineKeyboard(params.reply_markup));
-    },
-    editMessageReplyMarkup: (params) => {
-      const state = chatOf(params);
-      const message = botMessage(state, params);
-      return edit(state, message, message, inlineKeyboard(params.reply_markup));
-    },
-    sendMessageDraft: (params) => {
-      const state = chatOf(params, true);
-      const draftId = params.draft_id;
-      if (typeof draftId !== 'number' || !Number.isInteger(draftId) || draftId === 0)
-        throw bad('invalid draft_id');
-      const { text } = readText(params, true);
-      state.draft = { draft_id: draftId, text, keepOnStop: params.keep_on_stop === true };
-      return true;
-    },
-    sendChatAction: (params) => Boolean(chatOf(params)),
-    answerCallbackQuery: (params) => {
-      if (!callbacks.delete(String(params.callback_query_id)))
-        throw bad('query is too old and response timeout expired or query ID is invalid');
-      return true;
-    },
-    leaveChat: (params) => {
-      chatOf(params).left = true;
-      return true;
-    },
-    deleteMessage: (params) => {
-      const state = chatOf(params);
-      if (!state.bot.delete(Number(params.message_id))) throw bad('message to delete not found');
-      return true;
-    },
-  };
-  const handlers = new Map(Object.entries(methods).map(([name, run]) => [name.toLowerCase(), run]));
-
-  async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const path = new URL(request.url ?? '/', 'http://mock').pathname;
-    const route = /^\/bot([^/]+)\/([A-Za-z]+)$/.exec(path);
-    if (!route) return replyError(response, new BotApiError(404, 'Not Found'));
-    const [, given, method] = route;
-    const read = await readParams(request).catch(() => undefined);
-    const params = read?.params;
-    const files = read?.files ?? new Map<string, Upload>();
-    const record: MockBotCall = { method, params: params ?? {}, at: Date.now(), ok: true };
-    if (files.size)
-      record.files = Object.fromEntries(
-        [...files].map(([name, file]) => [
-          name,
-          { name: file.name, type: file.type, size: file.bytes.length },
-        ]),
-      );
-    calls.push(record);
-    try {
-      if (revoked || given !== token) throw new BotApiError(401, 'Unauthorized');
-      if (!params) throw bad("can't parse JSON object");
-      const name = method.toLowerCase();
-      const handler = handlers.get(name);
-      if (!handler) throw new BotApiError(404, 'Not Found: method not found');
-      const failure = failures.get(name)?.shift();
-      if (failure)
-        throw new BotApiError(failure.error_code, failure.description, failure.retry_after);
-      checkFlood(name, params);
-      reply(response, 200, { ok: true, result: await handler(params, response, files) });
-    } catch (error) {
-      const failure =
-        error instanceof BotApiError
-          ? error
-          : new BotApiError(500, `Internal Server Error: ${String(error)}`);
-      record.ok = false;
-      record.error = failure.description;
-      replyError(response, failure);
-    }
-  }
 
   const server = createServer((request, response) => void handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  async function shutdown(): Promise<void> {
-    const poll = waiting;
-    if (poll) {
+  /** A bot of this server: its state, its Bot API methods and the test's handle on it. */
+  function createBot(botId: number, username: string): Bot {
+    const botUser = { id: botId, is_bot: true, first_name: 'Yomi Mock', username };
+
+    const calls: MockBotCall[] = [];
+    const chats = new Map<number, ChatState>();
+    const queue: Update[] = [];
+    const callbacks = new Set<string>();
+    const commands = new Map<string, unknown>();
+    const failures = new Map<string, Failure[]>();
+    const flood = new Map<string, { times: number[]; until: number }>();
+    let nextUpdateId = 100_000 + Math.floor(Math.random() * 900_000);
+    let nextMessageId = 100;
+    let nextFileId = 1;
+    let callbackCount = 0;
+    let allowed: string[] | undefined;
+    let webhook = '';
+    let token = newToken(botId);
+    let revoked = false;
+    let waiting: Poll | undefined;
+
+    const userJson = (from: MockTelegramUser) => ({ ...from, is_bot: from.is_bot ?? false });
+    const messageJson = (state: ChatState, message: BotMessage) => ({
+      message_id: message.message_id,
+      from: botUser,
+      chat: state.chat,
+      date: message.date,
+      ...(message.editDate ? { edit_date: message.editDate } : {}),
+      text: message.parsed.text,
+      ...(message.parsed.entities.length ? { entities: message.parsed.entities } : {}),
+      ...(message.markup ? { reply_markup: message.markup } : {}),
+    });
+
+    const photoJson = (state: ChatState, photo: BotPhoto) => ({
+      message_id: photo.message_id,
+      from: botUser,
+      chat: state.chat,
+      date: photo.date,
+      photo: photo.sizes,
+      ...(photo.parsed.text ? { caption: photo.parsed.text } : {}),
+      ...(photo.parsed.entities.length ? { caption_entities: photo.parsed.entities } : {}),
+    });
+
+    function find(state: ChatState, messageId: number): Json | undefined {
+      const mine = state.bot.get(messageId);
+      if (mine) return messageJson(state, mine);
+      const photo = state.photos.get(messageId);
+      return photo ? photoJson(state, photo) : state.users.get(messageId);
+    }
+
+    /** Telegram keeps a photo in a few sizes: a thumbnail and the original here. */
+    function photoSizes(width: number, height: number, size: number): Json[] {
+      const id = () => `mock-photo-${nextFileId++}`;
+      const scale = Math.min(1, 90 / Math.max(width, height, 1));
+      const small = {
+        file_id: id(),
+        file_unique_id: `mock-u-${nextFileId}`,
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale)),
+      };
+      const original = { file_id: id(), file_unique_id: `mock-u-${nextFileId}`, width, height };
+      return [small, { ...original, file_size: size }];
+    }
+
+    function ensureChat(id: number, type: string, from?: MockTelegramUser): ChatState {
+      const known = chats.get(id);
+      if (known) return known;
+      const names =
+        type === 'private'
+          ? { first_name: from?.first_name, username: from?.username }
+          : { title: `Group ${Math.abs(id)}` };
+      const state = {
+        chat: { id, type, ...names },
+        users: new Map(),
+        bot: new Map(),
+        photos: new Map(),
+        draft: null,
+        left: false,
+      };
+      chats.set(id, state);
+      return state;
+    }
+
+    /** The chat a call names; it exists once someone wrote to the bot there. */
+    function chatOf(params: Json, privateOnly = false): ChatState {
+      const id = privateOnly ? params.chat_id : Number(params.chat_id);
+      const state = Number.isInteger(id) ? chats.get(id as number) : undefined;
+      if (!state || (privateOnly && state.chat.type !== 'private')) throw bad('chat not found');
+      if (state.left)
+        throw new BotApiError(403, 'Forbidden: bot is not a member of the group chat');
+      return state;
+    }
+
+    function botMessage(state: ChatState, params: Json): BotMessage {
+      const message = state.bot.get(Number(params.message_id));
+      if (!message) throw bad('message to edit not found');
+      return message;
+    }
+
+    function edit(state: ChatState, message: BotMessage, content: Content, markup: unknown) {
+      const before = JSON.stringify([message.parsed, message.markup]);
+      if (before === JSON.stringify([content.parsed, markup])) throw bad(NOT_MODIFIED);
+      Object.assign(message, content, { markup, editDate: now() });
+      return messageJson(state, message);
+    }
+
+    function enqueue(update: Json): void {
+      queue.push({ update_id: nextUpdateId++, ...update });
+      const updates = waiting ? ready(waiting.limit) : [];
+      if (waiting && updates.length) settle(waiting, updates);
+    }
+
+    function userMessage(from: MockTelegramUser, state: ChatState, body: Json, date = now()) {
+      const message_id = nextMessageId++;
+      const message = { message_id, from: userJson(from), chat: state.chat, date, ...body };
+      state.users.set(message_id, message);
+      enqueue({ message });
+      return message_id;
+    }
+
+    function ready(limit: number): Update[] {
+      const wanted = (update: Update) => {
+        const type = Object.keys(update).find((key) => key !== 'update_id') ?? '';
+        return allowed ? allowed.includes(type) : !NOT_BY_DEFAULT.includes(type);
+      };
+      return queue.filter(wanted).slice(0, limit);
+    }
+
+    /** Answers the waiting long poll (once) with updates or a 409. */
+    function settle(poll: Poll, outcome: Outcome): void {
+      if (waiting !== poll) return;
+      waiting = undefined;
+      clearTimeout(poll.timer);
+      poll.answer(outcome);
+    }
+
+    function getUpdates(params: Json, response: ServerResponse): unknown {
+      if (webhook) throw new BotApiError(409, WEBHOOK_ACTIVE);
+      if (waiting) settle(waiting, new BotApiError(409, CONFLICT));
+      const offset = Math.trunc(Number(params.offset)) || 0;
+      if (offset < 0) queue.splice(0, Math.max(0, queue.length + offset));
+      while (offset > 0 && queue.length && queue[0].update_id < offset) queue.shift();
+      if (Array.isArray(params.allowed_updates))
+        allowed = params.allowed_updates.length ? params.allowed_updates.map(String) : undefined;
+      const limit = clamp(Number(params.limit ?? 100), 1, 100);
+      const timeout = clamp(Number(params.timeout ?? 0), 0, 50);
+      const updates = ready(limit);
+      if (updates.length || !timeout) return updates;
+      return new Promise<Update[]>((resolve, reject) => {
+        const answer = (outcome: Outcome) =>
+          outcome instanceof BotApiError ? reject(outcome) : resolve(outcome);
+        const timer = setTimeout(() => settle(poll, []), timeout * 1000);
+        const poll: Poll = { response, limit, timer, answer };
+        waiting = poll;
+        response.once('close', () => settle(poll, []));
+      });
+    }
+
+    function checkFlood(method: string, params: Json): void {
+      if (!bot.floodLimit || !FLOOD_METHODS.includes(method)) return;
+      const key = String(params.chat_id);
+      const entry = flood.get(key) ?? { times: [], until: 0 };
+      flood.set(key, entry);
+      const at = Date.now();
+      const tooMany = new BotApiError(429, 'Too Many Requests: retry after 1', 1);
+      if (at < entry.until) throw tooMany;
+      entry.times = entry.times.filter((time) => at - time < FLOOD_WINDOW_MS);
+      if (entry.times.length >= bot.floodLimit) {
+        entry.times = [];
+        entry.until = at + 1000;
+        throw tooMany;
+      }
+      entry.times.push(at);
+    }
+
+    const methods: Record<string, Handler> = {
+      getMe: () => ({ ...botUser, has_topics_enabled: false }),
+      getWebhookInfo: () => ({
+        url: webhook,
+        has_custom_certificate: false,
+        pending_update_count: queue.length,
+      }),
+      deleteWebhook: (params) => {
+        webhook = '';
+        if (params.drop_pending_updates === true) queue.length = 0;
+        return true;
+      },
+      setMyCommands: (params) => {
+        commands.set(String(params.language_code ?? ''), params.commands);
+        return true;
+      },
+      getUpdates,
+      sendMessage: (params) => {
+        const state = chatOf(params);
+        const content = readText(params, false);
+        const markup = inlineKeyboard(params.reply_markup);
+        const message: BotMessage = {
+          ...content,
+          message_id: nextMessageId++,
+          date: now(),
+          markup,
+        };
+        state.bot.set(message.message_id, message);
+        state.draft = null;
+        return messageJson(state, message);
+      },
+      sendPhoto: (params, _response, files) => {
+        const state = chatOf(params);
+        const named = typeof params.photo === 'string' ? params.photo : '';
+        const upload = named.startsWith('attach://')
+          ? files.get(named.slice('attach://'.length))
+          : files.get('photo');
+        // A file id or a link: this mock keeps uploads only.
+        if (!upload)
+          throw bad(
+            named ? 'wrong file identifier/HTTP URL specified' : 'there is no photo in the request',
+          );
+        if (upload.bytes.length > MAX_PHOTO_BYTES)
+          throw new BotApiError(413, 'Request Entity Too Large');
+        if (!pictureType(upload.bytes)) throw bad('IMAGE_PROCESS_FAILED');
+        const caption = readText(
+          { text: params.caption ?? '', parse_mode: params.parse_mode },
+          true,
+        );
+        if ([...caption.parsed.text].length > 1024) throw bad('message caption is too long');
+        const { width, height } = pictureSize(upload.bytes);
+        const photo: BotPhoto = {
+          message_id: nextMessageId++,
+          date: now(),
+          caption: caption.text,
+          ...(caption.parseMode ? { parse_mode: caption.parseMode } : {}),
+          bytes: upload.bytes,
+          mime: upload.type,
+          name: upload.name,
+          width,
+          height,
+          parsed: caption.parsed,
+          sizes: photoSizes(width, height, upload.bytes.length),
+        };
+        state.photos.set(photo.message_id, photo);
+        state.draft = null;
+        return photoJson(state, photo);
+      },
+      editMessageText: (params) => {
+        const state = chatOf(params);
+        const message = botMessage(state, params);
+        return edit(state, message, readText(params, false), inlineKeyboard(params.reply_markup));
+      },
+      editMessageReplyMarkup: (params) => {
+        const state = chatOf(params);
+        const message = botMessage(state, params);
+        return edit(state, message, message, inlineKeyboard(params.reply_markup));
+      },
+      sendMessageDraft: (params) => {
+        const state = chatOf(params, true);
+        const draftId = params.draft_id;
+        if (typeof draftId !== 'number' || !Number.isInteger(draftId) || draftId === 0)
+          throw bad('invalid draft_id');
+        const { text } = readText(params, true);
+        state.draft = { draft_id: draftId, text, keepOnStop: params.keep_on_stop === true };
+        return true;
+      },
+      sendChatAction: (params) => Boolean(chatOf(params)),
+      answerCallbackQuery: (params) => {
+        if (!callbacks.delete(String(params.callback_query_id)))
+          throw bad('query is too old and response timeout expired or query ID is invalid');
+        return true;
+      },
+      leaveChat: (params) => {
+        chatOf(params).left = true;
+        return true;
+      },
+      deleteMessage: (params) => {
+        const state = chatOf(params);
+        if (!state.bot.delete(Number(params.message_id))) throw bad('message to delete not found');
+        return true;
+      },
+    };
+    const handlers = new Map(
+      Object.entries(methods).map(([name, run]) => [name.toLowerCase(), run]),
+    );
+
+    /** Answers one call to this bot (`given`: the token in the URL, which may be wrong). */
+    async function serve(
+      request: IncomingMessage,
+      response: ServerResponse,
+      given: string,
+      method: string,
+    ): Promise<void> {
+      const read = await readParams(request).catch(() => undefined);
+      const params = read?.params;
+      const files = read?.files ?? new Map<string, Upload>();
+      const record: MockBotCall = { method, params: params ?? {}, at: Date.now(), ok: true };
+      if (files.size)
+        record.files = Object.fromEntries(
+          [...files].map(([name, file]) => [
+            name,
+            { name: file.name, type: file.type, size: file.bytes.length },
+          ]),
+        );
+      calls.push(record);
+      try {
+        if (revoked || given !== token) throw new BotApiError(401, 'Unauthorized');
+        if (!params) throw bad("can't parse JSON object");
+        const name = method.toLowerCase();
+        const handler = handlers.get(name);
+        if (!handler) throw new BotApiError(404, 'Not Found: method not found');
+        const failure = failures.get(name)?.shift();
+        if (failure)
+          throw new BotApiError(failure.error_code, failure.description, failure.retry_after);
+        checkFlood(name, params);
+        reply(response, 200, { ok: true, result: await handler(params, response, files) });
+      } catch (error) {
+        const failure =
+          error instanceof BotApiError
+            ? error
+            : new BotApiError(500, `Internal Server Error: ${String(error)}`);
+        record.ok = false;
+        record.error = failure.description;
+        replyError(response, failure);
+      }
+    }
+
+    /** Answers a waiting long poll with [] and waits until that answer is written. */
+    async function release(): Promise<void> {
+      const poll = waiting;
+      if (!poll) return;
       settle(poll, []);
       await new Promise<void>((resolve) => {
         if (poll.response.writableFinished || poll.response.destroyed) return resolve();
         poll.response.once('finish', resolve).once('close', resolve);
       });
     }
+
+    const bot: MockTelegramBot = {
+      origin,
+      get token() {
+        return token;
+      },
+      botId,
+      username,
+      calls,
+      floodLimit: 0,
+      messages: (chatId) =>
+        [...(chats.get(chatId)?.bot.values() ?? [])].map((message) => ({
+          message_id: message.message_id,
+          text: message.text,
+          ...(message.parseMode ? { parse_mode: message.parseMode } : {}),
+          ...(message.markup ? { reply_markup: message.markup } : {}),
+        })),
+      photos: (chatId) =>
+        [...(chats.get(chatId)?.photos.values() ?? [])].map(
+          ({ date: _date, parsed: _parsed, sizes: _sizes, ...photo }) => photo,
+        ),
+      draft: (chatId) => {
+        const draft = chats.get(chatId)?.draft;
+        return draft ? { draft_id: draft.draft_id, text: draft.text } : null;
+      },
+      userSends(from, text, options = {}) {
+        const chatId = options.chatId ?? from.id;
+        const state = ensureChat(
+          chatId,
+          options.chatType ?? (chatId < 0 ? 'group' : 'private'),
+          from,
+        );
+        // Telegram marks `/command` or `/command@bot` at the start as a bot_command entity.
+        const command = /^\/[A-Za-z0-9_]{1,64}(?:@[A-Za-z0-9_]{3,32})?/.exec(text);
+        const entities = command
+          ? [{ type: 'bot_command', offset: 0, length: command[0].length }]
+          : undefined;
+        const { replyTo } = options;
+        const reply_to_message =
+          replyTo === undefined
+            ? undefined
+            : (find(state, replyTo) ?? { message_id: replyTo, chat: state.chat, date: 0 });
+        return userMessage(from, state, { text, entities, reply_to_message }, options.date);
+      },
+      sendPhoto(from) {
+        const photo = [{ file_id: 'mock-photo', file_unique_id: 'mock', width: 320, height: 240 }];
+        return userMessage(from, ensureChat(from.id, 'private', from), { photo });
+      },
+      press(from, chatId, messageId, data) {
+        const id = String(4_100_000_000_000_000 + ++callbackCount);
+        callbacks.add(id);
+        const state = chats.get(chatId);
+        const chat = state?.chat ?? { id: chatId, type: chatId < 0 ? 'group' : 'private' };
+        const message = (state && find(state, messageId)) ?? {
+          chat,
+          message_id: messageId,
+          date: 0,
+        };
+        const chat_instance = String(9_000_000_000_000 + Math.abs(chatId));
+        enqueue({ callback_query: { id, from: userJson(from), message, chat_instance, data } });
+        return id;
+      },
+      stopGeneration(chatId, draftId) {
+        const state = chats.get(chatId);
+        if (state?.draft?.draft_id === draftId && !state.draft.keepOnStop) state.draft = null;
+        const chat = state?.chat ?? { id: chatId, type: 'private' };
+        enqueue({ stopped_message_generation: { chat, draft_id: String(draftId) } });
+      },
+      botAddedToGroup(from, groupChatId) {
+        const state = ensureChat(groupChatId, 'group');
+        state.left = false;
+        enqueue({
+          my_chat_member: {
+            chat: state.chat,
+            from: userJson(from),
+            date: now(),
+            old_chat_member: { user: botUser, status: 'left' },
+            new_chat_member: { user: botUser, status: 'member' },
+          },
+        });
+      },
+      setWebhook(url) {
+        webhook = url;
+        if (waiting)
+          settle(waiting, new BotApiError(409, 'Conflict: terminated by setWebhook request'));
+      },
+      failNext(method, error) {
+        const key = method.toLowerCase();
+        failures.set(key, [...(failures.get(key) ?? []), error]);
+      },
+      revokeToken() {
+        revoked = true;
+      },
+      rotateToken() {
+        token = newToken(botId);
+        revoked = false;
+        return token;
+      },
+      async waitFor(check, timeoutMs = 5000) {
+        const deadline = Date.now() + timeoutMs;
+        let thrown: unknown;
+        for (;;) {
+          try {
+            const value = check();
+            if (value !== undefined && value !== null && value !== false) return value;
+          } catch (error) {
+            thrown = error;
+          }
+          if (Date.now() >= deadline) {
+            const reason =
+              thrown instanceof Error ? ` (the check last threw: ${thrown.message})` : '';
+            const message = `waitFor gave up after ${timeoutMs} ms${reason}. Last Bot API calls:`;
+            throw new Error(`${message}\n${describeCalls(calls)}`);
+          }
+          await delay(10);
+        }
+      },
+    };
+    return { mock: bot, serve, release };
+  }
+
+  /** The token in the URL picks the bot; a wrong one goes to the bot whose id it starts with. */
+  async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const path = new URL(request.url ?? '/', 'http://mock').pathname;
+    const route = /^\/bot([^/]+)\/([A-Za-z]+)$/.exec(path);
+    if (!route) return replyError(response, new BotApiError(404, 'Not Found'));
+    const [, given, method] = route;
+    const bot =
+      bots.find((item) => item.mock.token === given) ??
+      bots.find((item) => given.startsWith(`${item.mock.botId}:`)) ??
+      bots[0];
+    await bot.serve(request, response, given, method);
+  }
+
+  function addBot(botId: number, username: string): MockTelegramBot {
+    if (!Number.isSafeInteger(botId) || botId < 10_000) throw new Error('botId: 5+ digit integer');
+    if (bots.some((bot) => bot.mock.botId === botId || bot.mock.username === username))
+      throw new Error(`mock telegram: a bot ${botId} or @${username} is already here`);
+    const bot = createBot(botId, username);
+    bots.push(bot);
+    return bot.mock;
+  }
+
+  async function shutdown(): Promise<void> {
+    await Promise.all(bots.map((bot) => bot.release()));
     await new Promise<void>((resolve) => {
       server.closeAllConnections();
       server.close(() => resolve());
     });
   }
 
-  const mock: MockTelegram = {
-    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    token,
-    botId,
-    username,
-    calls,
-    floodLimit: 0,
-    messages: (chatId) =>
-      [...(chats.get(chatId)?.bot.values() ?? [])].map((message) => ({
-        message_id: message.message_id,
-        text: message.text,
-        ...(message.parseMode ? { parse_mode: message.parseMode } : {}),
-        ...(message.markup ? { reply_markup: message.markup } : {}),
-      })),
-    photos: (chatId) =>
-      [...(chats.get(chatId)?.photos.values() ?? [])].map(
-        ({ date: _date, parsed: _parsed, sizes: _sizes, ...photo }) => photo,
-      ),
-    draft: (chatId) => {
-      const draft = chats.get(chatId)?.draft;
-      return draft ? { draft_id: draft.draft_id, text: draft.text } : null;
+  const first = addBot(options.botId ?? 8_123_456_789, options.username ?? 'yomi_mock_bot');
+  return Object.defineProperties(first as MockTelegram, {
+    addBot: {
+      value: (more: { username: string; botId: number }) => addBot(more.botId, more.username),
     },
-    userSends(from, text, options = {}) {
-      const chatId = options.chatId ?? from.id;
-      const state = ensureChat(
-        chatId,
-        options.chatType ?? (chatId < 0 ? 'group' : 'private'),
-        from,
-      );
-      // Telegram marks `/command` or `/command@bot` at the start as a bot_command entity.
-      const command = /^\/[A-Za-z0-9_]{1,64}(?:@[A-Za-z0-9_]{3,32})?/.exec(text);
-      const entities = command
-        ? [{ type: 'bot_command', offset: 0, length: command[0].length }]
-        : undefined;
-      const { replyTo } = options;
-      const reply_to_message =
-        replyTo === undefined
-          ? undefined
-          : (find(state, replyTo) ?? { message_id: replyTo, chat: state.chat, date: 0 });
-      return userMessage(from, state, { text, entities, reply_to_message }, options.date);
+    bots: { get: () => bots.map((bot) => bot.mock) },
+    close: {
+      value: () => {
+        closing ??= shutdown();
+        return closing;
+      },
     },
-    sendPhoto(from) {
-      const photo = [{ file_id: 'mock-photo', file_unique_id: 'mock', width: 320, height: 240 }];
-      return userMessage(from, ensureChat(from.id, 'private', from), { photo });
-    },
-    press(from, chatId, messageId, data) {
-      const id = String(4_100_000_000_000_000 + ++callbackCount);
-      callbacks.add(id);
-      const state = chats.get(chatId);
-      const chat = state?.chat ?? { id: chatId, type: chatId < 0 ? 'group' : 'private' };
-      const message = (state && find(state, messageId)) ?? { chat, message_id: messageId, date: 0 };
-      const chat_instance = String(9_000_000_000_000 + Math.abs(chatId));
-      enqueue({ callback_query: { id, from: userJson(from), message, chat_instance, data } });
-      return id;
-    },
-    stopGeneration(chatId, draftId) {
-      const state = chats.get(chatId);
-      if (state?.draft?.draft_id === draftId && !state.draft.keepOnStop) state.draft = null;
-      const chat = state?.chat ?? { id: chatId, type: 'private' };
-      enqueue({ stopped_message_generation: { chat, draft_id: String(draftId) } });
-    },
-    botAddedToGroup(from, groupChatId) {
-      const state = ensureChat(groupChatId, 'group');
-      state.left = false;
-      enqueue({
-        my_chat_member: {
-          chat: state.chat,
-          from: userJson(from),
-          date: now(),
-          old_chat_member: { user: botUser, status: 'left' },
-          new_chat_member: { user: botUser, status: 'member' },
-        },
-      });
-    },
-    setWebhook(url) {
-      webhook = url;
-      if (waiting)
-        settle(waiting, new BotApiError(409, 'Conflict: terminated by setWebhook request'));
-    },
-    failNext(method, error) {
-      const key = method.toLowerCase();
-      failures.set(key, [...(failures.get(key) ?? []), error]);
-    },
-    revokeToken() {
-      revoked = true;
-    },
-    async waitFor(check, timeoutMs = 5000) {
-      const deadline = Date.now() + timeoutMs;
-      let thrown: unknown;
-      for (;;) {
-        try {
-          const value = check();
-          if (value !== undefined && value !== null && value !== false) return value;
-        } catch (error) {
-          thrown = error;
-        }
-        if (Date.now() >= deadline) {
-          const reason =
-            thrown instanceof Error ? ` (the check last threw: ${thrown.message})` : '';
-          const message = `waitFor gave up after ${timeoutMs} ms${reason}. Last Bot API calls:`;
-          throw new Error(`${message}\n${describeCalls(calls)}`);
-        }
-        await delay(10);
-      }
-    },
-    close() {
-      closing ??= shutdown();
-      return closing;
-    },
-  };
-  return mock;
+  });
 }

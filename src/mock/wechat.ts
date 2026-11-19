@@ -12,8 +12,12 @@ import type { AddressInfo } from 'node:net';
  * is a long poll with an opaque cursor; `sendmessage` takes only a `context_token` it issued, to
  * that person, within `windowMs`; uploads are decrypted (AES-128-ECB, PKCS#7) and checked against
  * what `getuploadurl` announced. What the server would answer for an expired context is not
- * documented: this mock answers `ret: -2`. It listens on 127.0.0.1 only; nothing reaches the
- * network.
+ * documented: this mock answers `ret: -2`. One WeChat account may link several ClawBots: each
+ * confirmed scan of a new bot id is another ClawBot with its own `bot_token`, `getupdates` stream,
+ * cursor and `context_token`s (a token works only for the ClawBot that issued it), and logging one
+ * in again replaces only its own token. A scan of a ClawBot this computer already holds (its token
+ * in the code's `local_token_list`) answers `binded_redirect`, which names no bot. It listens on
+ * 127.0.0.1 only; nothing reaches the network.
  */
 
 type Json = Record<string, unknown>;
@@ -51,6 +55,8 @@ export type MockWechatCall = {
 
 /** A message the bot sent. */
 export type MockWechatSent = {
+  /** The ClawBot (`ilink_bot_id`) that sent it. */
+  bot: string;
   client_id: string;
   to_user_id: string;
   context_token: string;
@@ -84,8 +90,10 @@ export type MockWechat = {
   altHost: string;
   /** The person who scans unless a test names another (an `ilink_user_id`). */
   owner: string;
-  /** The bot id of the newest confirmed login. */
+  /** The bot id of the newest confirmed login (where `userSends` goes by default). */
   botId: string;
+  /** The linked ClawBots, oldest first; `live` while their token works. */
+  clawBots(): { botId: string; userId: string; live: boolean }[];
   /** Every request in arrival order. */
   calls: MockWechatCall[];
   /** The `qrcode_img_content` of every code issued, oldest first. */
@@ -96,6 +104,13 @@ export type MockWechat = {
   scan(userId?: string): void;
   /** The phone shows `digits`: `need_verifycode` until a poll carries them. */
   askPin(digits: string): void;
+  /**
+   * The phone confirms: ClawBot `botId` (by default `mock.botId`) is logged in for `userId` with a
+   * new token, which replaces only that ClawBot's old one; a new `botId` links another ClawBot.
+   * When `botId` names a ClawBot of `userId` whose token is in this code's `local_token_list`, the
+   * answer is `binded_redirect` instead (no new token). Without `botId` that ClawBot always gets a
+   * new token.
+   */
   confirm(options?: { userId?: string; botId?: string; baseurl?: string }): void;
   /** `scaned_but_redirect` to `host` (a bare host, as the server names it). */
   redirectTo(host: string): void;
@@ -106,14 +121,15 @@ export type MockWechat = {
   status(value: string): void;
   // Chat.
   /**
-   * A message from `from` (the owner by default) to the bot; returns its `message_id` (with
-   * `bigIds`, the wire id is 7300000000000000000 more). `messageType: null` leaves the field out;
-   * `token` reuses a `context_token`.
+   * A message from `from` (the owner by default) to ClawBot `bot` (by default `mock.botId`);
+   * returns its `message_id` (with `bigIds`, the wire id is 7300000000000000000 more).
+   * `messageType: null` leaves the field out; `token` reuses a `context_token`.
    */
   userSends(
     text: string,
     options?: {
       from?: string;
+      bot?: string;
       at?: number;
       group?: string;
       items?: Json[];
@@ -123,19 +139,25 @@ export type MockWechat = {
   ): number;
   /** The `context_token` the mock gave the message `userSends` returned the id of. */
   contextOf(messageId: number): string;
-  /** The next getupdates answers the previous batch again (same message ids), then goes on. */
-  replayNextBatch(): void;
-  /** The next `times` getupdates answer -14. */
-  expireSession(times: number): void;
-  /** Every later bot call answers HTTP 401 until the next confirm. */
-  revokeTokens(): void;
+  /**
+   * The next getupdates (of `bot`, or of any ClawBot) answers its previous batch again (same
+   * message ids), then goes on.
+   */
+  replayNextBatch(bot?: string): void;
+  /** The next `times` getupdates (of `bot`, or of any ClawBot) answer -14. */
+  expireSession(times: number, bot?: string): void;
+  /**
+   * Every later call with the token of `bot` (or of any ClawBot) answers HTTP 401 until that
+   * ClawBot's next confirm.
+   */
+  revokeTokens(bot?: string): void;
   /** The next call of `endpoint` ('sendmessage', 'cdn', …) gets this answer. */
   failNext(endpoint: string, answer: { status?: number; body?: Json }): void;
-  /** What the bot sent to `userId` (the owner by default), oldest first. */
-  messages(userId?: string): MockWechatSent[];
-  texts(userId?: string): string[];
-  /** Typing calls: status 1 typing, 2 stopped. */
-  typing(): { user: string; status: number; at: number }[];
+  /** What the ClawBots (or only `bot`) sent to `userId` (the owner by default), oldest first. */
+  messages(userId?: string, bot?: string): MockWechatSent[];
+  texts(userId?: string, bot?: string): string[];
+  /** Typing calls: status 1 typing, 2 stopped; `bot` is the ClawBot that called. */
+  typing(): { user: string; status: number; at: number; bot: string }[];
   uploads: MockWechatUpload[];
   /** Polls `check` every 10 ms until it returns something other than undefined/null/false. */
   waitFor<T>(check: () => T | undefined | null | false, timeoutMs?: number): Promise<T>;
@@ -147,8 +169,23 @@ const STALE = -14;
 const BIG_ID_BASE = 7_300_000_000_000_000_000n;
 
 type Waiter = () => void;
-type Context = { user: string; issuedAt: number; sent: number };
+/** A `context_token`: issued by ClawBot `bot` for a message from `user`. */
+type Context = { user: string; bot: string; issuedAt: number; sent: number };
 type Inbox = { seq: number; message: Json };
+/** A ClawBot: its token ('' when none works), its messages and its long poll. */
+type ClawBot = {
+  id: string;
+  user: string;
+  token: string;
+  linked: boolean;
+  inbox: Inbox[];
+  /** The latest batch getupdates gave and the cursor it ended at (for replayNextBatch). */
+  lastBatch: Json[];
+  lastCursor: number;
+  replay: boolean;
+  expiring: number;
+  waiters: Waiter[];
+};
 type QrEvent = Json & { status: string };
 
 export async function startMockWechat(options: MockWechatOptions = {}): Promise<MockWechat> {
@@ -161,29 +198,57 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
   const qrcodes: string[] = [];
   const localTokens: string[][] = [];
   const sent: MockWechatSent[] = [];
-  const typing: { user: string; status: number; at: number }[] = [];
+  const typing: { user: string; status: number; at: number; bot: string }[] = [];
   const uploads: MockWechatUpload[] = [];
-  const tokens = new Set<string>();
+  /** Every ClawBot by id, in the order they were linked (or first written to). */
+  const clawBots = new Map<string, ClawBot>();
+  /** The working tokens and their ClawBots. */
+  const tokens = new Map<string, ClawBot>();
   const contexts = new Map<string, Context>();
-  const tickets = new Map<string, string>();
+  const tickets = new Map<string, { user: string; bot: string }>();
   const byParam = new Map<string, MockWechatUpload>();
   const downloads = new Map<string, MockWechatUpload>();
   const failures = new Map<string, { status?: number; body?: Json }>();
-  const inbox: Inbox[] = [];
   const tokenOf = new Map<number, string>();
-  let lastBatch: Json[] = [];
-  let replay = false;
-  let expiring = 0;
+  /** replayNextBatch / expireSession without a bot: the next getupdates of any ClawBot. */
+  let replayAny = false;
+  let expiringAny = 0;
+  /** One sequence for every ClawBot, so no cursor ever hides a newer message. */
   let seq = 0;
   let messageId = 7_000_000;
-  let updateWaiters: Waiter[] = [];
   let qrWaiters: Waiter[] = [];
-  /** The code being scanned, and what its next polls answer. */
+  /** The code being scanned, its `local_token_list`, and what its next polls answer. */
   let current = '';
+  let currentTokens: string[] = [];
   let qrEvents: QrEvent[] = [];
   let pin = '';
   const owner = 'o9cq8_owner@im.wechat';
   let botId = 'b1f2_bot@im.bot';
+
+  const clawBot = (id: string) => {
+    let bot = clawBots.get(id);
+    if (!bot) {
+      bot = {
+        id,
+        user: '',
+        token: '',
+        linked: false,
+        inbox: [],
+        lastBatch: [],
+        lastCursor: 0,
+        replay: false,
+        expiring: 0,
+        waiters: [],
+      };
+      clawBots.set(id, bot);
+    }
+    return bot;
+  };
+  /** The ClawBot's token stops working. */
+  const revoke = (bot: ClawBot) => {
+    tokens.delete(bot.token);
+    bot.token = '';
+  };
 
   const wake = (waiters: Waiter[]) => {
     for (const waiter of waiters) waiter();
@@ -224,41 +289,50 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
   const ok = (body: Json = {}) => ({ ret: 0, ...body });
   const refuse = (ret: number, errmsg: string) => ({ ret, errcode: ret, errmsg });
 
-  const routes: Record<string, (body: Json, response: ServerResponse) => Promise<Json> | Json> = {
-    getupdates: async (body, response) => {
-      if (expiring > 0) {
-        expiring -= 1;
+  /** The endpoints a bot token opens, each for the ClawBot the token belongs to. */
+  const routes: Record<
+    string,
+    (body: Json, response: ServerResponse, bot: ClawBot) => Promise<Json> | Json
+  > = {
+    getupdates: async (body, response, bot) => {
+      if (bot.expiring > 0 || expiringAny > 0) {
+        if (bot.expiring > 0) bot.expiring -= 1;
+        else expiringAny -= 1;
         return refuse(STALE, 'session timeout');
       }
-      if (replay) {
-        replay = false;
+      if (bot.replay || replayAny) {
+        if (bot.replay) bot.replay = false;
+        else replayAny = false;
         return ok({
-          msgs: lastBatch,
-          get_updates_buf: cursorOf(seq),
+          msgs: bot.lastBatch,
+          get_updates_buf: cursorOf(bot.lastCursor),
           longpolling_timeout_ms: longPollMs,
         });
       }
       const after = readCursor(body.get_updates_buf);
-      const fresh = () => inbox.some((item) => item.seq > after);
+      const fresh = () => bot.inbox.some((item) => item.seq > after);
       await hold(
         response,
         longPollMs,
         fresh,
-        () => updateWaiters,
+        () => bot.waiters,
         (waiters) => {
-          updateWaiters = waiters;
+          bot.waiters = waiters;
         },
       );
-      const batch = inbox.filter((item) => item.seq > after);
+      const batch = bot.inbox.filter((item) => item.seq > after);
       const last = batch.at(-1)?.seq ?? Math.max(after, 0);
-      if (batch.length) lastBatch = batch.map((item) => item.message);
+      if (batch.length) {
+        bot.lastBatch = batch.map((item) => item.message);
+        bot.lastCursor = last;
+      }
       return ok({
         msgs: batch.map((item) => item.message),
         get_updates_buf: cursorOf(last),
         longpolling_timeout_ms: longPollMs,
       });
     },
-    sendmessage: (body) => {
+    sendmessage: (body, _response, bot) => {
       const msg = (body.msg ?? {}) as Json;
       const token = String(msg.context_token ?? '');
       const to = String(msg.to_user_id ?? '');
@@ -266,6 +340,7 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       if (
         !context ||
         context.user !== to ||
+        context.bot !== bot.id ||
         Date.now() - context.issuedAt >= windowMs ||
         context.sent >= maxPerContext
       )
@@ -295,6 +370,7 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       } else return refuse(-1, 'unsupported item');
       context.sent += 1;
       sent.push({
+        bot: bot.id,
         client_id: msg.client_id,
         to_user_id: to,
         context_token: token,
@@ -305,18 +381,18 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       });
       return ok();
     },
-    getconfig: (body) => {
+    getconfig: (body, _response, bot) => {
       const user = String(body.ilink_user_id ?? '');
       if (!user) return refuse(-1, 'no user');
       const ticket = 'tk_' + hex();
-      tickets.set(ticket, user);
+      tickets.set(ticket, { user, bot: bot.id });
       return ok({ typing_ticket: ticket });
     },
-    sendtyping: (body) => {
+    sendtyping: (body, _response, bot) => {
       const user = String(body.ilink_user_id ?? '');
-      if (tickets.get(String(body.typing_ticket ?? '')) !== user)
-        return refuse(-1, 'bad typing ticket');
-      typing.push({ user, status: Number(body.status), at: Date.now() });
+      const ticket = tickets.get(String(body.typing_ticket ?? ''));
+      if (ticket?.user !== user || ticket.bot !== bot.id) return refuse(-1, 'bad typing ticket');
+      typing.push({ user, status: Number(body.status), at: Date.now(), bot: bot.id });
       return ok();
     },
     getuploadurl: (body) => {
@@ -349,6 +425,7 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
   const handleQrcode = (body: Json) => {
     const list = Array.isArray(body.local_token_list) ? (body.local_token_list as string[]) : [];
     localTokens.push(list);
+    currentTokens = list;
     current = 'qr_' + hex();
     qrEvents = [];
     pin = '';
@@ -424,7 +501,8 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
     for (const [name, value] of Object.entries(request.headers))
       if (typeof value === 'string' && name !== 'authorization') headers[name] = value;
     const bearer = /^Bearer (\S+)$/.exec(request.headers.authorization ?? '')?.[1] ?? '';
-    const authorized = tokens.has(bearer);
+    const holder = tokens.get(bearer);
+    const authorized = holder !== undefined;
     const send = (status: number, body: Json, extra: Record<string, string> = {}) => {
       if (response.destroyed) return;
       response.writeHead(status, { 'Content-Type': 'application/json', ...extra });
@@ -485,14 +563,17 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       failures.delete(endpoint);
       return send(failure.status ?? 200, failure.body ?? refuse(-1, 'mock failure'));
     }
-    if (!authorized || request.headers.authorizationtype !== 'ilink_bot_token')
+    if (!holder || request.headers.authorizationtype !== 'ilink_bot_token')
       return send(401, refuse(-1, 'unauthorized'));
-    send(200, await route(body, response));
+    send(200, await route(body, response, holder));
   };
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   const origin = `http://127.0.0.1:${port}`;
+
+  const sentTo = (userId: string, bot?: string) =>
+    sent.filter((message) => message.to_user_id === userId && (!bot || message.bot === bot));
 
   const mock: MockWechat = {
     origin,
@@ -501,6 +582,10 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
     get botId() {
       return botId;
     },
+    clawBots: () =>
+      [...clawBots.values()]
+        .filter((bot) => bot.linked)
+        .map((bot) => ({ botId: bot.id, userId: bot.user, live: bot.token !== '' })),
     calls,
     qrcodes,
     localTokens,
@@ -511,16 +596,24 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       pushQr({ status: 'need_verifycode' });
     },
     confirm: (confirmation = {}) => {
+      const user = confirmation.userId ?? owner;
+      const named = confirmation.botId ? clawBots.get(confirmation.botId) : undefined;
+      // A ClawBot this computer already holds: WeChat says so, without naming it.
+      if (named?.token && named.user === user && currentTokens.includes(named.token))
+        return pushQr({ status: 'binded_redirect' });
       if (confirmation.botId) botId = confirmation.botId;
-      const token = 'tok_' + hex(16);
-      tokens.clear();
-      tokens.add(token);
+      const bot = clawBot(botId);
+      revoke(bot);
+      bot.token = 'tok_' + hex(16);
+      bot.user = user;
+      bot.linked = true;
+      tokens.set(bot.token, bot);
       pushQr({
         status: 'confirmed',
-        bot_token: token,
-        ilink_bot_id: botId,
+        bot_token: bot.token,
+        ilink_bot_id: bot.id,
         baseurl: confirmation.baseurl ?? origin,
-        ilink_user_id: confirmation.userId ?? owner,
+        ilink_user_id: user,
       });
     },
     redirectTo: (host) => pushQr({ status: 'scaned_but_redirect', redirect_host: host }),
@@ -531,18 +624,19 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
     userSends: (text, sendOptions = {}) => {
       seq += 1;
       messageId += 1;
+      const bot = clawBot(sendOptions.bot ?? botId);
       const token = sendOptions.token ?? 'ctx_' + hex(12);
       const from = sendOptions.from ?? owner;
       const at = sendOptions.at ?? Date.now();
-      contexts.set(token, { user: from, issuedAt: at, sent: 0 });
+      contexts.set(token, { user: from, bot: bot.id, issuedAt: at, sent: 0 });
       tokenOf.set(messageId, token);
-      inbox.push({
+      bot.inbox.push({
         seq,
         message: {
           seq,
           message_id: options.bigIds ? String(BIG_ID_BASE + BigInt(messageId)) : messageId,
           from_user_id: from,
-          to_user_id: botId,
+          to_user_id: bot.id,
           create_time_ms: at,
           ...(sendOptions.messageType === null
             ? {}
@@ -553,24 +647,28 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
           item_list: sendOptions.items ?? [{ type: 1, text_item: { text } }],
         },
       });
-      const waiters = updateWaiters;
-      updateWaiters = [];
+      const waiters = bot.waiters;
+      bot.waiters = [];
       wake(waiters);
       return messageId;
     },
     contextOf: (id) => tokenOf.get(id) ?? '',
-    replayNextBatch: () => {
-      replay = true;
+    replayNextBatch: (bot) => {
+      if (bot) clawBot(bot).replay = true;
+      else replayAny = true;
     },
-    expireSession: (times) => {
-      expiring = times;
+    expireSession: (times, bot) => {
+      if (bot) clawBot(bot).expiring = times;
+      else expiringAny = times;
     },
-    revokeTokens: () => tokens.clear(),
+    revokeTokens: (bot) => {
+      for (const each of bot ? [clawBot(bot)] : clawBots.values()) revoke(each);
+    },
     failNext: (endpoint, answer) => failures.set(endpoint, answer),
-    messages: (userId = owner) => sent.filter((message) => message.to_user_id === userId),
-    texts: (userId = owner) =>
-      sent
-        .filter((message) => message.to_user_id === userId && message.text !== null)
+    messages: (userId = owner, bot) => sentTo(userId, bot),
+    texts: (userId = owner, bot) =>
+      sentTo(userId, bot)
+        .filter((message) => message.text !== null)
         .map((message) => message.text as string),
     typing: () => typing,
     async waitFor(check, timeoutMs = 8000) {
@@ -583,8 +681,11 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
       }
     },
     close: async () => {
-      wake([...updateWaiters, ...qrWaiters]);
-      updateWaiters = [];
+      for (const bot of clawBots.values()) {
+        wake(bot.waiters);
+        bot.waiters = [];
+      }
+      wake(qrWaiters);
       qrWaiters = [];
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
