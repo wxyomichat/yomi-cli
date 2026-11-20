@@ -14,6 +14,7 @@ import {
   startMockTelegram,
 } from '../src/mock/telegram.js';
 import type { ChannelSetup } from '../src/relay/channels/setup.js';
+import { wechatSetup } from '../src/relay/channels/wechat.js';
 import { BotRegistry, characterOwner, registryPath } from '../src/relay/registry.js';
 import { ownerKey, RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
@@ -29,8 +30,10 @@ import { memoryIo } from './helpers/io.js';
  * registered owner's start given back to a state file that lost it; one character per bot (a run's
  * other `--character` ignored, and left out of a service it installs, `--bot NAME --character ID`
  * binding another one while the bot is stopped and its owner welcomed with it, a bot without one
- * paired and answering only how to bind one); a token set by another command while a relay starts.
- * Against the mock gateway and the mock Bot API, nothing on the network.
+ * paired and answering only how to bind one); a token set by another command while a relay starts;
+ * a registered bot whose credentials are gone (listed with the command that sets them, and never
+ * asked for in a run of several bots). Against the mock gateway and the mock Bot API, nothing on
+ * the network.
  */
 
 /** Run once at two points of a `yomi relay --telegram` start: as another command would run there. */
@@ -171,8 +174,8 @@ describe('yomi relay --list', () => {
     const mixed = await run(['relay', '--list', '--forget']);
     expect(mixed.code).toBe(1);
     expect(mixed.err).toContain('--list 只列出 bot，不能和 --forget 一起用');
-    // Without --list a channel is still needed.
-    expect((await run(['relay'])).err).toContain('选择一个通道');
+    // Without --list or a channel a run takes every bot: there is none yet.
+    expect((await run(['relay'])).err).toContain('这台电脑上还没有 bot');
     expect(existsSync(registryPath(context().account))).toBe(false);
     for (const lang of ['en', 'es', 'pt']) {
       const other = await run(['--lang', lang, 'relay', '--list']);
@@ -441,13 +444,17 @@ describe('a bot of before the registry', () => {
       MOCK_NPCS.group,
     ]);
     expect(englishChannel.err).toContain('"lin_registry_bot" is a Telegram bot, not QQ.');
-    const bare = await run(['relay', '--bot', 'lin_registry_bot']);
-    expect(bare.code).toBe(1);
-    expect(bare.err).toContain(
-      '给 bot 换绑角色要同时给出角色：yomi relay --bot 名字 --character ID',
-    );
+    // Without --character, --bot chooses the bots to run: never with one channel's setup.
+    const toRun = await run(['relay', '--bot', 'nobody', '--allow-file-store']);
+    expect(toRun.code).toBe(1);
+    expect(toRun.err).toContain('没有叫 "nobody" 的 bot。这台电脑上的 bot：lin_registry_bot');
+    const setup = await run(['relay', '--bot', 'lin_registry_bot', '--set-token']);
+    expect(setup.code).toBe(1);
+    expect(setup.err).toContain('--bot 选择要运行的 bot，不能和 --set-token 一起用');
     const mixed = await run(['relay', '--bot', 'lin_registry_bot', '--pair', '--character', '1']);
-    expect(mixed.err).toContain('--bot 只用来给 bot 换绑角色，不能和 --pair 一起用');
+    expect(mixed.err).toContain('--bot 和 --character 一起用是给 bot 换绑角色，不能再加 --pair');
+    const two = await run(['relay', '--bot', 'lin_registry_bot,other', '--character', '1']);
+    expect(two.err).toContain('一次只能给一个 bot 换绑角色');
     const bad = await run(['relay', '--bot', 'lin_registry_bot', '--character', 'nobody']);
     expect(bad.err).toContain('没有找到角色 nobody，或它暂时不能聊天。');
     for (const lang of ['en', 'es', 'pt']) {
@@ -694,5 +701,86 @@ describe('a token set by another command while a relay starts', () => {
     expect(english.err).toContain(
       'The saved Telegram credentials changed while the relay was starting, so it was not started: run yomi relay --telegram again.',
     );
+  });
+});
+
+describe('a registered bot whose credentials are gone', () => {
+  it('is listed with the command that sets them, and a run of several bots asks for none', async () => {
+    const { store, account } = context();
+    const set = await run(
+      ['relay', '--telegram', '--set-token', '--token-stdin', '--allow-file-store'],
+      { input: [tg.token] },
+    );
+    expect(set.code).toBe(0);
+    // An older yomi's --forget (or a hand) took the secrets away and left the registry as it was.
+    const registry = BotRegistry.open(account);
+    registry.adopt({
+      kind: 'qq',
+      secretName: `qq-bot:${account}`,
+      stored: { platformId: '102000777', scope: 'qq:102000777', lockName: 'qq-102000777' },
+      label: 'Lin QQ',
+    });
+    const wechatSecret = `wechat-ilink:${account}`;
+    const login = JSON.stringify({
+      botToken: 'wx-token',
+      ilinkBotId: 'bot',
+      ilinkUserId: 'scanner',
+    });
+    registry.adopt({
+      kind: 'wechat',
+      secretName: wechatSecret,
+      stored: wechatSetup.storedBot(login)!,
+      label: 'WeChat',
+    });
+    store.deleteSecret(TOKEN_NAME());
+    expect(BotRegistry.open(account).list()).toHaveLength(3);
+
+    const listed = await run(['relay', '--list']);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain('  状态：需要凭证：yomi relay --telegram --set-token');
+    expect(listed.out).toContain('  状态：需要凭证：yomi relay --channel qq --set-app');
+    expect(listed.out).toContain(
+      '  状态：需要登录：yomi relay --channel wechat --experimental --login',
+    );
+    const english = await run(['--lang', 'en', 'relay', '--list']);
+    expect(english.out).toContain('  Status: needs credentials: yomi relay --telegram --set-token');
+    expect(english.out).toContain('  Status: needs credentials: yomi relay --channel qq --set-app');
+    expect(english.out).toContain(
+      '  Status: needs login: yomi relay --channel wechat --experimental --login',
+    );
+    for (const lang of ['es', 'pt']) {
+      const other = await run(['--lang', lang, 'relay', '--list']);
+      const statuses = other.out.split('\n').filter((line) => line.includes('yomi relay --'));
+      expect(statuses.length, lang).toBeGreaterThanOrEqual(3);
+      for (const line of statuses) expect(line.search(CJK), `${lang}: ${line}`).toBe(-1);
+    }
+    // Logged in, but nobody has scanned for this relay yet: still a login to finish.
+    store.setSecret(wechatSecret, login);
+    expect((await run(['relay', '--list'])).out).toContain(
+      '  状态：需要登录：yomi relay --channel wechat --experimental --login',
+    );
+    store.deleteSecret(wechatSecret);
+
+    // A run of every bot, in a terminal: no prompt (a token typed in would replace the selected
+    // bot); each bot says which command sets its credentials, and the registry stays as it was.
+    const names = BotRegistry.open(account)
+      .list()
+      .map((record) => record.name);
+    const checks = second.calls.filter((call) => call.method === 'getMe').length;
+    const all = await run(['relay', '--allow-file-store'], {
+      interactive: true,
+      input: [second.token],
+    });
+    expect(all.code).toBe(0);
+    expect(all.err).toContain('还没有设置 bot token：先运行 yomi relay --telegram --set-token');
+    expect(all.err).toContain('先运行 yomi relay --channel qq --set-app');
+    expect(store.getSecret(TOKEN_NAME())).toBeNull();
+    expect(
+      BotRegistry.open(account)
+        .list()
+        .map((record) => record.name),
+    ).toEqual(names);
+    // The token waiting at the prompt was never read, so never checked.
+    expect(second.calls.filter((call) => call.method === 'getMe')).toHaveLength(checks);
   });
 });

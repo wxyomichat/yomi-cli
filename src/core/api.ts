@@ -106,16 +106,45 @@ export function refreshLockPath(account: string, dir = configDir()): string {
   return join(dir, 'locks', `refresh-${name}.lock`);
 }
 
+/** The sign-in a gateway and its views for other clients (`forClient`) hold together. */
+type SignIn = { credential: Credential | null; refreshing: Promise<void> | null };
+
 export class Gateway {
   readonly env: Environment;
-  private credentialValue: Credential | null;
-  private refreshing: Promise<void> | null = null;
+  private readonly signIn: SignIn;
   private readonly fetcher: typeof fetch;
 
-  constructor(private readonly options: GatewayOptions) {
+  constructor(
+    private readonly options: GatewayOptions,
+    signIn?: SignIn,
+  ) {
     this.env = options.env;
-    this.credentialValue = options.credential ?? null;
+    this.signIn = signIn ?? { credential: options.credential ?? null, refreshing: null };
     this.fetcher = options.fetch ?? fetch;
+  }
+
+  private get credentialValue(): Credential | null {
+    return this.signIn.credential;
+  }
+
+  private set credentialValue(credential: Credential | null) {
+    this.signIn.credential = credential;
+  }
+
+  private get refreshing(): Promise<void> | null {
+    return this.signIn.refreshing;
+  }
+
+  private set refreshing(refreshing: Promise<void> | null) {
+    this.signIn.refreshing = refreshing;
+  }
+
+  /**
+   * This gateway for another client (its User-Agent suffix, e.g. each bot's `relay-qq` in a relay
+   * running several): the same sign-in, store and refresh lock, and one refresh at a time for both.
+   */
+  forClient(client: string): Gateway {
+    return new Gateway({ ...this.options, client }, this.signIn);
   }
 
   get credential(): Credential | null {

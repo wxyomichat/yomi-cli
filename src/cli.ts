@@ -480,8 +480,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --accept-price / --confirm-prod / --json`,
     ),
     relay: tr(
-      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend 钻石] [选项]
-  把你本人在私聊里发给自己 bot 的消息转给 Yomi 角色，再把角色的回复发回去。通道：
+      `yomi relay [--channel telegram|qq|wechat] [--bot 名字] [--character ID] [--max-spend 钻石] [选项]
+  把你本人在私聊里发给自己 bot 的消息转给 Yomi 角色，再把角色的回复发回去。不指定通道和 bot 时，一个进程
+  运行这台电脑上登记的所有 bot（共用一次 Yomi 登录和一个花费上限）。通道：
     telegram   你在 @BotFather 建的 Telegram bot，回复流式显示（--telegram 等同 --channel telegram）
     qq         你自己在 QQ 开放平台（q.qq.com）建的 QQ bot，只用私聊（仅限个人使用）
     wechat     微信 ClawBot（iLink），扫码登录（实验功能，仅限个人使用；要加 --experimental）
@@ -498,7 +499,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --experimental        使用微信通道时必须加
   --pair                重新配对（Telegram、QQ：会显示新的配对码）
   --character ID        bot 对话的角色：还没有角色的 bot 运行时绑定它（已经绑定的 bot 忽略）
-  --bot 名字            和 --character 一起用：给这个 bot 换绑角色（relay 停止时；名字见 --list）
+  --bot 名字            只运行这些 bot（可以重复，或用逗号分隔；名字见 --list）；和 --character 一起用：
+                        给这个 bot 换绑角色（relay 停止时）
   --max-spend 数量      可选的本机花费上限：relay 在这台电脑上累计最多花的钻石（默认不设上限；
                         0：只用免费额度）
   --reset-spend         重新计算 relay 的累计花费（有没有上限都适用）
@@ -511,9 +513,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
   --no-drafts           Telegram：不用流式草稿，改为编辑消息
   --confirm-prod        非交互在生产环境运行时明确确认`,
-      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gems] [options]
+      `yomi relay [--channel telegram|qq|wechat] [--bot name] [--character ID] [--max-spend gems] [options]
   Relays the messages you yourself send your own bot in a private chat to a Yomi character, and sends the
-  character's replies back. Channels:
+  character's replies back. Without a channel or a bot, one process runs every bot registered on this
+  computer (one Yomi sign-in and one spending cap for all). Channels:
     telegram   A Telegram bot you created with @BotFather; replies stream in (--telegram is the same as
                --channel telegram)
     qq         Your own QQ bot from the QQ Open Platform (q.qq.com), private chat only (personal use only)
@@ -535,8 +538,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --pair                Pair again (Telegram, QQ: shows a new pairing code)
   --character ID        The character the bot chats as: a run binds it to a bot that has none (a bound bot
                         ignores it)
-  --bot name            With --character: bind this bot to another character (while the relay is stopped;
-                        names in --list)
+  --bot name            Run only these bots (repeat it, or separate names with commas; names in --list);
+                        with --character: bind this bot to another character (while the relay is stopped)
   --max-spend amount    Optional local spending cap: the most gems relay may spend in total on this machine
                         (default: no cap; 0: free replies only)
   --reset-spend         Start the relay's running spending total over (with or without a cap)
@@ -552,9 +555,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
   --no-drafts           Telegram: edit messages instead of streaming drafts
   --confirm-prod        Confirm explicitly when running non-interactively in production`,
-      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gemas] [opciones]
+      `yomi relay [--channel telegram|qq|wechat] [--bot nombre] [--character ID] [--max-spend gemas] [opciones]
   Reenvía a un personaje de Yomi los mensajes que tú mismo le envías a tu propio bot en un chat privado, y
-  devuelve las respuestas del personaje. Canales:
+  devuelve las respuestas del personaje. Sin canal ni bot, un solo proceso ejecuta todos los bots registrados
+  en este equipo (un inicio de sesión de Yomi y un límite de gasto para todos). Canales:
     telegram   Un bot de Telegram que creaste con @BotFather; las respuestas aparecen en tiempo real
                (--telegram equivale a --channel telegram)
     qq         Tu propio bot de QQ de la QQ Open Platform (q.qq.com), solo chat privado (solo para uso
@@ -577,8 +581,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --pair                Vincula de nuevo (Telegram, QQ: muestra un código de vinculación nuevo)
   --character ID        El personaje con el que chatea el bot: una ejecución se lo asigna a un bot que no
                         tiene ninguno (un bot que ya tiene personaje lo ignora)
-  --bot nombre          Con --character: asigna otro personaje a este bot (con el relay detenido; los
-                        nombres están en --list)
+  --bot nombre          Ejecuta solo estos bots (repítelo o separa los nombres con comas; los nombres están
+                        en --list); con --character: asigna otro personaje a este bot (con el relay detenido)
   --max-spend cantidad  Límite de gasto local opcional: el máximo de gemas que relay puede gastar en total en
                         este equipo (por defecto: sin límite; 0: solo respuestas gratis)
   --reset-spend         Reinicia el total acumulado de gasto del relay (con o sin límite)
@@ -594,9 +598,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
   --no-drafts           Telegram: edita los mensajes en lugar de transmitir borradores
   --confirm-prod        Confirma de forma explícita al ejecutar sin interacción en producción`,
-      `yomi relay --channel telegram|qq|wechat [--character ID] [--max-spend gemas] [opções]
+      `yomi relay [--channel telegram|qq|wechat] [--bot nome] [--character ID] [--max-spend gemas] [opções]
   Repassa para um personagem do Yomi as mensagens que você mesmo envia ao seu próprio bot em um chat privado,
-  e devolve as respostas do personagem. Canais:
+  e devolve as respostas do personagem. Sem canal nem bot, um só processo executa todos os bots registrados
+  neste computador (um login do Yomi e um limite de gastos para todos). Canais:
     telegram   Um bot do Telegram que você criou com o @BotFather; as respostas aparecem em tempo real
                (--telegram é o mesmo que --channel telegram)
     qq         O seu próprio bot do QQ da QQ Open Platform (q.qq.com), só chat privado (somente para uso
@@ -619,8 +624,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --pair                Pareia novamente (Telegram, QQ: mostra um novo código de pareamento)
   --character ID        O personagem com que o bot conversa: uma execução o vincula a um bot que não tem
                         nenhum (um bot já vinculado o ignora)
-  --bot nome            Com --character: vincula este bot a outro personagem (com o relay parado; os nomes
-                        estão em --list)
+  --bot nome            Executa só estes bots (repita, ou separe os nomes com vírgulas; os nomes estão em
+                        --list); com --character: vincula este bot a outro personagem (com o relay parado)
   --max-spend quantia   Limite de gastos local opcional: o máximo de gemas que o relay pode gastar no total
                         nesta máquina (padrão: sem limite; 0: só respostas grátis)
   --reset-spend         Zera o total acumulado de gastos do relay (com ou sem limite)
@@ -725,7 +730,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
     'confirm-prod': { type: 'boolean' },
     'reset-spend': { type: 'boolean' },
     list: { type: 'boolean' },
-    bot: { type: 'string' },
+    bot: { type: 'string', multiple: true },
   },
   image: {
     prompt: { type: 'string', short: 'p' },
@@ -896,27 +901,30 @@ const BOT_GOES_WITH = new Set([
   ...Object.keys(GLOBAL ?? {}),
 ]);
 
+/** What a run of chosen bots (`yomi relay --bot a,b`) does not take: one channel's setup. */
+const BOT_RUN_REFUSES = new Set([
+  'set-token',
+  'set-app',
+  'login',
+  'qr-link',
+  'token-stdin',
+  'forget',
+  'install-service',
+  'uninstall-service',
+  'service-status',
+]);
+
 /**
  * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
- * kept for good). Both naming different channels, an unknown name or neither is a usage error,
- * except for `--list`, where neither means every channel, and `--bot`, whose record names its
- * channel (null).
+ * kept for good). Both naming different channels or an unknown name is a usage error; neither is
+ * null: every channel (`--list`, a run of every registered bot), or the channels of the bots
+ * `--bot` names. Setting credentials and the background service still need one named
+ * (commands/relay.ts).
  */
 export function relayChannelKind(values: Values): ChannelKind | null {
   const alias = Boolean(values.telegram);
   const named = values.channel as string | undefined;
-  if (named === undefined) {
-    if (alias) return 'telegram';
-    if (values.list || values.bot !== undefined) return null;
-    throw new UsageError(
-      tr(
-        '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
-        'Choose a channel: --channel telegram|qq|wechat (or --telegram)',
-        'Elige un canal: --channel telegram|qq|wechat (o --telegram)',
-        'Escolha um canal: --channel telegram|qq|wechat (ou --telegram)',
-      ),
-    );
-  }
+  if (named === undefined) return alias ? 'telegram' : null;
   const kind = CHANNEL_KINDS.find((item) => item === named.trim().toLowerCase());
   if (!kind) {
     // Shown back only when it reads like a name: a token pasted here must not be printed.
@@ -1032,12 +1040,15 @@ async function run(argv: string[], io: Io): Promise<number> {
       lane: values.lane as string | undefined,
       debug: values.debug as boolean | undefined,
     };
-    // Before the context: the server tells relays apart by this User-Agent suffix.
+    // Before the context: the server tells relays apart by this User-Agent suffix (several
+    // channels: each bot's requests still name its own, commands/relay.ts).
     const relayKind = command === 'relay' ? relayChannelKind(values) : null;
     const context = createContext(
       io,
       globals,
-      relayKind ? { client: `relay-${relayKind}`, channel: 'cli_relay' } : {},
+      command === 'relay'
+        ? { client: relayKind ? `relay-${relayKind}` : 'relay-multi', channel: 'cli_relay' }
+        : {},
     );
     switch (command) {
       case 'login':
@@ -1158,37 +1169,66 @@ async function run(argv: string[], io: Io): Promise<number> {
           await relayList(context, relayKind);
           break;
         }
-        if (values.bot !== undefined) {
+        const bots = ((values.bot as string[] | undefined) ?? [])
+          .flatMap((value) => value.split(','))
+          .map((name) => name.trim())
+          .filter(Boolean);
+        // An empty name (an unset variable, say) would widen the run to every bot.
+        if (values.bot !== undefined && !bots.length)
+          throw new UsageError(
+            tr(
+              '--bot 需要一个 bot 名字（名字见 yomi relay --list）',
+              '--bot needs a bot name (the names are in yomi relay --list)',
+              '--bot necesita el nombre de un bot (los nombres están en yomi relay --list)',
+              '--bot precisa do nome de um bot (os nomes estão em yomi relay --list)',
+            ),
+          );
+        if (values.bot !== undefined && values.character !== undefined) {
           const others = Object.keys(values).filter(
             (key) => values[key] !== undefined && !BOT_GOES_WITH.has(key),
           );
           if (others.length)
             throw new UsageError(
               tr(
-                `--bot 只用来给 bot 换绑角色，不能和 --${others[0]} 一起用：yomi relay --bot 名字 --character ID`,
-                `--bot only binds a bot to another character and does not go with --${others[0]}: yomi relay --bot NAME --character ID`,
-                `--bot solo vincula un bot a otro personaje y no se usa con --${others[0]}: yomi relay --bot NOMBRE --character ID`,
-                `--bot só vincula um bot a outro personagem e não é usado com --${others[0]}: yomi relay --bot NOME --character ID`,
+                `--bot 和 --character 一起用是给 bot 换绑角色，不能再加 --${others[0]}：yomi relay --bot 名字 --character ID`,
+                `--bot with --character binds a bot to another character and does not go with --${others[0]}: yomi relay --bot NAME --character ID`,
+                `--bot con --character vincula un bot a otro personaje y no se usa con --${others[0]}: yomi relay --bot NOMBRE --character ID`,
+                `--bot com --character vincula um bot a outro personagem e não é usado com --${others[0]}: yomi relay --bot NOME --character ID`,
               ),
             );
-          if (values.character === undefined)
+          if (bots.length !== 1)
             throw new UsageError(
               tr(
-                '给 bot 换绑角色要同时给出角色：yomi relay --bot 名字 --character ID',
-                'To bind a bot to another character, give the character too: yomi relay --bot NAME --character ID',
-                'Para vincular un bot a otro personaje, indica también el personaje: yomi relay --bot NOMBRE --character ID',
-                'Para vincular um bot a outro personagem, informe também o personagem: yomi relay --bot NOME --character ID',
+                '一次只能给一个 bot 换绑角色：yomi relay --bot 名字 --character ID',
+                'Bind one bot at a time: yomi relay --bot NAME --character ID',
+                'Vincula un bot a la vez: yomi relay --bot NOMBRE --character ID',
+                'Vincule um bot de cada vez: yomi relay --bot NOME --character ID',
               ),
             );
           await relayRebind(context, {
-            bot: String(values.bot),
+            bot: bots[0],
             characterId: String(values.character),
             channel: relayKind,
           });
           break;
         }
+        if (values.bot !== undefined) {
+          const others = Object.keys(values).filter(
+            (key) => values[key] !== undefined && BOT_RUN_REFUSES.has(key),
+          );
+          if (others.length)
+            throw new UsageError(
+              tr(
+                `--bot 选择要运行的 bot，不能和 --${others[0]} 一起用（凭证、配对信息和后台服务按通道设置：--channel …）`,
+                `--bot chooses the bots to run and does not go with --${others[0]} (credentials, pairing info and the background service are set per channel: --channel …)`,
+                `--bot elige los bots que se ejecutan y no se usa con --${others[0]} (las credenciales, la vinculación y el servicio en segundo plano se configuran por canal: --channel …)`,
+                `--bot escolhe os bots que são executados e não é usado com --${others[0]} (as credenciais, o pareamento e o serviço em segundo plano são configurados por canal: --channel …)`,
+              ),
+            );
+        }
         await relay(context, {
-          channel: relayKind as ChannelKind,
+          channel: relayKind,
+          bots,
           experimental: Boolean(values.experimental),
           setToken: Boolean(values['set-token']),
           setApp: Boolean(values['set-app']),

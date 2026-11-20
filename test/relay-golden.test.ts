@@ -15,8 +15,10 @@ import {
   type MockTelegramUser,
   startMockTelegram,
 } from '../src/mock/telegram.js';
+import { RelayStopped } from '../src/relay/channels/types.js';
+import { type HubBot, RelayHub } from '../src/relay/hub/hub.js';
 import { PairingCode } from '../src/relay/pairing.js';
-import { Relay, RelayStopped } from '../src/relay/relay.js';
+import { Relay } from '../src/relay/relay.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
 import { memoryIo } from './helpers/io.js';
@@ -30,7 +32,10 @@ import { memoryIo } from './helpers/io.js';
  * the channel refactor, it must not change through it; the welcome at pairing (the character's
  * cover, introduction and opening) came later, and so did one character per bot: the menu and the
  * pairing leave /character out, /character says how to change it on the computer, and the group
- * character is the second bot's (its calls under `bot@bot2`, its chat under `owner@bot2`).
+ * character is the second bot's (its calls under `bot@bot2`, its chat under `owner@bot2`). Both
+ * bots run as every `yomi relay` runs them: two records of one `RelayHub` (one long connection
+ * routed by character, one shared ledger under the hub's `--max-spend`), the 409 stopping the
+ * first bot alone.
  *
  * Only what is deterministic is in the snapshot: per chat, in order, `sendMessage`, `sendPhoto`,
  * `answerCallbackQuery` and `editMessageReplyMarkup`, plus `getWebhookInfo` and `setMyCommands`,
@@ -227,24 +232,22 @@ afterAll(async () => {
 });
 
 describe('the relay, golden transcript', () => {
-  let relay: Relay;
   let controller: AbortController;
-  let done: Promise<void> = Promise.resolve();
-  let second: { controller: AbortController; done: Promise<void> } | null = null;
+  let done: Promise<unknown> = Promise.resolve();
+  /** Each bot's relay of its current run, by name. */
+  const engines = new Map<string, Relay>();
 
-  const busy = (which = relay) => {
+  const busy = (which: Relay) => {
     const inside = which as unknown as { job: unknown; turn: unknown };
     return Boolean(inside.job || inside.turn);
   };
-  const kept = (which = relay) => (which as unknown as { keptImage(): unknown }).keptImage();
+  const kept = (which: Relay) => (which as unknown as { keptImage(): unknown }).keptImage();
   /** Nothing in flight: the reply (or picture) is shown and booked. */
-  const idle = (which = relay) => tg.waitFor(() => !busy(which) && kept(which) === null, 8000);
+  const idle = (which: Relay) => tg.waitFor(() => !busy(which) && kept(which) === null, 8000);
 
   afterAll(async () => {
     controller?.abort();
-    second?.controller.abort();
     await done.catch(() => undefined);
-    await second?.done.catch(() => undefined);
   });
 
   it('says the same things, in the same order, call for call', async () => {
@@ -254,48 +257,71 @@ describe('the relay, golden transcript', () => {
       { client: 'relay-telegram', channel: 'cli_relay' },
     );
     const logs: string[] = [];
-    /** A relay of the registry's kind: one bot, bound to one character. */
-    const relayOf = (
+    const log = (line: string) => logs.push(line);
+    /** A record of the registry's kind: one bot, bound to one character. */
+    const hubBot = (
       mockBot: MockTelegramBot,
       character: { npcId: string; name: string; group: boolean },
       pairing: PairingCode,
-    ) => {
+    ): HubBot & { state: RelayState } => {
       const bot = new TelegramBot(mockBot.token, { apiOrigin: mockBot.origin });
       const state = new RelayState(relayStatePath(context.account, bot.id), bot.id);
-      const engine = new Relay(context.gateway, bot, state, {
-        maxSpend: 50,
-        characterId: '',
-        boundCharacter: character,
-        botName: mockBot.username,
-        pairing,
-        replyTimeoutMs: 1500,
-        intervalMs: 30,
-        staleMs: 10 * 60 * 1000,
-        pollTimeoutSeconds: 1,
-        drafts: true,
-        language: 'zh-Hans',
-        log: (line) => logs.push(line),
-        resumeCheckMs: 100,
-        imagePollMs: 100,
-        imageTimeoutMs: 4000,
-      });
-      return { engine, state };
+      return {
+        name: mockBot.username,
+        state,
+        run: async (services, signal) => {
+          const engine = new Relay(context.gateway, bot, state, {
+            maxSpend: 50,
+            characterId: '',
+            boundCharacter: character,
+            botName: mockBot.username,
+            hub: services,
+            pairing,
+            replyTimeoutMs: 1500,
+            intervalMs: 30,
+            staleMs: 10 * 60 * 1000,
+            pollTimeoutSeconds: 1,
+            drafts: true,
+            language: 'zh-Hans',
+            log,
+            resumeCheckMs: 100,
+            imagePollMs: 100,
+            imageTimeoutMs: 4000,
+          });
+          engines.set(mockBot.username, engine);
+          await engine.run(signal);
+        },
+      };
     };
     const pairing = new PairingCode();
-    const first = relayOf(tg, { npcId: MOCK_NPCS.single, name: '林夏', group: false }, pairing);
-    relay = first.engine;
-    const state = first.state;
+    const secondPairing = new PairingCode();
+    const lin = hubBot(tg, { npcId: MOCK_NPCS.single, name: '林夏', group: false }, pairing);
+    const fog = hubBot(tg2, { npcId: MOCK_NPCS.group, name: '雾港', group: true }, secondPairing);
+    const state = lin.state;
+    // The 409 stops the first bot alone: the hub says so, and the second bot goes on.
+    let conflict: (error: Error | null) => void = () => undefined;
+    const ended = new Promise<Error | null>((resolve) => {
+      conflict = resolve;
+    });
+    const stops: string[] = [];
+    const hub = new RelayHub(context.gateway, {
+      account: context.account,
+      log,
+      maxSpend: 50,
+      ledgerBots: [],
+      onStopped: (name, error) => {
+        stops.push(name);
+        if (name === tg.username) conflict(error);
+      },
+      resumeCheckMs: 100,
+    });
     controller = new AbortController();
     const sockets = mock.state.sockets;
-    done = relay.run(controller.signal);
-    // Its end is awaited at the 409; until then a rejection must not go unhandled.
-    const ended = done.then(
-      () => null,
-      (error: unknown) => error,
-    );
-    await tg.waitFor(
-      () => mock.state.sockets > sockets && tg.calls.some((call) => call.method === 'getUpdates'),
-    );
+    const polls = (bot: MockTelegramBot) =>
+      bot.calls.filter((call) => call.method === 'getUpdates').length;
+    done = hub.run([lin, fog], controller.signal);
+    await tg.waitFor(() => mock.state.sockets > sockets && polls(tg) > 0 && polls(tg2) > 0);
+    const relay = engines.get(tg.username)!;
     const presses = new Map<string, number>();
     const press = (messageId: number, data: string) =>
       presses.set(tg.press(owner, owner.id, messageId, data), owner.id);
@@ -321,7 +347,7 @@ describe('the relay, golden transcript', () => {
     next = expectNew(owner.id, /今天天气怎么样？/);
     tg.userSends(owner, '今天天气怎么样');
     await next();
-    await idle();
+    await idle(relay);
 
     // The bot talks as 林夏 only: /character says how to change that on the computer.
     next = expectNew(owner.id, /固定和「林夏」聊天/);
@@ -330,23 +356,13 @@ describe('the relay, golden transcript', () => {
 
     // A group character is a second bot's: paired and welcomed (notice, cover, introduction,
     // opening), then a reply naming its speakers.
-    const secondPairing = new PairingCode();
-    const fog = relayOf(tg2, { npcId: MOCK_NPCS.group, name: '雾港', group: true }, secondPairing);
-    const polls = tg2.calls.filter((call) => call.method === 'getUpdates').length;
-    second = { controller: new AbortController(), done: Promise.resolve() };
-    second.done = fog.engine.run(second.controller.signal);
-    await tg2.waitFor(
-      () => tg2.calls.filter((call) => call.method === 'getUpdates').length > polls,
-    );
     next = expectNew(owner.id, /新来的？/, tg2);
     tg2.userSends(owner, `/start ${secondPairing.code}`);
     await next();
     next = expectNew(owner.id, /<b>小白<\/b>/, tg2);
     tg2.userSends(owner, '大家好');
     await next();
-    await idle(fog.engine);
-    second.controller.abort();
-    await second.done;
+    await idle(engines.get(tg2.username)!);
     // The last reply in the first bot is 林夏's: /report and /image below name it.
     const lastReply = tg
       .messages(owner.id)
@@ -387,7 +403,7 @@ describe('the relay, golden transcript', () => {
     tg.userSends(owner, '/image');
     await next();
     await tg.waitFor(() => tg.photos(owner.id).length === 2, 8000);
-    await idle();
+    await idle(relay);
 
     // /stop while a slow reply streams; once it has ended, /stop has nothing to stop.
     next = expectNew(owner.id, /已停止转发这条回复/);
@@ -395,7 +411,7 @@ describe('the relay, golden transcript', () => {
     await tg.waitFor(() => tg.draft(owner.id)?.text);
     tg.userSends(owner, '/stop');
     await next();
-    await idle();
+    await idle(relay);
     next = expectNew(owner.id, /现在没有正在转发的回复/);
     tg.userSends(owner, '/stop');
     await next();
@@ -431,6 +447,11 @@ describe('the relay, golden transcript', () => {
     const error = await ended;
     expect(error).toBeInstanceOf(RelayStopped);
     expect((error as RelayStopped).reason).toBe('conflict');
+    // The first bot stopped alone: the second one still runs until the hub is stopped.
+    expect(stops).toEqual([tg.username]);
+    controller.abort();
+    expect(await done).toBe('aborted');
+    expect(stops).toEqual([tg.username]);
 
     const calls = (method: string) => tg.calls.filter((call) => call.method === method);
     // Every method used. Any other is a change: an edit or a delete (drafts never need one), a

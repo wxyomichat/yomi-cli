@@ -138,11 +138,12 @@ const zh = {
     '用法：/budget 100 设置上限，/budget none 不设上限（按 Yomi 的正常规则扣费），/budget off 只用免费额度。',
   budgetExhausted: (spent: number) =>
     `预算已用完（已花 ${spent} 钻石），relay 已暂停。用 /budget <数量> 设置新的预算，或发送 /budget none 不设上限继续。`,
-  /** A pause the local cap caused earlier, kept after a restart that raised it. */
-  budgetPausedByCeiling: (left: number) =>
-    `relay 之前因本机花费上限暂停（预算还剩 ${left} 钻石）。用 /budget <数量> 设置新的预算，或发送 /budget none 不设上限继续。`,
-  ceilingExhausted: (spent: number, ceiling: number, command: string) =>
-    `本机花费上限已用完（${spent}/${ceiling} 钻石），relay 已暂停。请在电脑上去掉 --max-spend 重新启动 relay（之后按 Yomi 的正常规则扣费），或用更高的 --max-spend 或 --reset-spend；后台服务请重新安装：${command} --install-service。`,
+  /** The computer's ceiling (every bot's) is spent: nothing is paused, each send checks again. */
+  ceilingReached: (spent: number, ceiling: number, command: string) =>
+    `这台电脑设的总花费上限已用完（${spent}/${ceiling} 钻石），要花钻石的消息先不发。要继续，请在电脑上去掉 --max-spend 重新启动 relay（之后按 Yomi 的正常规则扣费），或用更高的 --max-spend 或 --reset-spend；后台服务请重新安装：${command} --install-service。`,
+  /** What is left of the ceiling is held by images still in progress: free again once booked. */
+  ceilingHeld: (spent: number, ceiling: number, held: number) =>
+    `本机花费上限剩下的额度正被进行中的图片占用（已花 ${spent}/${ceiling} 钻石，占用 ${held}）：图片完成后再发。`,
   budgetShort: (price: number, left: number) =>
     `剩余预算 ${left} 钻石，不够下一条回复（约 ${price} 钻石）。用 /budget 提高预算。`,
   ceilingShort: (price: number, left: number) =>
@@ -376,10 +377,10 @@ const en: RelayTexts = {
     'Usage: /budget 100 to set a cap, /budget none for no cap (Yomi charges by its normal rules), /budget off for free replies only.',
   budgetExhausted: (spent) =>
     `The budget is spent (${spent} gems); the relay is paused. Set a new one with /budget <amount>, or send /budget none to go on without a cap.`,
-  budgetPausedByCeiling: (left) =>
-    `The relay was paused earlier by the local spending cap (${left} gems of the budget are left). Set a new budget with /budget <amount>, or send /budget none to go on without a cap.`,
-  ceilingExhausted: (spent, ceiling, command) =>
-    `The local spending cap is spent (${spent} of ${ceiling} gems); the relay is paused. Restart it on the computer without --max-spend (Yomi then charges by its normal rules), with a higher one, or with --reset-spend; for a background service, install it again: ${command} --install-service.`,
+  ceilingReached: (spent, ceiling, command) =>
+    `The spending cap set on this computer is used up (${spent} of ${ceiling} gems), so messages that cost gems are not sent. To go on, restart the relay on the computer without --max-spend (Yomi then charges by its normal rules), with a higher one, or with --reset-spend; for a background service, install it again: ${command} --install-service.`,
+  ceilingHeld: (spent, ceiling, held) =>
+    `What is left of this computer's spending cap is held by images still in progress (${spent} of ${ceiling} gems spent, ${held} held): send again once they are done.`,
   budgetShort: (price, left) =>
     `${left} gems left, not enough for the next reply (about ${price}). Raise the budget with /budget.`,
   ceilingShort: (price, left) =>
@@ -611,10 +612,10 @@ const es: RelayTexts = {
     'Uso: /budget 100 para fijar un límite, /budget none para no tener límite (Yomi cobra según sus reglas habituales), /budget off para solo respuestas gratis.',
   budgetExhausted: (spent) =>
     `Se agotó el presupuesto (${spent} gemas); el relay está en pausa. Fija uno nuevo con /budget <cantidad>, o envía /budget none para seguir sin límite.`,
-  budgetPausedByCeiling: (left) =>
-    `El relay quedó en pausa antes por el límite de gasto local (quedan ${left} gemas del presupuesto). Fija un presupuesto nuevo con /budget <cantidad>, o envía /budget none para seguir sin límite.`,
-  ceilingExhausted: (spent, ceiling, command) =>
-    `Se agotó el límite de gasto local (${spent} de ${ceiling} gemas); el relay está en pausa. Reinícialo en la computadora sin --max-spend (después Yomi cobra según sus reglas habituales), con uno más alto o con --reset-spend; si es un servicio en segundo plano, vuelve a instalarlo: ${command} --install-service.`,
+  ceilingReached: (spent, ceiling, command) =>
+    `Se agotó el límite de gasto fijado en esta computadora (${spent} de ${ceiling} gemas), así que no se envían mensajes que cuesten gemas. Para seguir, reinicia el relay en la computadora sin --max-spend (después Yomi cobra según sus reglas habituales), con uno más alto o con --reset-spend; si es un servicio en segundo plano, vuelve a instalarlo: ${command} --install-service.`,
+  ceilingHeld: (spent, ceiling, held) =>
+    `Lo que queda del límite de gasto de esta computadora está reservado para imágenes en curso (${spent} de ${ceiling} gemas gastadas, ${held} reservadas): vuelve a enviar cuando terminen.`,
   budgetShort: (price, left) =>
     `Quedan ${left} gemas, no alcanzan para la siguiente respuesta (unas ${price}). Sube el presupuesto con /budget.`,
   ceilingShort: (price, left) =>
@@ -849,10 +850,10 @@ const pt: RelayTexts = {
     'Uso: /budget 100 para definir um limite, /budget none para não ter limite (o Yomi cobra pelas regras normais), /budget off para só respostas grátis.',
   budgetExhausted: (spent) =>
     `O orçamento acabou (${spent} gemas); o relay está pausado. Defina um novo com /budget <quantidade>, ou envie /budget none para continuar sem limite.`,
-  budgetPausedByCeiling: (left) =>
-    `O relay foi pausado antes pelo limite de gastos local (restam ${left} gemas do orçamento). Defina um novo orçamento com /budget <quantidade>, ou envie /budget none para continuar sem limite.`,
-  ceilingExhausted: (spent, ceiling, command) =>
-    `O limite de gastos local acabou (${spent} de ${ceiling} gemas); o relay está pausado. Reinicie-o no computador sem --max-spend (depois disso, o Yomi cobra pelas regras normais), com um valor maior ou com --reset-spend; se for um serviço em segundo plano, instale-o de novo: ${command} --install-service.`,
+  ceilingReached: (spent, ceiling, command) =>
+    `O limite de gastos definido neste computador acabou (${spent} de ${ceiling} gemas), então mensagens que custam gemas não são enviadas. Para continuar, reinicie o relay no computador sem --max-spend (depois disso, o Yomi cobra pelas regras normais), com um valor maior ou com --reset-spend; se for um serviço em segundo plano, instale-o de novo: ${command} --install-service.`,
+  ceilingHeld: (spent, ceiling, held) =>
+    `O que resta do limite de gastos deste computador está reservado para imagens em andamento (${spent} de ${ceiling} gemas gastas, ${held} reservadas): envie de novo quando terminarem.`,
   budgetShort: (price, left) =>
     `Restam ${left} gemas, não é suficiente para a próxima resposta (cerca de ${price}). Aumente o orçamento com /budget.`,
   ceilingShort: (price, left) =>

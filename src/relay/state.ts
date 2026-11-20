@@ -84,6 +84,16 @@ export type PendingCharge = {
    * then unmeasured, never the rest of a budget set since. Absent in older files: capped.
    */
   capped?: boolean;
+  /**
+   * In a ledger several bots share (relay/hub): the bot whose send it measures (its relay's
+   * scope), booked to that bot whoever settles it. Absent: the relay's own.
+   */
+  bot?: string;
+  /**
+   * In a shared ledger: something else may have landed in its drop (another bot's send that took
+   * no measurement, or an image): at most its quoted price is booked when that is known.
+   */
+  foreign?: boolean;
 };
 
 export type BillingPause = '' | 'budget' | 'freeCharged';
@@ -204,7 +214,9 @@ export function relayStatePath(account: string, scope: string, dir = configDir()
 /**
  * Deletes the relay state files of this environment (`--forget`); returns how many. With `kind`,
  * only that channel's (a file without `kind` is Telegram's), so the other channels keep theirs.
- * The bot registry beside them (`bots-<hash>.json`, relay/registry.ts) is not a state file.
+ * The bot registry beside them (`bots-<hash>.json`, relay/registry.ts), the shared ledger
+ * (`ledger-<hash>.json`) and the running relay's status (`hub-<hash>.status.json`, relay/hub)
+ * are not state files.
  */
 export function forgetRelayStates(account: string, dir = configDir(), kind?: ChannelKind): number {
   const folder = join(dir, 'relay');
@@ -216,7 +228,7 @@ export function forgetRelayStates(account: string, dir = configDir(), kind?: Cha
     return 0;
   }
   for (const name of names) {
-    if (!name.endsWith('.json') || name.startsWith('bots-')) continue;
+    if (!name.endsWith('.json') || /^(bots|ledger|hub)-/.test(name)) continue;
     const path = join(folder, name);
     const stored = readJsonFile<Partial<RelayStateFile>>(path);
     // Files from before `account` was stored belong to whichever environment is forgetting.
@@ -230,6 +242,10 @@ export function forgetRelayStates(account: string, dir = configDir(), kind?: Cha
 
 export class RelayState {
   data: RelayStateFile;
+  /** Closed (`close`): writes are dropped, a later relay of this bot owns the file. */
+  private closed = false;
+  /** Told of each write dropped once closed. */
+  private onDropped: (() => void) | null = null;
 
   constructor(
     readonly path: string,
@@ -272,7 +288,22 @@ export class RelayState {
   }
 
   save() {
+    if (this.closed) return void this.onDropped?.();
     writeJsonFile(this.path, this.data);
+  }
+
+  /**
+   * No more writes: the relay that used it has ended, and what it still had in flight must not
+   * overwrite what the next one (a restart of the same bot) saves. `onDropped` is told of each
+   * write dropped from now on (to be logged).
+   */
+  close(onDropped?: () => void) {
+    this.closed = true;
+    this.onDropped = onDropped ?? null;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   update(patch: Partial<RelayStateFile>) {

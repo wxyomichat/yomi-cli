@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,15 +8,19 @@ import { main } from '../src/cli.js';
 import { createContext } from '../src/commands/context.js';
 import { type RelayCommandOptions, relayServiceArgs } from '../src/commands/relay.js';
 import type { Environment } from '../src/core/env.js';
-import { configDir } from '../src/core/files.js';
-import { acquireProcessLock } from '../src/core/lock.js';
-import { type MockServer, startMockServer } from '../src/mock/server.js';
+import { configDir, writeJsonFile } from '../src/core/files.js';
+import { acquireProcessLock, type LockNote, lockHolder } from '../src/core/lock.js';
+import { sha256 } from '../src/core/state.js';
+import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
 import { type MockTelegram, startMockTelegram } from '../src/mock/telegram.js';
 import { CHANNEL_KINDS, channelSetup } from '../src/relay/channels/index.js';
+import { type HubStatusFile, hubStatusPath } from '../src/relay/hub/hub.js';
+import { ledgerPath } from '../src/relay/hub/ledger.js';
+import { BotRegistry } from '../src/relay/registry.js';
 import { servicePlan } from '../src/relay/service.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
-import { type FakeSwitch, StoppingChannel } from './helpers/fakeSetup.js';
+import { CrashingChannel, type FakeSwitch, StoppingChannel } from './helpers/fakeSetup.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -120,10 +124,19 @@ afterAll(async () => {
 });
 
 describe('choosing the channel', () => {
-  it('needs one, knows three, and takes --telegram as --channel telegram', async () => {
+  it('knows three, takes --telegram as --channel telegram, and needs one only to set one up', async () => {
+    // Without a channel a run takes every registered bot: there is none yet.
     const none = await run(['relay', '--allow-file-store']);
     expect(none.code).toBe(1);
-    expect(none.err).toContain('选择一个通道：--channel telegram|qq|wechat（或 --telegram）');
+    expect(none.err).toContain('这台电脑上还没有 bot：用 yomi relay --telegram --set-token');
+    // Credentials, --forget and the service are one channel's: it must be named.
+    for (const flag of ['--set-token', '--forget', '--install-service', '--service-status']) {
+      const unnamed = await run(['relay', flag, '--allow-file-store']);
+      expect(unnamed.code, flag).toBe(1);
+      expect(unnamed.err, flag).toContain(
+        '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
+      );
+    }
     const unknown = await run(['relay', '--channel', 'irc']);
     expect(unknown.code).toBe(1);
     expect(unknown.err).toContain('不认识的通道："irc"。可选 telegram、qq、wechat');
@@ -138,9 +151,10 @@ describe('choosing the channel', () => {
     expect((await run(['relay', '--channel'])).code).toBe(2);
     setEnv({ YOMI_LANG: 'en' });
     try {
-      expect((await run(['relay'])).err).toContain(
+      expect((await run(['relay', '--set-token'])).err).toContain(
         'Choose a channel: --channel telegram|qq|wechat (or --telegram)',
       );
+      expect((await run(['relay'])).err).toContain('No bots on this computer yet');
     } finally {
       setEnv({ YOMI_LANG: 'zh-Hans' });
     }
@@ -220,6 +234,7 @@ describe('choosing the channel', () => {
 describe("each channel's names", () => {
   const options: RelayCommandOptions = {
     channel: 'telegram',
+    bots: [],
     experimental: false,
     setToken: false,
     setApp: false,
@@ -355,7 +370,7 @@ describe("each channel's names", () => {
   it('are in the help, with QQ and WeChat for personal use only and WeChat experimental', async () => {
     const zh = await run(['relay', '--help']);
     expect(zh.code).toBe(0);
-    expect(zh.out).toContain('yomi relay --channel telegram|qq|wechat');
+    expect(zh.out).toContain('yomi relay [--channel telegram|qq|wechat] [--bot 名字]');
     expect(zh.out).toContain('--telegram 等同 --channel telegram');
     expect(zh.out).toMatch(/qq .*仅限个人使用/);
     expect(zh.out).toMatch(/wechat .*实验功能，仅限个人使用/);
@@ -368,7 +383,7 @@ describe("each channel's names", () => {
     };
     for (const [lang, [personal, experimental]] of Object.entries(marks)) {
       const help = await run(['--lang', lang, 'relay', '--help']);
-      expect(help.out, lang).toContain('yomi relay --channel telegram|qq|wechat');
+      expect(help.out, lang).toContain('yomi relay [--channel telegram|qq|wechat] [--bot ');
       expect(help.out, lang).toContain(personal);
       expect(help.out, lang).toContain(experimental);
       expect(help.out.search(CJK), lang).toBe(-1);
@@ -573,6 +588,261 @@ describe('the flow every channel runs', () => {
       'Experimental: WeChat ClawBot (iLink) is not an official API for third-party clients.',
     );
     expect(policyAgents(from)).toEqual([[expect.stringMatching(/ relay-wechat$/), 'wechat']]);
+  });
+
+  it('runs the bots it is given in one process, each said and each stopping on its own', async () => {
+    paired('qq');
+    paired('wechat');
+    const { account } = context();
+    const registry = BotRegistry.open(account);
+    const names = (['qq', 'wechat'] as const).map((kind) => registry.list(kind)[0].name);
+    const from = sends();
+    // Named by --bot (repeatable or comma-separated): no channel, and WeChat's consent is its record's.
+    const result = await run(['relay', '--bot', names.join(','), '--allow-file-store']);
+    expect(result.code).toBe(0);
+    expect(fake.opened).toHaveLength(2);
+    expect(result.out).toContain(`relay 运行中：${label('qq')} ⇄ Yomi`);
+    expect(result.out).toContain(`relay 运行中：${label('wechat')} ⇄ Yomi`);
+    // One start-up block for both.
+    expect(result.out.match(/仅限个人使用/g)).toHaveLength(1);
+    expect(result.out.match(/实验功能/g)).toHaveLength(1);
+    expect(result.out.match(/没有本机花费上限/g)).toHaveLength(1);
+    // Both stopped the same way: said once.
+    expect(result.err.split(StoppingChannel.message)).toHaveLength(2);
+    // One sign-in for several channels says so; each kind's policy is read once.
+    expect(policyAgents(from).sort((a, b) => String(a[1]).localeCompare(String(b[1])))).toEqual([
+      [expect.stringMatching(/ relay-multi$/), 'qq'],
+      [expect.stringMatching(/ relay-multi$/), 'wechat'],
+    ]);
+    // The ledger the bots share.
+    expect(existsSync(ledgerPath(account))).toBe(true);
+    expect(existsSync(hubStatusPath(account))).toBe(false);
+    // A bot named twice is one bot; a channel flag naming another channel is refused.
+    fake.opened.length = 0;
+    const one = await run(['relay', '--bot', names[0], '--bot', names[0], '--allow-file-store']);
+    expect(one.code).toBe(0);
+    expect(fake.opened).toHaveLength(1);
+    const wrong = await run(['relay', '--telegram', '--bot', names[0], '--allow-file-store']);
+    expect(wrong.code).toBe(1);
+    expect(wrong.err).toContain(`"${names[0]}" 是 QQ 的 bot，不是 Telegram 的。`);
+  });
+
+  it("says which bot --pair or a run's --character is for when it cannot tell", async () => {
+    paired('qq');
+    paired('wechat');
+    const { store, account } = context();
+    const registry = BotRegistry.open(account);
+    const [qq, wechat] = (['qq', 'wechat'] as const).map((kind) => registry.list(kind)[0].name);
+    // WeChat has no pairing code, whether named by its channel or by its bot.
+    const pair = await run(['relay', '--bot', wechat, '--pair', '--allow-file-store']);
+    expect(pair.code).toBe(1);
+    expect(pair.err).toContain('微信没有配对码：用 --login 扫码的人就是主人。');
+    expect(fake.opened).toHaveLength(0);
+    // A run's --character among several bots binds none of them: said, and they run as bound.
+    const character = await run([
+      'relay',
+      '--character',
+      '7300000000000000001',
+      '--allow-file-store',
+    ]);
+    expect(character.code).toBe(0);
+    expect(character.err).toContain(
+      '这次运行了多个 bot：忽略 --character 7300000000000000001。给一个 bot 绑定角色：yomi relay --bot 名字 --character ID',
+    );
+    expect(fake.opened).toHaveLength(2);
+    // --pair among several bots that pair with a code (QQ, and now a Telegram bot): name one.
+    store.setSecret(`telegram-bot:${account}`, tg.token);
+    const several = await run(['relay', '--pair', '--allow-file-store']);
+    expect(several.code).toBe(1);
+    const telegram = BotRegistry.open(account).list('telegram')[0].name;
+    expect(several.err).toContain(
+      `有多个 bot 可以配对（${qq}、${telegram}）：用 --bot 名字 --pair 选一个。`,
+    );
+    // Nothing was paired over: the owners stay.
+    const owner = (scope: string) =>
+      new RelayState(relayStatePath(account, scope), scope, account, 'qq').data.owner;
+    expect(owner('fake:qq')).not.toBeNull();
+    // Counted among the bots selected, not among those that open: QQ failing to open (its
+    // network, say) still leaves the choice to the user, and nothing is paired over.
+    fake.failOpen = ['qq'];
+    fake.opened.length = 0;
+    try {
+      const failing = await run(['relay', '--pair', '--allow-file-store']);
+      expect(failing.code).toBe(1);
+      expect(failing.err).toContain(`有多个 bot 可以配对（${qq}、${telegram}）`);
+      expect(owner('fake:qq')).not.toBeNull();
+      expect(fake.opened).toHaveLength(0);
+      // A run's --character too: with WeChat failing and Telegram's token gone, QQ runs alone,
+      // and is still not bound by it.
+      fake.failOpen = ['wechat'];
+      store.deleteSecret(`telegram-bot:${account}`);
+      const record = BotRegistry.open(account).find(qq)!;
+      BotRegistry.open(account).bindCharacter(record.key, null, '');
+      // A character no other bot has: QQ alone could be bound to it.
+      const free = [MOCK_NPCS.single, MOCK_NPCS.group].find(
+        (npcId) => !BotRegistry.open(account).byCharacter(npcId),
+      )!;
+      const alone = await run(['relay', '--character', free, '--allow-file-store']);
+      expect(alone.code).toBe(0);
+      expect(alone.err).toContain(`这次运行了多个 bot：忽略 --character ${free}。`);
+      expect(fake.opened.map((channel) => channel.kind)).toEqual(['qq']);
+      expect(BotRegistry.open(account).find(qq)!.character).toBeNull();
+      if (record.character)
+        BotRegistry.open(account).bindCharacter(record.key, record.character, '');
+    } finally {
+      fake.failOpen = undefined;
+    }
+  });
+
+  it("names every bot in the environment's lock, runs the others when one bot's lock is taken, and lists what the running relay says", async () => {
+    paired('qq');
+    paired('wechat');
+    const { account } = context();
+    const registry = BotRegistry.open(account);
+    const [qq, wechat] = (['qq', 'wechat'] as const).map((kind) => registry.list(kind)[0].name);
+    const locks = join(configDir(), 'locks');
+    const environment = join(locks, `relay-env-${sha256(account).slice(0, 16)}.lock`);
+    const notes: (LockNote | undefined)[] = [];
+    fake.whileRunning = () => notes.push(lockHolder(environment)?.note);
+    let busy;
+    try {
+      // Two channels: the note names each bot, and no one channel (an older relay reads it too).
+      const both = await run(['relay', '--bot', `${qq},${wechat}`, '--allow-file-store']);
+      expect(both.code).toBe(0);
+      const bots = JSON.stringify([
+        { kind: 'qq', name: qq, label: label('qq') },
+        { kind: 'wechat', name: wechat, label: label('wechat') },
+      ]);
+      expect(notes).toEqual([
+        { channel: 'hub', bots },
+        { channel: 'hub', bots },
+      ]);
+      // One bot's own lock is taken: that bot is left to the relay that holds it, said, and the
+      // other one runs.
+      notes.length = 0;
+      fake.opened.length = 0;
+      busy = acquireProcessLock(join(locks, 'relay-fake-qq.lock'));
+      if (!('release' in busy)) throw new Error('the bot lock is taken');
+      const one = await run(['relay', '--bot', `${qq},${wechat}`, '--allow-file-store']);
+      expect(one.code).toBe(0);
+      expect(one.err).toContain(
+        `${qq}: 这个 bot 已经有一个 relay 在运行（进程 ${process.pid}）。同一个 bot 只能运行一个。`,
+      );
+      // The one that runs is WeChat (both fakes have one label): its experimental line, alone.
+      expect(one.out.match(/relay 运行中：/g)).toHaveLength(1);
+      expect(one.out).toContain(`relay 运行中：${label('wechat')}`);
+      expect(one.out).toContain('实验功能');
+      expect(fake.opened.filter((channel) => channel.kind === 'qq')).toHaveLength(1);
+      expect(notes).toEqual([
+        {
+          channel: 'wechat',
+          bot: label('wechat'),
+          bots: JSON.stringify([{ kind: 'wechat', name: wechat, label: label('wechat') }]),
+        },
+      ]);
+    } finally {
+      fake.whileRunning = undefined;
+      if (busy && 'release' in busy) busy.release();
+    }
+
+    // --list says what the relay holding the environment's lock wrote of its bots.
+    const status = (pid: number): HubStatusFile => ({
+      pid,
+      startedAt: Date.now(),
+      bots: {
+        [qq]: { status: 'stopped', reason: '凭证被拒绝', since: Date.now() },
+        [wechat]: { status: 'restarting', reason: '出错', since: Date.now() },
+      },
+    });
+    writeJsonFile(hubStatusPath(account), status(process.pid));
+    const held = acquireProcessLock(environment);
+    if (!('release' in held)) throw new Error('the environment lock is taken');
+    try {
+      const listed = await run(['relay', '--list']);
+      expect(listed.code).toBe(0);
+      expect(listed.out).toContain('  状态：已停止：凭证被拒绝');
+      expect(listed.out).toContain('  状态：正在重新启动（出错）');
+      // Written by another process than the one holding the lock: an old file, not read.
+      writeJsonFile(hubStatusPath(account), status(process.pid + 1));
+      const stale = await run(['relay', '--list']);
+      expect(stale.out).not.toContain('已停止');
+      expect(stale.out).not.toContain('正在重新启动');
+    } finally {
+      held.release();
+    }
+    // Nobody holds the lock: not read either.
+    writeJsonFile(hubStatusPath(account), status(process.pid));
+    try {
+      const offline = await run(['relay', '--list']);
+      expect(offline.out).not.toContain('已停止');
+      expect(offline.out).not.toContain('正在重新启动');
+    } finally {
+      rmSync(hubStatusPath(account), { force: true });
+    }
+  });
+
+  it('starts a crashed bot again from its stored credentials, asking nobody, on a state of its own', async () => {
+    paired('qq');
+    const { store, account } = context();
+    const qq = BotRegistry.open(account).list('qq')[0].name;
+    const secretName = channelSetup('qq').secretName(account);
+    const secret = store.getSecret(secretName);
+    store.setSecret(secretName, secret ?? QQ_SECRET);
+    const handle = () =>
+      new RelayState(relayStatePath(account, 'fake:qq'), 'fake:qq', account, 'qq').data.botUsername;
+    Object.assign(fake, { crashes: 1, handle: 'restarted', interactive: [] });
+    try {
+      // Someone at the terminal: the first open could ask, the restart never does.
+      const crashed = await run(['relay', '--bot', qq, '--allow-file-store'], {
+        interactive: true,
+      });
+      expect(crashed.code).toBe(0);
+      expect(crashed.err).toContain(`bot ${qq} 意外停止（Error ${CrashingChannel.crash}）`);
+      expect(fake.opened.map((channel) => channel.constructor)).toEqual([
+        CrashingChannel,
+        StoppingChannel,
+      ]);
+      expect(fake.interactive).toEqual([true, false]);
+      // The restarted run writes its own state file (the first run's state is closed).
+      expect(handle()).toBe('restarted');
+      // Its credentials removed while it ran: the restart asks for none and stores none, and
+      // that bot stops.
+      fake.opened.length = 0;
+      Object.assign(fake, {
+        crashes: 1,
+        interactive: [],
+        needsSecret: true,
+        asked: 0,
+        whileRunning: () => store.deleteSecret(secretName),
+      });
+      const gone = await run(['relay', '--bot', qq, '--allow-file-store'], { interactive: true });
+      expect(gone.code).toBe(0);
+      expect(fake.interactive).toEqual([true, false]);
+      expect(fake.asked).toBe(0);
+      expect(store.getSecret(secretName)).toBeFalsy();
+      expect(fake.opened).toHaveLength(1);
+    } finally {
+      Object.assign(fake, {
+        crashes: undefined,
+        handle: undefined,
+        interactive: undefined,
+        needsSecret: undefined,
+        asked: undefined,
+        whileRunning: undefined,
+      });
+      if (secret) store.setSecret(secretName, secret);
+      else store.deleteSecret(secretName);
+    }
+  });
+
+  it('refuses a --bot that names no bot, rather than running every one', async () => {
+    paired('qq');
+    for (const value of ['', ',']) {
+      const empty = await run(['relay', '--bot', value, '--allow-file-store']);
+      expect(empty.code, value).toBe(1);
+      expect(empty.err, value).toContain('--bot 需要一个 bot 名字（名字见 yomi relay --list）');
+    }
+    expect(fake.opened).toHaveLength(0);
   });
 
   it('runs Telegram by --channel telegram as by --telegram, with nothing added', async () => {

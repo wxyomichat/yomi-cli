@@ -186,11 +186,13 @@ describe('one relay per Yomi account and environment', () => {
     paired('qq');
     const running = await startTelegram();
     try {
-      // The lock says who holds it.
-      expect(JSON.parse(readFileSync(environmentLock(), 'utf8'))).toMatchObject({
-        pid: process.pid,
-        note: { channel: 'telegram', bot: '@lin_env_bot' },
-      });
+      // The lock says who holds it: the bots of the relay (by channel, name and label), its
+      // channel and, alone, its bot's label as an older yomi reads it.
+      const note = JSON.parse(readFileSync(environmentLock(), 'utf8')).note;
+      expect(note).toMatchObject({ channel: 'telegram', bot: '@lin_env_bot' });
+      expect(JSON.parse(note.bots)).toEqual([
+        { kind: 'telegram', name: expect.any(String), label: '@lin_env_bot' },
+      ]);
       expect(existsSync(join(configDir(), 'locks', `relay-${tg.botId}.lock`))).toBe(true);
       const where = describeEnvironment(context().env);
       const qq = await run(['relay', '--channel', 'qq', '--allow-file-store']);
@@ -343,6 +345,26 @@ describe('one relay per Yomi account and environment', () => {
       );
     } finally {
       qq.release();
+    }
+
+    // A relay running several bots of several channels: each bot named, no one channel's service.
+    const several = hold({
+      channel: 'hub',
+      bots: JSON.stringify([
+        { kind: 'qq', name: 'qq-0304', label: 'Lin bot' },
+        { kind: 'wechat', name: 'wechat-1', label: 'wx-bot' },
+      ]),
+    });
+    try {
+      const telegram = await run(['relay', '--telegram', '--allow-file-store']);
+      expect(telegram.code).toBe(1);
+      expect(telegram.err).toContain(
+        `已经有另一个 relay 在运行：QQ bot Lin bot、微信 bot wx-bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 --uninstall-service）。`,
+      );
+      const english = await inEnglish(() => run(['relay', '--telegram', '--allow-file-store']));
+      expect(english.err).toContain(`: QQ bot Lin bot, WeChat bot wx-bot, process ${process.pid}.`);
+    } finally {
+      several.release();
     }
 
     const setApp = hold({ channel: 'qq', flag: '--set-app' });

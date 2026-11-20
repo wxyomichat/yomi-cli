@@ -269,7 +269,10 @@ describe('relays sharing one sign-in', () => {
     return createContext(memoryIo().io, {}, { client: 'relay-qq', channel: 'cli_relay' });
   }
 
-  /** The shared services, connected; `maxSpend` is the shared ceiling. */
+  /**
+   * The shared services, connected, on a shared ledger as RelayHub makes it; `maxSpend` is the
+   * shared ceiling.
+   */
   async function hub(
     maxSpend: number | null,
     waitMs?: number,
@@ -279,7 +282,7 @@ describe('relays sharing one sign-in', () => {
     const log = () => undefined;
     const session = new SessionGate(gateway, { log, resumeCheckMs });
     const feed = new ImFeed(gateway, session, { log });
-    const ledger = new Ledger(memoryStore(), { waitMs });
+    const ledger = new Ledger(memoryStore(), { waitMs, shared: true });
     ledger.useAllowance(maxSpend, false);
     const sockets = mock.state.sockets;
     feed.start();
@@ -590,14 +593,14 @@ describe('relays sharing one sign-in', () => {
     const before = sends().length;
     b.say('你好');
     await waitFor(() => b.presenters[0]?.calls.includes('start'));
-    const told = b.expect(/^本机花费上限已用完（50\/50 钻石）/);
+    const told = b.expect(/^这台电脑设的总花费上限已用完（50\/50 钻石）/);
     // The other bot's measured cost spends the shared ceiling, then it lets go of the window.
     services.ledger.book('another bot', 50);
     held.release();
     await told();
     expect(b.presenters[0].calls).toEqual([
       'start',
-      expect.stringMatching(/^stop:本机花费上限已用完/),
+      expect.stringMatching(/^stop:这台电脑设的总花费上限已用完/),
     ]);
     expect(b.presenters[0].isClosed).toBe(true);
     expect(busy(engine)).toBe(false);

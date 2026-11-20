@@ -514,6 +514,8 @@ describe('the relay', () => {
     tg.userSends(owner, '超出本机上限');
     await said(owner.id, /本机上限还可花 2 钻石，不够下一条回复（约 5 钻石）/);
     expect(sends().length).toBe(before);
+    // The local cap is the computer's, not the budget's: nothing is paused for it.
+    expect(state.data.billingPause).toBe('');
     await stop();
     await start({ maxSpend: 0 });
     // Earlier tests left the same answers in the chat: wait for this relay's own, or the stop
@@ -521,16 +523,21 @@ describe('the relay', () => {
     tg.userSends(owner, '不许花了');
     await saidNext(owner.id, /本机不允许花钻石（--max-spend 0）。请在电脑上去掉 --max-spend/);
     expect(sends().length).toBe(before);
+    expect(state.data.billingPause).toBe('');
     await stop();
-    // A budget's pause is the owner's to lift, a higher --max-spend or not; it says the local
-    // cap caused it and the budget still has room (20, 15 spent).
+    // A higher --max-spend sends again, checked before each send: up to the budget (20, 15
+    // spent), whose pause is then the owner's to lift.
     await start();
+    const exhausted = expectNext(owner.id, /^预算已用完（已花 20 钻石），relay 已暂停。/);
+    tg.userSends(owner, '上限提高了');
+    await said(owner.id, /上限提高了/);
+    await exhausted();
+    expect(sends().length).toBe(before + 1);
+    expect(state.data.billing.spent).toBe(20);
+    expect(state.data.billingPause).toBe('budget');
     tg.userSends(owner, '还是暂停');
-    await saidNext(
-      owner.id,
-      /^relay 之前因本机花费上限暂停（预算还剩 5 钻石）。用 \/budget .*设置新的预算，或发送 \/budget none/,
-    );
-    expect(sends().length).toBe(before);
+    await saidNext(owner.id, /^预算已用完（已花 20 钻石），relay 已暂停。/);
+    expect(sends().length).toBe(before + 1);
     tg.userSends(owner, '/budget off');
     await saidNext(owner.id, /^已改为只用免费额度。$/);
     mock.state.chatFreeLimit = 1000;
@@ -956,26 +963,28 @@ describe('the relay', () => {
     }
   });
 
-  it('the local cap alone pauses in its own words; /budget none does not lift it, a restart without it does', async () => {
+  it('the local cap alone stops paid sends in its own words; /budget none does not lift it, a restart without it does', async () => {
     await stop();
     await start({ maxSpend: 5 });
     noFreeReplies();
     const spent = expectNext(
       owner.id,
-      /^本机花费上限已用完（5\/5 钻石），relay 已暂停。.*--install-service/,
+      /^这台电脑设的总花费上限已用完（5\/5 钻石），要花钻石的消息先不发。.*--install-service/,
     );
     tg.userSends(owner, '本机上限内');
     await said(owner.id, /本机上限内/);
     expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 1 });
     await spent();
-    expect(state.data.billingPause).toBe('budget');
+    // The computer's cap, not a budget: nothing is paused, each send checks it again.
+    expect(state.data.billingPause).toBe('');
     const before = sends().length;
     tg.userSends(owner, '/budget none');
-    await saidNext(owner.id, /^本机花费上限已用完/);
-    expect(state.data.billingPause).toBe('budget');
+    await saidNext(owner.id, /^这台电脑设的总花费上限已用完/);
+    expect(state.data.billingPause).toBe('');
     tg.userSends(owner, '上限用完了');
-    await saidNext(owner.id, /^本机花费上限已用完/);
+    await saidNext(owner.id, /^这台电脑设的总花费上限已用完/);
     expect(sends().length).toBe(before);
+    expect(state.data.billingPause).toBe('');
     await stop();
     await start({ maxSpend: null });
     expect(state.data.billingPause).toBe('');
@@ -1068,6 +1077,30 @@ describe('the relay', () => {
     expect(sends().length).toBe(before + 1);
     expect(sends().at(-1)!.body).toMatchObject({ consumption_mode: 0 });
     await settled();
+  });
+
+  it('lifts a budget pause an older version wrote when its cap ran out, the budget still having room', async () => {
+    await stop();
+    // Paused by an older yomi under --max-spend 10 with /budget 20 and 10 spent: the cap's pause,
+    // which the computer's ceiling no longer writes. A higher --max-spend now just goes on.
+    state.update({
+      billing: { mode: 'paid', budget: 20, spent: 10, setAt: 1 },
+      billingPause: 'budget',
+      allowance: { maxSpend: 10, spent: 10, since: Date.now(), unmeasured: 0 },
+      pending: null,
+    });
+    mock.state.chatFreeLimit = 1000;
+    await start({ maxSpend: 50 });
+    expect(state.data.billingPause).toBe('');
+    const before = sends().length;
+    tg.userSends(owner, '上限提高之后');
+    await said(owner.id, /上限提高之后/);
+    await settled();
+    expect(sends().length).toBe(before + 1);
+    expect(state.data.billingPause).toBe('');
+    await stop();
+    state.update({ billing: { mode: 'open', budget: 0, spent: 0, setAt: 0 } });
+    await start();
   });
 
   it('without a cap a reply the balance could not measure is not counted against a budget set after it', async () => {

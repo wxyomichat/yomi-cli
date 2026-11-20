@@ -22,7 +22,7 @@ import {
 import { introductionOf } from '../chat/introduction.js';
 import { ApiError, type Gateway, NotSignedIn } from '../core/api.js';
 import { tr } from '../core/i18n.js';
-import { LocalState } from '../core/state.js';
+import type { LocalState } from '../core/state.js';
 import { VERSION } from '../core/version.js';
 import {
   CHAT_IMAGE_POLL_MS,
@@ -75,7 +75,7 @@ import {
   type Sent,
 } from './channels/types.js';
 import { type FeedSubscriber, ImFeed } from './hub/feed.js';
-import { type Lease, Ledger, stateLedgerStore } from './hub/ledger.js';
+import { botRecords, IMAGE_RECORDS, type Lease, Ledger, stateLedgerStore } from './hub/ledger.js';
 import { PolicyService } from './hub/policy.js';
 import { SessionGate, type SessionListener } from './hub/session.js';
 import { PairingCode } from './pairing.js';
@@ -87,7 +87,13 @@ import {
   type RelayPolicy,
 } from './policy.js';
 import { renderReply } from './render.js';
-import { type BillingMode, characterOwner, type RelayCharacter, type RelayState } from './state.js';
+import {
+  type BillingMode,
+  characterOwner,
+  type PendingCharge,
+  type RelayCharacter,
+  type RelayState,
+} from './state.js';
 import { TelegramBot } from './telegram.js';
 import {
   type ImageBillingNote,
@@ -117,9 +123,11 @@ import {
  *   (across restarts) and is settled before the next send, and when the balance cannot be read
  *   nothing is sent. Without one it is bookkeeping only: a pending charge is settled when a reading
  *   comes (a send never replaces a pending charge before it is settled: the reading measures both),
- *   and an unreadable balance blocks nothing; what could not be measured is counted. A spent cap
- *   pauses the relay, and so does a "free" reply that was charged under free-only or a budget. A
- *   send is never repeated.
+ *   and an unreadable balance blocks nothing; what could not be measured is counted. A spent
+ *   budget pauses the bot until its owner sets another, and so does a "free" reply that was
+ *   charged under free-only or a budget; a spent `--max-spend` (the computer's, every bot's) only
+ *   refuses (or, filled only by what images may still cost, says to wait for them): nothing is
+ *   kept, and each send checks it again. A send is never repeated.
  * - The channel only translates: its inbound events in, the core's sends out under its own reply
  *   rules. Every rule about money, consent, policy and Yomi is here, the same on every channel.
  * - A bot of the bot registry talks as the one character it is bound to (`boundCharacter`, set on
@@ -152,11 +160,21 @@ import {
  *   never another device's.
  * - The long connection never gives up, reconnects after sleep, and reads `poll_message` on every
  *   connect; a reply that still did not arrive is read back from history.
- * - What one Yomi sign-in shares is given to the relay (`RelayOptions.hub`), else made for it
- *   alone: the long connection (`ImFeed`: every event to every relay, each keeps its own), the
- *   sign-in (`SessionGate`: signed out, back, another account), the policy per kind of channel
- *   (`PolicyService`) and the money (`Ledger`: the local ceiling and its running total, the charge
- *   still to be measured, the spend window).
+ * - What one Yomi sign-in shares is given to the relay (`RelayOptions.hub`, the bots `RelayHub`
+ *   runs in one process), else made for it alone: the long connection (`ImFeed`: a bot bound to a
+ *   character gets that character's events, and its image task's; a relay alone gets every event
+ *   and keeps its own), the sign-in (`SessionGate`: signed out, back, another account), the policy
+ *   per kind of channel (`PolicyService`) and the money (`Ledger`: the local ceiling and its
+ *   running total, the charge still to be measured, the spend window). A ledger several bots
+ *   share keeps each measurement to its own bot: a pending charge names its bot and is booked to
+ *   it whoever settles it, only the window's holder reads the balance for one, a send without a
+ *   cap measures only when the window is free (else it marks the open measurement before it goes,
+ *   which then books at most its own price, and books what the server says it cost, or its quoted
+ *   price as an estimate), another bot's charge is never joined (a send that would have to is
+ *   estimated the same way), one settled after the balance rose is estimated from its own bot's
+ *   cap, an answer that comes back after the run ended is owed to its bot's next run, and an
+ *   image is booked by its task alone, holding what it may cost until then (every registered
+ *   bot's, from the start of the process).
  * - A message is a turn from the moment it is accepted: another one is told to wait, and `/stop`
  *   stops it. Under a cap (free-only included) a send is measured by the balance, which is the
  *   account's (under free-only, to catch a charged "free" reply), so it holds the spend window
@@ -266,10 +284,17 @@ type Turn = {
   booked: boolean;
   /** The pending charge was stored for this send alone: a sure refusal clears it. */
   ownPending: boolean;
+  /** The pending charge (its `at`) this send joined: its cost is in that drop too. */
+  joinedAt: number | null;
   /** Its end settles the pending charge; not while it rides along an image's measurement. */
   settles: boolean;
   /** Nothing measures it: unless the server says what it cost, it is counted as unmeasured. */
   unmeasured: boolean;
+  /**
+   * Sent beside another bot's measurement (a shared ledger, no cap): unless the server says what
+   * it cost, its quoted price is booked as an estimate (`bookEstimate`).
+   */
+  estimated: boolean;
   /** Once settled: shown and booked (`finishTurn`). */
   finished: Promise<void> | null;
   watchdog: ReturnType<typeof setTimeout> | null;
@@ -383,8 +408,6 @@ type ImageJob = {
   done: Promise<void>;
 };
 
-const IMAGE_RECORDS = 'relay-chat-image';
-
 /** Pauses that come from the session or the server; worked out again on every start. */
 type Gate = '' | 'signedOut' | 'disabled' | 'tooOld';
 
@@ -408,6 +431,8 @@ const PRICE_TTL = 5 * 60 * 1000;
 const TYPING_DELAY_MS = 300;
 /** How long a stop waits for the open reply's presenter at shutdown before giving up on it. */
 const SHUTDOWN_STOP_MS = 3000;
+/** How long a stop waits for the open reply's settlement (a balance reading) at shutdown. */
+const SHUTDOWN_SETTLE_MS = 5000;
 
 /**
  * Whether a failed send may still have been accepted (and charged): no answer at all, a timeout,
@@ -480,6 +505,12 @@ export class Relay {
   private imagePriceShown = new Set<string>();
   /** The image being followed, at most one (and never beside a reply). */
   private job: ImageJob | null = null;
+  /** Shared: the ceiling a kept image holds (`holdImage`). */
+  private imageHold: { amount: number; release: () => void } | null = null;
+  /** The run has ended: a settlement still in flight leaves its charge pending (`settleHeld`). */
+  private ended = false;
+  /** How another bot's settlement books what it found this bot spent (shared ledger). */
+  private readonly booker = (amount: number, mode: BillingMode) => this.book(amount, mode);
   /** `(cid, mid)` of the `MessagePersisted` pushes seen. */
   private persisted = new Set<string>();
   private readonly records: LocalState;
@@ -543,8 +574,7 @@ export class Relay {
     this.userId = gateway.requireCredential().userId;
     // One file per bot: a relay of another bot of this account saves its own copy whole.
     this.records =
-      options.records ??
-      new LocalState(`relay|${state.data.account}|${this.channel.scope}`, this.userId);
+      options.records ?? botRecords(state.data.account, this.channel.scope, this.userId);
     this.host = {
       state,
       store: state.channelStore(),
@@ -596,10 +626,15 @@ export class Relay {
     const onAbort = () => this.abort.abort();
     signal.addEventListener('abort', onAbort, { once: true });
     this.leaveSession = this.session.subscribe(this.sessionListener);
+    // Shared: what another bot's settlement finds this bot spent is booked here while it runs.
+    const leaveLedger = this.ledger.shared
+      ? this.ledger.register(this.botKey, this.booker, () => this.left())
+      : null;
     try {
       await this.prepare();
       await this.poll();
     } finally {
+      leaveLedger?.();
       signal.removeEventListener('abort', onAbort);
       const job = this.job;
       // The open reply is stopped first, so what its presenter still sends reaches the channel
@@ -608,6 +643,7 @@ export class Relay {
       // Nothing reaches the chat after the relay stopped.
       await job?.done;
       await this.channel.close().catch(() => undefined);
+      this.ended = true;
     }
     if (this.stopReason) throw this.stopReason;
   }
@@ -640,7 +676,21 @@ export class Relay {
     if (this.session.signedOut && this.gate !== 'signedOut') await this.pauseSignedOut();
     if (this.bound) await this.takeBoundCharacter();
     else if (this.options.characterId) await this.chooseCharacter(this.options.characterId, false);
-    const kept = this.keptImage();
+    // What another bot's settlement found this bot spent while it was not running: in the running
+    // total already, now in its budget too.
+    if (this.ledger.shared)
+      for (const { amount, mode } of this.ledger.takeOwed(this.botKey)) {
+        this.log(
+          tr(
+            `这个 bot 没在运行时的一条消息花了 ${amount} 钻石，现在计入它的预算`,
+            `A message of this bot cost ${amount} gems while it was not running: counted in its budget now`,
+            `Un mensaje de este bot costó ${amount} gemas mientras no estaba en ejecución: ahora se cuenta en su presupuesto`,
+            `Uma mensagem deste bot custou ${amount} gemas enquanto ele não estava em execução: agora é contada no orçamento dele`,
+          ),
+        );
+        await this.book(amount, mode, true);
+      }
+    const kept = this.sharedImage(this.keptImage());
     // A kept image's charge lands on delivery, maybe after this start: its own conclusion (or the
     // next send) settles it, never a reading taken now.
     if (this.ledger.pending && !kept && !(await this.settlePending()))
@@ -680,10 +730,14 @@ export class Relay {
    * Without a budget, a pause this run's limits no longer hold is lifted: a cap spent under an
    * earlier `--max-spend` (also under `--max-spend 0`: free-only spends nothing, as `/budget off`
    * lifts it), or a charged "free" reply once free-only is no longer asked for. Under a budget
-   * only the owner lifts it (`/budget`), as always.
+   * only the owner lifts its own pause (`/budget`), as always; a budget pause with room left in
+   * the budget was the cap's (an older version paused for it, the computer's ceiling now pauses
+   * nothing): lifted too.
    */
   private liftStalePause() {
     const { billing, billingPause } = this.state.data;
+    if (billingPause === 'budget' && billing.mode === 'paid' && billing.spent < billing.budget)
+      return this.state.update({ billingPause: '' });
     if (billing.mode !== 'open') return;
     if (
       (billingPause === 'budget' && (this.left() > 0 || this.freeOnly())) ||
@@ -837,19 +891,21 @@ export class Relay {
       if (turn.watchdog) clearTimeout(turn.watchdog);
       // A message not sent yet never is.
       turn.abort.abort();
-      // Its charge, if any, stays pending and is settled on the next run. A stop that hangs is
-      // given up on: the relay must end. So is a wait beside the chat that is slow to end, but
-      // its hold on the spend window is let go only once it ended: it may still be reading the
-      // balance, and another bot's measurement must not start meanwhile.
+      // A stop that hangs is given up on: the relay must end. So is a wait beside the chat that
+      // is slow to end, and a settlement still reading the balance (its charge then stays
+      // pending, for the next run or another bot's settlement). Its hold on the spend window is
+      // let go only once both ended: another bot's measurement must not start meanwhile.
       await within(
         SHUTDOWN_STOP_MS,
         turn.presenter.stop().catch(() => undefined),
       );
       const task = turn.task;
-      if (task) {
-        await within(SHUTDOWN_STOP_MS, task);
-        void task.finally(() => this.release(turn));
-      } else this.release(turn);
+      if (task) await within(SHUTDOWN_SETTLE_MS, task);
+      const finished = turn.finished?.catch(() => undefined) ?? null;
+      if (finished) await within(SHUTDOWN_SETTLE_MS, finished);
+      const open = [task, finished].filter((work) => work !== null);
+      if (open.length) void Promise.all(open).finally(() => this.release(turn));
+      else this.release(turn);
     }
   }
 
@@ -1423,6 +1479,15 @@ export class Relay {
     return Math.min(budget, this.ceilingLeft());
   }
 
+  /**
+   * This bot's own budget is spent: a pause only its owner lifts (`/budget`). A spent ceiling is
+   * not one: it is the computer's (shared by every bot), so nothing is paused for it.
+   */
+  private budgetSpent(): boolean {
+    const billing = this.state.data.billing;
+    return billing.mode === 'paid' && billing.spent >= billing.budget;
+  }
+
   /** What is left under `--max-spend`; Infinity without one (never printed). */
   private ceilingLeft(): number {
     return this.ledger.ceilingLeft();
@@ -1447,20 +1512,22 @@ export class Relay {
   }
 
   /**
-   * Why spending stopped: the local ceiling (which no `/budget` lifts), else the budget. A
-   * budget's pause that a lower ceiling caused before a restart stays the owner's to lift, but
-   * says so: the budget itself still has room.
+   * Why spending stopped: the local ceiling (the computer's, which no `/budget` lifts and which
+   * pauses nothing: each send checks it again), else the budget. A ceiling that only what images
+   * may still cost fills frees up once they are booked: nothing to restart for.
    */
   private exhaustedText(): string {
     const ceiling = this.ledger.maxSpend;
     if (ceiling === 0)
       return this.texts.budgetTooHigh(0, 0, this.texts.restartHint(this.rerunCommand()));
-    if (ceiling !== null && this.ceilingLeft() <= 0)
-      return this.texts.ceilingExhausted(this.ledger.spent, ceiling, this.rerunCommand());
-    const billing = this.state.data.billing;
-    if (billing.mode === 'paid' && billing.spent < billing.budget)
-      return this.texts.budgetPausedByCeiling(billing.budget - billing.spent);
-    return this.texts.budgetExhausted(billing.spent);
+    if (ceiling !== null && this.ceilingLeft() <= 0) {
+      const spent = this.ledger.spent;
+      const held = this.ledger.held();
+      return spent < ceiling && held > 0
+        ? this.texts.ceilingHeld(spent, ceiling, held)
+        : this.texts.ceilingReached(spent, ceiling, this.rerunCommand());
+    }
+    return this.texts.budgetExhausted(this.state.data.billing.spent);
   }
 
   /** Not enough left for the next reply, naming the limit that is short. */
@@ -1759,8 +1826,12 @@ export class Relay {
     const turn = this.openTurn(event, character);
     this.turn = turn;
     // Under a cap (free-only included) a send is measured by the balance, which every relay of
-    // this ledger spends: one at a time, through the spend window. Without a cap nothing waits.
-    if (this.uncapped()) return this.send(turn, text);
+    // this ledger spends: one at a time, through the spend window. Without a cap nothing waits:
+    // in a shared ledger it measures only when the window is free (else its cost is estimated).
+    if (this.uncapped()) {
+      if (this.ledger.shared) turn.lease = this.ledger.window.tryAcquire(this.botKey);
+      return this.send(turn, text);
+    }
     const lease = this.ledger.window.tryAcquire(this.botKey);
     if (lease) {
       turn.lease = lease;
@@ -1791,8 +1862,10 @@ export class Relay {
       mode: 'open',
       booked: false,
       ownPending: false,
+      joinedAt: null,
       settles: true,
       unmeasured: false,
+      estimated: false,
       finished: null,
       watchdog: null,
       waiting: true,
@@ -1883,11 +1956,15 @@ export class Relay {
     // a reply goes anyway and rides along the image's measurement.
     const open = await this.settleImage(true);
     if (open) return this.refuse(turn, open);
-    const riding = this.keptImage() !== null;
+    // In a shared ledger a send measures by the balance only while it holds the window (without a
+    // cap it may not), and an image never takes a measurement for replies to ride along.
+    const measuring = !this.ledger.shared || turn.lease !== null;
+    if (measuring && this.ledger.shared) this.ledger.takeForeign();
+    const riding = !this.ledger.shared && this.keptImage() !== null;
     const uncapped = this.uncapped();
     // What earlier sends cost is booked before anything more is spent; without a cap that is
     // bookkeeping, and an unreadable balance blocks nothing (the reading comes later).
-    if (!riding && !(await this.settlePending())) {
+    if (measuring && !riding && !(await this.settlePending())) {
       if (!uncapped) return this.refuse(turn, this.texts.walletUnavailable);
       this.log(
         tr(
@@ -1912,12 +1989,14 @@ export class Relay {
       consumptionMode = ConsumptionMode.freeOnly;
     } else if (uncapped) {
       // Yomi charges by its normal rules, whatever the policy offers; too few gems is the
-      // server's refusal, said in the chat (`refused`).
+      // server's refusal, said in the chat (`refused`). A measurement other bots' sends may land
+      // in knows its own price, to book no more than that then.
       consumptionMode = ConsumptionMode.allowPaid;
+      if (this.ledger.shared && measuring) price = await this.replyPrice(character.npcId);
     } else {
       const left = this.left();
       if (left <= 0) {
-        this.state.update({ billingPause: 'budget' });
+        if (this.budgetSpent()) this.state.update({ billingPause: 'budget' });
         return this.refuse(turn, this.exhaustedText());
       }
       price = await this.replyPrice(character.npcId);
@@ -1931,13 +2010,13 @@ export class Relay {
     // Stopped meanwhile (it waited beside the chat): nothing more is said for it.
     if (turn.abort.signal.aborted) return;
     await this.notice(character, false);
-    // Riding along an image's measurement, this reply takes no reading of its own.
-    const before = riding ? null : await this.balance();
+    // Riding along an image's measurement, or not measuring at all, this reply takes no reading.
+    const before = riding || !measuring ? null : await this.balance();
     // Stopped while the balance was read: the measurement, shared by every relay of this ledger,
     // is not touched (after a shutdown another bot's may be open by now).
     if (turn.abort.signal.aborted) return;
     // A paid send under a cap needs something to measure its cost against.
-    if (before === null && !riding && !uncapped && !freeOnly)
+    if (before === null && measuring && !riding && !uncapped && !freeOnly)
       return this.refuse(turn, this.texts.walletUnavailable);
     if (billing.mode === 'paid' && !this.priceShown.has(character.npcId)) {
       await this.say(this.texts.priceLine(price) + this.texts.balanceLine(before));
@@ -1947,9 +2026,19 @@ export class Relay {
     const mode: BillingMode = freeOnly ? 'free' : billing.mode;
     const pending = this.ledger.pending;
     let ownPending = false;
-    if (riding) {
+    let joinedAt: number | null = null;
+    // Not measured by the balance: booked by what it cost, else its quoted price (`estimate`).
+    let estimated = !measuring;
+    if (!measuring) {
+      // Another bot's measurement is open: marked before this goes, as its drop may hold this
+      // send's charge from the moment the server takes it.
+      this.ledger.markForeign();
+    } else if (riding) {
       // The image's measurement (taken before it) holds this reply's cost too.
-      if (pending) this.ledger.setPending({ ...pending, extra: true, capped: false });
+      if (pending) {
+        this.ledger.setPending({ ...pending, extra: true, capped: false });
+        joinedAt = pending.at;
+      }
       this.log(
         tr(
           '上一张图片的花费还没结算：没有设花费上限，这条照常发送，花费和图片的一起核对',
@@ -1959,9 +2048,15 @@ export class Relay {
         ),
       );
     } else if (before === null) {
-      if (pending) {
+      if (pending && this.ledger.shared && pending.bot && pending.bot !== this.botKey) {
+        // Another bot's charge, its reading still to come: booked to that bot as it was made
+        // (its price, cap and mode), never joined. This send is estimated, and marks it.
+        estimated = true;
+        this.ledger.markForeign();
+      } else if (pending) {
         // Without a cap: the earlier send's reading is still to come and measures this one too.
         this.ledger.setPending({ ...pending, mode: 'open', price: null, capped: false });
+        joinedAt = pending.at;
         this.log(
           tr(
             '读不到余额：这条的花费和之前的一起核对',
@@ -1989,7 +2084,16 @@ export class Relay {
     } else {
       // A pending charge is replaced only once settled: this reading settles it first.
       if (pending) await this.settlePending(before);
-      this.ledger.setPending({ before, mode, price, at: Date.now(), capped: !uncapped });
+      this.ledger.setPending({
+        before,
+        mode,
+        price,
+        at: Date.now(),
+        capped: !uncapped,
+        ...(this.ledger.shared
+          ? { bot: this.botKey, ...(this.ledger.takeForeign() ? { foreign: true } : {}) }
+          : {}),
+      });
       ownPending = true;
     }
     if (turn.abort.signal.aborted) {
@@ -1999,8 +2103,10 @@ export class Relay {
     }
     turn.mode = mode;
     turn.ownPending = ownPending;
-    turn.settles = !riding;
-    turn.unmeasured = !ownPending && !this.ledger.pending;
+    turn.joinedAt = joinedAt;
+    turn.settles = !riding && !estimated;
+    turn.unmeasured = !ownPending && (estimated || !this.ledger.pending);
+    turn.estimated = estimated;
     turn.waiting = false;
     const presenter = turn.presenter;
     this.early.clear();
@@ -2039,16 +2145,19 @@ export class Relay {
     if (this.ownMids.size > 1000) this.ownMids = new Set([...this.ownMids].slice(-500));
     if (answer.chargedDiamonds !== null) {
       // The server says what it took: booked now, so a stop or restart cannot lose it. A
-      // measurement this send only joined keeps the earlier costs: this charge leaves its drop.
+      // measurement this send joined keeps the earlier costs: this charge leaves its drop. Any
+      // other one (taken beside it) may hold this charge or not: it is marked, its drop as it is.
       const joined = this.ledger.pending;
       if (ownPending) this.ledger.setPending(null);
-      else if (joined)
+      else if (joined && joined.at === turn.joinedAt)
         this.ledger.setPending({ ...joined, before: joined.before - answer.chargedDiamonds });
+      else if (joined) this.ledger.markForeign();
       turn.booked = true;
       // Its cost is known: the balance is free for the next measurement.
       this.release(turn);
       await this.book(answer.chargedDiamonds, turn.mode);
-    } else if (turn.unmeasured) this.countUnmeasured();
+    } else if (turn.estimated) await this.bookEstimate(turn);
+    else if (turn.unmeasured) this.countUnmeasured();
     for (const notice of answer.notices) await this.say(notice);
     this.armWatchdog(turn);
     const early = this.early.get(answer.streamId) ?? [];
@@ -2329,23 +2438,80 @@ export class Relay {
   /**
    * Books the pending send's cost from the balance now (`reading`, else read here): the drop, if
    * any. A balance that rose meanwhile (a top-up) hides the cost: for a send made under a cap the
-   * quoted price is booked instead (or, unknown, the rest of what may be spent, its bound then);
-   * for one made without a cap (`capped` false), even if a budget was set since, it is counted as
+   * quoted price is booked instead (or, unknown, the rest of what the bot that made it may
+   * spend, its bound then: `riseEstimate`); for one made without a cap (`capped` false), even if a budget was set since, it is counted as
    * unmeasured. False when the balance cannot be read: it stays pending.
    */
   private async settlePending(reading?: number): Promise<boolean> {
     const pending = this.ledger.pending;
     if (!pending) return true;
+    // Shared: only the window's holder reads the balance for it. Held by another bot, that bot
+    // settles it before its own send; free, this relay holds it while it reads.
+    let lease: Lease | null = null;
+    if (this.ledger.shared && this.ledger.window.holder !== this.botKey) {
+      lease = this.ledger.window.tryAcquire(this.botKey);
+      if (!lease) return true;
+    }
+    try {
+      return await this.settleHeld(pending, reading);
+    } finally {
+      lease?.release();
+    }
+  }
+
+  private async settleHeld(captured: PendingCharge, reading?: number): Promise<boolean> {
     const now = reading ?? (await this.balance());
     if (now === null) return false;
+    // This run has ended while the balance was read: what it settles now could not be saved for
+    // this bot. The charge stays pending, for the next run or the window's next holder.
+    if (this.ended || this.state.isClosed) return true;
     // Settled or replaced while the balance was read (another send of this ledger): not this
-    // reading's to settle.
-    if (this.ledger.pending?.at !== pending.at) return true;
+    // reading's to settle. Marked or moved meanwhile (a send beside it), it settles as it is now.
+    const pending = this.ledger.pending;
+    if (!pending || pending.at !== captured.at) return true;
     this.ledger.setPending(null);
     const drop = pending.before - now;
-    if (drop >= 0) await this.book(drop, pending.mode);
-    else if (pending.mode !== 'free' && !this.uncapped() && pending.capped !== false) {
-      const estimate = pending.price ?? Math.max(0, this.left());
+    // Another bot's: booked to it, as if it had read the balance itself.
+    const owner = pending.bot && pending.bot !== this.botKey ? pending.bot : '';
+    const book = async (amount: number, mode: BillingMode) => {
+      if (!owner) return this.book(amount, mode);
+      const where = await this.ledger.bookFor(owner, amount, mode);
+      if (where === 'owed')
+        this.log(
+          tr(
+            `另一个 bot 之前的一条消息花了 ${amount} 钻石：它没有在运行，已计入本机的累计花费，下次启动时计入它的预算`,
+            `An earlier message of another bot cost ${amount} gems: that bot is not running, so it is counted in this computer's running total now and in its budget when it starts again`,
+            `Un mensaje anterior de otro bot costó ${amount} gemas: ese bot no está en ejecución, así que se cuenta ahora en el total acumulado de este equipo y en su presupuesto cuando vuelva a iniciarse`,
+            `Uma mensagem anterior de outro bot custou ${amount} gemas: esse bot não está em execução, então é contada agora no total acumulado deste computador e no orçamento dele quando ele iniciar de novo`,
+          ),
+        );
+      else if (where === 'total' && amount > 0)
+        this.log(
+          tr(
+            `一个已删除的 bot 之前的一条消息花了 ${amount} 钻石：只计入本机的累计花费`,
+            `An earlier message of a bot that was removed cost ${amount} gems: it is counted in this computer's running total only`,
+            `Un mensaje anterior de un bot que se eliminó costó ${amount} gemas: solo se cuenta en el total acumulado de este equipo`,
+            `Uma mensagem anterior de um bot que foi removido custou ${amount} gemas: ela só é contada no total acumulado deste computador`,
+          ),
+        );
+    };
+    // An image still held from the ceiling may have been charged into this drop too.
+    const foreign = pending.foreign || this.ledger.imagesOpen();
+    // A balance that rose hides the cost: a capped send's is estimated from its own bot's cap.
+    const estimate = drop < 0 ? this.riseEstimate(pending, owner) : null;
+    // Something else may have landed in this drop (a shared ledger): at most the quoted price.
+    if (drop >= 0 && foreign && pending.price !== null && drop > pending.price) {
+      this.log(
+        tr(
+          `余额在这条回复期间少了 ${drop} 钻石，其中可能有别的扣费：按报价 ${pending.price} 钻石计入`,
+          `The balance dropped by ${drop} gems during this reply, which may include other charges: counting its quoted ${pending.price} gems`,
+          `El saldo bajó ${drop} gemas durante esta respuesta, lo que puede incluir otros cobros: se cuentan las ${pending.price} gemas cotizadas`,
+          `O saldo caiu ${drop} gemas durante esta resposta, o que pode incluir outras cobranças: contando as ${pending.price} gemas cotadas`,
+        ),
+      );
+      await book(pending.price, pending.mode);
+    } else if (drop >= 0) await book(drop, pending.mode);
+    else if (estimate !== null) {
       this.log(
         tr(
           `余额在这条回复期间增加了，无法量出花费：按 ${estimate} 钻石计入`,
@@ -2354,7 +2520,7 @@ export class Relay {
           `O saldo aumentou durante esta resposta, então o custo não pode ser medido: ${estimate} gemas serão contadas como gastas`,
         ),
       );
-      await this.book(estimate, pending.mode);
+      await book(estimate, pending.mode);
     } else if (pending.mode !== 'free') {
       this.log(
         tr(
@@ -2365,19 +2531,70 @@ export class Relay {
         ),
       );
       this.countUnmeasured();
-      await this.book(pending.price ?? 0, pending.mode);
+      await book(pending.price ?? 0, pending.mode);
     }
     return true;
   }
 
   /**
-   * Counts `amount` gems in the running total, against the budget and the local ceiling when they
-   * are set; pauses when one is spent. A "free" send that was charged pauses under free-only and
-   * under a budget (which it was never meant to touch); without a budget it is counted like any.
+   * What a capped send's cost is taken to be when the balance rose meanwhile: its quoted price,
+   * else the most it could have spent (the rest of its cap). That is the cap of the bot that made
+   * it: this relay's own for its charge (none now: null), another bot's (`owner`) as that bot says
+   * (`leftFor`; the ceiling's rest when it does not run). null: none, it is unmeasured.
    */
-  private async book(amount: number, mode: BillingMode) {
+  private riseEstimate(pending: PendingCharge, owner: string): number | null {
+    if (pending.mode === 'free' || pending.capped === false) return null;
+    if (!owner && this.uncapped()) return null;
+    if (pending.price !== null) return pending.price;
+    const left = owner ? this.ledger.leftFor(owner) : this.left();
+    return Number.isFinite(left) ? Math.max(0, left) : null;
+  }
+
+  /**
+   * A reply sent beside another bot's measurement (shared ledger, no cap) whose cost the server
+   * did not say: its quoted price is booked as an estimate (logged), else it is unmeasured. The
+   * open measurement is marked, as its drop may hold this cost too.
+   */
+  private async bookEstimate(turn: Turn) {
+    this.ledger.markForeign();
+    const price = turn.mode === 'free' ? 0 : await this.replyPrice(turn.character.npcId);
+    if (price === null) return this.countUnmeasured();
+    if (price > 0)
+      this.log(
+        tr(
+          `另一个 bot 正在核对花费：这条回复按报价估计为 ${price} 钻石`,
+          `Another bot is measuring its cost: this reply is estimated at its quoted ${price} gems`,
+          `Otro bot está midiendo su costo: esta respuesta se estima en las ${price} gemas cotizadas`,
+          `Outro bot está medindo o custo dele: esta resposta foi estimada nas ${price} gemas cotadas`,
+        ),
+      );
+    await this.book(price, turn.mode);
+  }
+
+  /**
+   * Counts `amount` gems in the running total (unless it is there already: `counted`), against the
+   * budget and the local ceiling when they are set. A budget that is spent pauses the bot until
+   * its owner sets another; the ceiling, the whole computer's, only says so: nothing is kept, and
+   * each send checks it again. A "free" send that was charged pauses under free-only and under a
+   * budget (which it was never meant to touch); without a budget it is counted like any.
+   */
+  private async book(amount: number, mode: BillingMode, counted = false) {
     if (amount <= 0) return;
-    const total = this.ledger.book(this.botKey, amount);
+    // An answer that came back after the run ended (its state closed): in the running total now,
+    // owed to this bot's budget (and its pauses) until its next run, which books it at its start.
+    if (!counted && this.ledger.shared && (this.ended || this.state.isClosed)) {
+      this.log(
+        tr(
+          `这个 bot 已停止：一条回复花了 ${amount} 钻石，已计入本机的累计花费，下次启动时计入它的预算`,
+          `This bot has stopped: a reply cost ${amount} gems, counted in this computer's running total now and in its budget when it starts again`,
+          `Este bot se detuvo: una respuesta costó ${amount} gemas, que se cuentan ahora en el total acumulado de este equipo y en su presupuesto cuando vuelva a iniciarse`,
+          `Este bot parou: uma resposta custou ${amount} gemas, contadas agora no total acumulado deste computador e no orçamento dele quando ele iniciar de novo`,
+        ),
+      );
+      await this.ledger.bookFor(this.botKey, amount, mode, this.booker);
+      return;
+    }
+    const total = counted ? this.ledger.spent : this.ledger.book(this.botKey, amount);
     if (mode === 'free' && (this.freeOnly() || this.state.data.billing.mode === 'paid')) {
       this.log(
         tr(
@@ -2413,7 +2630,7 @@ export class Relay {
             ),
       );
       if (this.left() <= 0) {
-        this.state.update({ billingPause: 'budget' });
+        if (this.budgetSpent()) this.state.update({ billingPause: 'budget' });
         await this.say(this.exhaustedText());
       }
       return;
@@ -2435,10 +2652,7 @@ export class Relay {
             `Foram cobradas ${amount} gemas (${total} gastas pelo relay no total; restam ${ceilingLeft} dentro do limite de gastos local)`,
           ),
     );
-    if (ceiling !== null && this.ceilingLeft() <= 0) {
-      this.state.update({ billingPause: 'budget' });
-      await this.say(this.exhaustedText());
-    }
+    if (ceiling !== null && this.ceilingLeft() <= 0) await this.say(this.exhaustedText());
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2450,6 +2664,40 @@ export class Relay {
 
   private keepImage(record: ImageRecord | null) {
     this.records.setRecord(IMAGE_RECORDS, this.channel.scope, record);
+    this.holdImage(record);
+  }
+
+  /** Shared: what a kept image may still cost is held from the ceiling until it is booked. */
+  private holdImage(record: ImageRecord | null) {
+    if (!this.ledger.shared) return;
+    const key = `image:${this.botKey}`;
+    const amount = record ? (record.worst ?? record.price) : 0;
+    if (record && this.imageHold?.amount === amount) return;
+    this.imageHold?.release();
+    this.imageHold = null;
+    // What the hub held for it at the start (relay/hub) goes too.
+    if (!record) return this.ledger.unreserve(key);
+    this.imageHold = { amount, release: this.ledger.reserve(this.botKey, amount, key) };
+  }
+
+  /**
+   * A kept image in a shared ledger is booked by its task alone: one measured by the balance before
+   * (an older run) gives up that measurement, its pending charge (the image's own) dropped. Then
+   * what it may still cost is held. The record, as kept now.
+   */
+  private sharedImage(record: ImageRecord | null): ImageRecord | null {
+    if (!record || !this.ledger.shared) return record;
+    if (record.measured !== false) {
+      const pending = this.ledger.pending;
+      if (pending && (pending.bot ?? this.botKey) === this.botKey) {
+        if (pending.extra) this.countUnmeasured();
+        this.ledger.setPending(null);
+      }
+      record = { ...record, measured: false };
+      this.records.setRecord(IMAGE_RECORDS, this.channel.scope, record);
+    }
+    this.holdImage(record);
+    return record;
   }
 
   /** `/image`, `/image resume`, `/image forget`. */
@@ -2501,11 +2749,13 @@ export class Relay {
         return void (await this.say(this.texts.imageConfigUnavailable(!this.uncapped())));
       }
       const money = await this.imageMoney(kept.npcId, cost, worst, true);
+      if (!money) return;
       if (money.refusal) return void (await this.say(money.refusal));
       return this.requestImage(
         { ...kept, mode: this.state.data.billing.mode, price: cost, worst: worst ?? cost },
         money.before,
         true,
+        money.lease,
       );
     }
     // A paused channel starts no new picture (one asked for before still resumes or is forgotten).
@@ -2545,6 +2795,7 @@ export class Relay {
     const anchor = await this.imageAnchor(event, character.npcId);
     if (!anchor) return;
     const money = await this.imageMoney(character.npcId, config.cost, config.worstCost);
+    if (!money) return;
     if (money.refusal) return void (await this.say(money.refusal));
     const requestId = chatImageRequestId(character.npcId, anchor.mid);
     const record: ImageRecord = {
@@ -2568,7 +2819,7 @@ export class Relay {
       refunding: false,
       at: Date.now(),
     };
-    await this.requestImage(record, money.before);
+    await this.requestImage(record, money.before, false, money.lease);
   }
 
   /**
@@ -2611,18 +2862,46 @@ export class Relay {
    * balance that pays for it. One shown as free may still be charged its full price (`worst`: the
    * free images are a snapshot), so under a cap that must fit what this relay may still spend; an
    * unknown worst case refuses. Without a cap Yomi charges by its normal rules: an unreadable
-   * balance blocks nothing (the image is then booked by its task). `refusal` says why not ('' when
-   * it may go); `before` is the balance to measure from.
+   * balance blocks nothing (the image is then booked by its task). In a ledger several bots share,
+   * under a cap, the checks and the image's hold on the ceiling are one step: they are made inside
+   * the spend window (waited for, as a reply does), whose `lease` the request lets go once the
+   * image holds what it may cost (`requestImage`). `refusal` says why not ('' when it may go);
+   * `before` is the balance to measure from; null when the relay stopped while it waited.
    */
   private async imageMoney(
     npcId: string,
     cost: number,
     worst: number | null,
     replay = false,
+  ): Promise<{ refusal: string; before: number | null; lease: Lease | null } | null> {
+    const uncapped = this.uncapped();
+    if (worst === null && !uncapped)
+      return { refusal: this.texts.imageConfigUnavailable(true), before: null, lease: null };
+    let lease: Lease | null = null;
+    if (this.ledger.shared && !uncapped) {
+      const taken = await this.ledger.window.acquire(this.botKey, this.abort.signal);
+      if (taken === 'aborted') return null;
+      if (taken === 'busy') return { refusal: this.texts.accountBusy, before: null, lease: null };
+      lease = taken;
+    }
+    try {
+      const checked = await this.imageChecks(npcId, cost, worst, replay, uncapped);
+      if (checked.refusal) lease?.release();
+      return { ...checked, lease: checked.refusal ? null : lease };
+    } catch (error) {
+      lease?.release();
+      throw error;
+    }
+  }
+
+  private async imageChecks(
+    npcId: string,
+    cost: number,
+    worst: number | null,
+    replay: boolean,
+    uncapped: boolean,
   ): Promise<{ refusal: string; before: number | null }> {
     const no = (refusal: string) => ({ refusal, before: null });
-    const uncapped = this.uncapped();
-    if (worst === null && !uncapped) return no(this.texts.imageConfigUnavailable(true));
     // A resend keeps the first send's pending charge: it is the same image, booked once at its end.
     if (!replay && !(await this.settlePending())) {
       if (!uncapped) return no(this.texts.walletUnavailable);
@@ -2644,7 +2923,7 @@ export class Relay {
       if (!uncapped) {
         const left = this.left();
         if (left <= 0) {
-          this.state.update({ billingPause: 'budget' });
+          if (this.budgetSpent()) this.state.update({ billingPause: 'budget' });
           return no(this.exhaustedText());
         }
         if (cost > left)
@@ -2686,17 +2965,30 @@ export class Relay {
    * is). Only a known refusal (`chatImageRefusal`) of the first send charged nothing and forgets
    * it; anything else, an unrecognised code included, is an unknown outcome and keeps it with its
    * pending charge. A refused resend (`replay`) covers that resend only: the first send may have
-   * been accepted, so the request and its pending charge stay.
+   * been accepted, so the request and its pending charge stay. The spend window its checks were
+   * made in (`lease`) is let go once the image holds what it may cost.
    */
-  private async requestImage(record: ImageRecord, before: number | null, replay = false) {
+  private async requestImage(
+    record: ImageRecord,
+    before: number | null,
+    replay = false,
+    lease: Lease | null = null,
+  ) {
     // A resend keeps the first send's pending charge (measured from before that send). A new
     // measurement starts only when none is open: one that is (only without a cap) began before
     // this image and would take its charge too, so the image is then booked by its task alone.
     const pending = this.ledger.pending;
     const kept = replay && record.measured !== false ? pending : null;
-    const fresh = !kept && !pending && before !== null && !(replay && record.measured === false);
+    // Shared by several bots: an image is booked by its task, never measured by the balance.
+    const fresh =
+      !this.ledger.shared &&
+      !kept &&
+      !pending &&
+      before !== null &&
+      !(replay && record.measured === false);
     record.measured = Boolean(kept) || fresh;
     this.keepImage(record);
+    lease?.release();
     // An image shown as free that is charged anyway pauses the relay under free-only and under a
     // budget (`book`).
     if (kept && record.price > 0 && kept.mode === 'free')
@@ -2856,9 +3148,15 @@ export class Relay {
         stop.signal.addEventListener('abort', end, { once: true });
       });
     this.job = job;
+    // Its picture reaches this bot even when its character is no longer the one it is bound to.
+    const leaveCid =
+      this.bound && !this.ownsServices
+        ? this.feed.routeCid(record.cid, this.feedSubscriber)
+        : () => undefined;
     job.done = this.followImage(job, pause)
       .catch((error) => this.unexpected(error))
       .finally(() => {
+        leaveCid();
         if (this.job === job) this.job = null;
       });
     return job;
@@ -2997,6 +3295,22 @@ export class Relay {
             billing === ImageBilling.chargeFailed
           ? 0
           : null;
+    if (record.measured === false && this.ledger.shared) {
+      // Its charge may have landed in another bot's measurement: that one is marked, never cut.
+      if (pending) this.ledger.markForeign();
+      const amount = known ?? record.worst ?? record.price;
+      if (known === null)
+        this.log(
+          tr(
+            `这张图片的扣费状态不明：按最多 ${amount} 钻石计入`,
+            `This image's billing is unclear: counting the most it could cost, ${amount} gems`,
+            `El cobro de esta imagen no está claro: se cuenta lo máximo que podría costar, ${amount} gemas`,
+            `A cobrança desta imagem não está clara: contando o máximo que ela poderia custar, ${amount} gemas`,
+          ),
+        );
+      await this.book(amount, mode);
+      return;
+    }
     if (record.measured === false) {
       if (known === null) {
         // Inside the open measurement's drop, it is booked with it; without one it is lost.
@@ -3220,7 +3534,15 @@ export class Relay {
 
   /** Events from the long connection from now on; this relay's own feed connects too. */
   private connect() {
-    this.leaveFeed ??= this.feed.subscribe(this.feedSubscriber);
+    // A bound bot of a shared feed takes its character's events alone (one bot per character).
+    const route =
+      this.bound && !this.ownsServices
+        ? {
+            bot: this.options.botName ?? this.botKey,
+            npcId: this.options.boundCharacter?.npcId ?? null,
+          }
+        : undefined;
+    this.leaveFeed ??= this.feed.subscribe(this.feedSubscriber, route);
     if (this.ownsServices) this.feed.start();
   }
 
