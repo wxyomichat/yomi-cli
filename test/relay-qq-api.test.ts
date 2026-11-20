@@ -11,6 +11,8 @@ import {
   QqError,
   qqGatewayUrl,
   QqTokens,
+  TOKEN_OPERATION,
+  TOKEN_RETRY_MS,
 } from '../src/relay/channels/qq-api.js';
 import {
   C2C_INTENTS,
@@ -89,6 +91,113 @@ describe('the QQ API client', () => {
     expect(error).toBeInstanceOf(QqError);
     expect(error).toMatchObject({ reason: 'unauthorized', channel: 'qq' });
     expect(String((error as Error).message)).not.toContain('wrong-secret-123');
+  });
+
+  it("classifies the token's refusals by QQ's code, which comes with HTTP 200", async () => {
+    const cases: [number, string, number][] = [
+      [100016, 'unauthorized', 200],
+      [100007, 'gone', 200],
+      [10004, 'gone', 200],
+      [100001, 'rateLimited', 200],
+      [11298, 'refused', 200],
+      [502, 'transient', 502],
+      [429, 'transient', 429],
+    ];
+    for (const [code, reason, status] of cases) {
+      qq.failNext('token', { code, message: `refused ${code}` });
+      // A client of its own each time: a "too many requests" before does not carry over.
+      const error = await apiFor(qq)
+        .tokens.get()
+        .catch((caught: unknown) => caught);
+      expect(error, String(code)).toBeInstanceOf(QqError);
+      expect(error, String(code)).toMatchObject({
+        code,
+        reason,
+        status,
+        operation: TOKEN_OPERATION,
+        retryAfterMs: code === 100001 ? TOKEN_RETRY_MS : 0,
+      });
+      expect(qq.calls.at(-1)).toMatchObject({ path: '/app/getAppAccessToken', status, code });
+    }
+    // A wrong AppSecret: HTTP 200 and 100016, as QQ answers it.
+    await apiFor(qq, 'wrong-secret-456')
+      .tokens.get()
+      .catch(() => undefined);
+    expect(qq.calls.at(-1)).toMatchObject({ status: 200, code: 100016 });
+    // No answer at all: transient.
+    const offline = new QqTokens({
+      appId: qq.appId,
+      secret: qq.secret,
+      origin: 'http://127.0.0.1:9',
+      fetch: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+    await expect(offline.get()).rejects.toMatchObject({ reason: 'transient', status: 0 });
+    expect(JSON.stringify(qq.calls)).not.toContain(qq.secret);
+  });
+
+  it('keeps the token it has while QQ says too many requests, and asks again only after the wait', async () => {
+    let now = Date.now();
+    const tokens = new QqTokens({
+      appId: qq.appId,
+      secret: qq.secret,
+      origin: qq.origin,
+      now: () => now,
+      retryMs: 60_000,
+    });
+    const first = await tokens.get();
+    // Less than a minute left: asked again, refused as too frequent; the old one is kept.
+    now += 7200_000 - 30_000;
+    qq.failNext('token', { code: 100001 });
+    const before = tokenCalls(qq);
+    expect(await tokens.get()).toBe(first);
+    expect(tokenCalls(qq) - before).toBe(1);
+    // Within the wait: no request, the old one again.
+    now += 20_000;
+    expect(await tokens.get()).toBe(first);
+    expect(tokenCalls(qq) - before).toBe(1);
+    // The wait is over (the old one has expired too): asked again.
+    now += 40_000;
+    await tokens.get();
+    expect(tokenCalls(qq) - before).toBe(2);
+  });
+
+  it('waits out QQ’s "too many requests" before the next token request, or until it ends', async () => {
+    const tokens = new QqTokens({
+      appId: qq.appId,
+      secret: qq.secret,
+      origin: qq.origin,
+      retryMs: 300,
+    });
+    qq.failNext('token', { code: 100001 });
+    const refused = await tokens.get().catch((caught: unknown) => caught);
+    expect(refused).toMatchObject({ reason: 'rateLimited', retryAfterMs: 300 });
+    const started = Date.now();
+    await expect(tokens.get()).resolves.toEqual(expect.any(String));
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    const asked = qq.calls.filter((call) => call.path === '/app/getAppAccessToken').slice(-2);
+    expect(asked.map((call) => call.code)).toEqual([100001, 0]);
+    expect(asked[1].at - asked[0].at).toBeGreaterThanOrEqual(250);
+
+    // The channel ends during the wait: it fails at once, and asks QQ nothing.
+    const controller = new AbortController();
+    const ending = new QqTokens({
+      appId: qq.appId,
+      secret: qq.secret,
+      origin: qq.origin,
+      retryMs: 60_000,
+      signal: controller.signal,
+    });
+    qq.failNext('token', { code: 100001 });
+    await ending.get().catch(() => undefined);
+    const before = tokenCalls(qq);
+    const waiting = ending.get().catch((caught: unknown) => caught);
+    await sleep(50);
+    controller.abort();
+    const ended = await Promise.race([waiting, sleep(1000).then(() => 'still waiting')]);
+    expect(ended).toMatchObject({ reason: 'rateLimited', code: 100001 });
+    expect(tokenCalls(qq)).toBe(before);
   });
 
   it("maps QQ's codes to how the relay handles them", async () => {
@@ -425,6 +534,57 @@ describe('the QQ gateway', () => {
       expect(gate.sessionId).toBe('fresh');
     } finally {
       await fake.close();
+    }
+  });
+
+  it('waits QQ’s backoff when the token was asked for too often (100001), then connects', async () => {
+    const mock = await startMockQq();
+    try {
+      mock.failNext('token', { code: 100001, message: 'too many requests' });
+      const tokens = new QqTokens({
+        appId: mock.appId,
+        secret: mock.secret,
+        origin: mock.origin,
+        retryMs: 300,
+      });
+      const { readies, logs, done } = gateway(new QqApi(tokens, mock.origin));
+      await mock.waitFor(() => readies.length === 1, 3000);
+      const asked = mock.calls.filter((call) => call.path === '/app/getAppAccessToken');
+      expect(asked.map((call) => [call.status, call.code])).toEqual([
+        [200, 100001],
+        [200, 0],
+      ]);
+      expect(asked[1].at - asked[0].at).toBeGreaterThanOrEqual(250);
+      expect(logs).toEqual(['QQ 说换取令牌的请求太频繁（100001），1 秒后重试']);
+      expect(await Promise.race([done, sleep(50).then(() => 'running')])).toBe('running');
+    } finally {
+      await mock.shutdown();
+    }
+  });
+
+  it('stops when QQ says the bot is gone, or refuses the token with a code of its own', async () => {
+    const mock = await startMockQq();
+    try {
+      for (const code of [100007, 10004]) {
+        mock.failNext('token', { code, message: 'no such bot' });
+        const error = (await gateway(mock).done) as RelayStopped;
+        expect(error, String(code)).toBeInstanceOf(RelayStopped);
+        expect(error.reason).toBe('gone');
+        expect(error.message).toContain(`（${code}）`);
+        expect(error.message).toContain('https://q.qq.com/qqbot/openclaw/');
+        expect(error.message).not.toContain('重置');
+      }
+      // QQ's own words reach the terminal without their control characters.
+      mock.failNext('token', { code: 11298, message: 'ip \u001b[31mnot\u0007 allowed‮' });
+      const refused = (await gateway(mock).done) as RelayStopped;
+      expect(refused).toBeInstanceOf(RelayStopped);
+      expect(refused.reason).toBe('refused');
+      expect(refused.message).toContain('QQ 拒绝了换取令牌（11298：ip ?[31mnot? allowed?）');
+      expect(refused.message).toContain('有可能是白名单拦了（未确认）');
+      expect(refused.message).not.toMatch(/[\u0000-\u001f‮]/);
+      expect(mock.identifies).toBe(0);
+    } finally {
+      await mock.shutdown();
     }
   });
 });

@@ -6,6 +6,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { main } from '../src/cli.js';
 import { createContext } from '../src/commands/context.js';
+import { configDir } from '../src/core/files.js';
+import { lockHolder } from '../src/core/lock.js';
+import { sha256 } from '../src/core/state.js';
 import { ParagraphType } from '../src/im/models.js';
 import { chatImageStore, type MockChatImage } from '../src/mock/gen/chatImage.js';
 import { solidPngBytes } from '../src/mock/gen/png.js';
@@ -325,6 +328,48 @@ describe('yomi relay --channel qq', () => {
     // Its own AppID again: the same bot (the next test runs it).
     expect(again.out).not.toContain('已添加');
     expect(registered(qq.appId)).toMatchObject({ scope: `qq:${qq.appId}`, label: 'Lin QQ bot' });
+  });
+
+  it("says what QQ's refusal of the token means, when the AppID and AppSecret are set and when a run starts", async () => {
+    const identifies = qq.identifies;
+    const secrets = readFileSync(join(dir, 'secrets.json'), 'utf8');
+    const setApp = (code: number, message = `error ${code}`) => {
+      qq.failNext('token', { code, message });
+      return run(['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'], {
+        input: [qq.appId, qq.secret],
+      });
+    };
+    const gone = await setApp(100007, 'appid invalid');
+    expect(gone.code).toBe(1);
+    expect(gone.err).toContain('QQ 说没有这个机器人，或者它已被封禁、删除（100007）');
+    expect(gone.err).toContain('删除后 7 天内可以在 https://q.qq.com/qqbot/openclaw/ 恢复');
+    expect(qq.calls.at(-1)).toMatchObject({ path: '/app/getAppAccessToken', status: 200 });
+    const noBot = await setApp(10004);
+    expect(noBot.code).toBe(1);
+    expect(noBot.err).toContain('QQ 说没有这个机器人，或者它已被封禁、删除（10004）');
+    const busy = await setApp(100001);
+    expect(busy.code).toBe(1);
+    expect(busy.err).toContain('QQ 说请求太频繁（100001）：等一会儿再试（QQ 没说要等多久）');
+    const other = await setApp(11298, 'ip\u001b[2J not allowed');
+    expect(other.code).toBe(1);
+    expect(other.err).toContain('QQ 拒绝了换取令牌（11298：ip?[2J not allowed）');
+    expect(other.err).toContain('「服务器 IP 白名单」里加过 IP，有可能是白名单拦了（未确认）');
+    expect(other.err).not.toContain('\u001b');
+    const wrong = await setApp(100016);
+    expect(wrong.code).toBe(1);
+    expect(wrong.err).toContain('QQ 不接受这个 AppID/AppSecret');
+    for (const result of [gone, noBot, busy, other, wrong])
+      expect(result.out + result.err).not.toContain(qq.secret);
+    // Refused before the gateway is tried, and nothing is saved.
+    expect(qq.identifies).toBe(identifies);
+    expect(readFileSync(join(dir, 'secrets.json'), 'utf8')).toBe(secrets);
+
+    // A run's start says the same (openBot's verify), and runs nothing.
+    qq.failNext('token', { code: 100007 });
+    const started = await run(['relay', '--channel', 'qq', '--allow-file-store']);
+    expect(started.err).toContain('QQ 说没有这个机器人，或者它已被封禁、删除（100007）');
+    expect(started.out).not.toContain('relay 运行中');
+    expect(qq.identifies).toBe(identifies);
   });
 
   it('pairs with /pair in the private chat, ignores strangers, and stops when QQ delists the bot', async () => {
@@ -676,6 +721,200 @@ describe('the QQ relay after the AppSecret was reset', () => {
     expect(error).toBeInstanceOf(RelayStopped);
     expect(error.reason).toBe('token');
     expect(error.message).toContain('yomi relay --channel qq --set-app');
+  });
+});
+
+describe('the QQ relay when QQ refuses its token', () => {
+  const tokenCalls = (from: number) =>
+    qq.calls.slice(from).filter((call) => call.path === '/app/getAppAccessToken');
+
+  it('keeps running when the token was asked for too often (100001), waiting QQ’s backoff', async () => {
+    // As it starts (the run's check of the bot): said, and the backoff waited out.
+    let from = qq.calls.length;
+    qq.failNext('token', { code: 100001 });
+    const notices: string[] = [];
+    const { done, logs } = await start({
+      tokenRetryMs: 300,
+      notice: (line) => notices.push(line),
+    });
+    expect(notices).toEqual(['QQ 说换取令牌的请求太频繁（100001），1 秒后重试']);
+    let connecting = tokenCalls(from);
+    expect(connecting.map((call) => [call.status, call.code])).toEqual([
+      [200, 100001],
+      [200, 0],
+    ]);
+    expect(connecting[1].at - connecting[0].at).toBeGreaterThanOrEqual(250);
+    let ended = false;
+    void done.then(() => {
+      ended = true;
+    });
+
+    // While running: the reply's token waits the backoff out, and the reply goes.
+    qq.expireTokens();
+    qq.failNext('token', { code: 100001 });
+    from = qq.calls.length;
+    const answered = expectNew(/直接发文字，就会转给当前角色/);
+    const help = qq.userSends(OWNER, '/help');
+    expect((await answered()).replyTo).toBe(help);
+    connecting = tokenCalls(from);
+    expect(connecting.map((call) => call.code)).toEqual([100001, 0]);
+    expect(connecting[1].at - connecting[0].at).toBeGreaterThanOrEqual(250);
+    expect(ended).toBe(false);
+    expect(logs.join('\n')).not.toContain('发给 QQ 失败');
+  });
+
+  it('stops when QQ says the bot is gone (100007)', async () => {
+    const { done } = await start();
+    qq.expireTokens();
+    qq.failNext('token', { code: 100007, message: 'appid invalid' });
+    qq.userSends(OWNER, '/help');
+    const error = (await done) as RelayStopped;
+    expect(error).toBeInstanceOf(RelayStopped);
+    expect(error.reason).toBe('gone');
+    expect(error.message).toContain('QQ 说没有这个机器人，或者它已被封禁、删除（100007）');
+    expect(error.message).not.toContain('重置');
+  });
+
+  it('stops with QQ’s own words, safe to print, when it refuses the token with another code', async () => {
+    const { done } = await start();
+    qq.expireTokens();
+    qq.failNext('token', { code: 11298, message: 'ip\u001b[2J not allowed' });
+    qq.userSends(OWNER, '/help');
+    const error = (await done) as RelayStopped;
+    expect(error).toBeInstanceOf(RelayStopped);
+    expect(error.reason).toBe('refused');
+    expect(error.message).toContain('QQ 拒绝了换取令牌（11298：ip?[2J not allowed）');
+    expect(error.message).toContain('有可能是白名单拦了（未确认）');
+    expect(error.message).not.toContain('\u001b');
+  });
+
+  it('leaves "too many requests" to the run’s own check, which waits it out until the run ends', async () => {
+    const notices: string[] = [];
+    const channel = new QqChannel({
+      appId: qq.appId,
+      secret: qq.secret,
+      apiOrigin: qq.origin,
+      tokenRetryMs: 300,
+      notice: (line) => notices.push(line),
+      label: 'Registered QQ bot',
+    });
+    const from = qq.calls.length;
+    qq.failNext('token', { code: 100001 });
+    // The check before the run (a command's, before any lock): said, never waited for; the bot
+    // is the one registered.
+    const checking = Date.now();
+    await expect(channel.verify()).resolves.toEqual({
+      id: qq.appId,
+      name: 'Registered QQ bot',
+      handle: '',
+    });
+    expect(Date.now() - checking).toBeLessThan(250);
+    expect(tokenCalls(from).map((call) => call.code)).toEqual([100001]);
+    expect(notices).toEqual(['QQ 说换取令牌的请求太频繁（100001），1 秒后重试']);
+    // The run's own check waits the rest of QQ's backoff out, then asks once.
+    await expect(channel.verify(new AbortController().signal)).resolves.toMatchObject({
+      name: 'Lin QQ bot',
+    });
+    const asked = tokenCalls(from);
+    expect(asked.map((call) => call.code)).toEqual([100001, 0]);
+    expect(asked[1].at - asked[0].at).toBeGreaterThanOrEqual(250);
+    expect(notices).toHaveLength(1);
+
+    // A refusal the run's check meets after the wait stops the run, as once connected.
+    const gone = new QqChannel({
+      appId: qq.appId,
+      secret: qq.secret,
+      apiOrigin: qq.origin,
+      tokenRetryMs: 100,
+    });
+    qq.failNext('token', { code: 100001 });
+    await expect(gone.verify()).resolves.toMatchObject({ id: qq.appId, name: '' });
+    qq.failNext('token', { code: 100007, message: 'appid invalid' });
+    const stopped = await gone
+      .verify(new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(stopped).toBeInstanceOf(RelayStopped);
+    expect(stopped).toMatchObject({ reason: 'gone' });
+    expect((stopped as Error).message).toContain(
+      'QQ 说没有这个机器人，或者它已被封禁、删除（100007）',
+    );
+
+    // The run ends during the wait (Ctrl+C): the check ends at once, without asking QQ again.
+    const waiting = new QqChannel({ appId: qq.appId, secret: qq.secret, apiOrigin: qq.origin });
+    const controller = new AbortController();
+    qq.failNext('token', { code: 100001 });
+    const checked = waiting.verify(controller.signal).catch((caught: unknown) => caught);
+    await qq.waitFor(() => qq.calls.at(-1)?.code === 100001);
+    const before = qq.calls.length;
+    await sleep(50);
+    controller.abort();
+    const ended = await Promise.race([checked, sleep(1000).then(() => 'still waiting')]);
+    expect(ended).toMatchObject({ reason: 'rateLimited', code: 100001 });
+    expect(qq.calls.length).toBe(before);
+  });
+
+  it('starts the other bots of a run while one waits out "too many requests", under the run’s locks', async () => {
+    // Two QQ bots that may run: the registered one first, then another one added now.
+    const harbor = qq.addApp({ botName: 'Harbor QQ bot' });
+    const added = await run(
+      [
+        'relay',
+        '--channel',
+        'qq',
+        '--set-app',
+        '--bot',
+        'harbor',
+        '--token-stdin',
+        '--allow-file-store',
+      ],
+      { input: [harbor.appId, harbor.secret] },
+    );
+    expect(added.code).toBe(0);
+    const { account } = createContext(memoryIo().io, {});
+    for (const appId of [qq.appId, harbor.appId]) {
+      const scope = `qq:${appId}`;
+      new RelayState(relayStatePath(account, scope), scope, account, 'qq').update({
+        owner: { userId: OWNER, chatId: OWNER, name: '', language: '', pairedAt: Date.now() },
+      });
+    }
+    const environmentLock = join(
+      configDir(),
+      'locks',
+      `relay-env-${sha256(account).slice(0, 16)}.lock`,
+    );
+    const from = qq.calls.length;
+    const connections = harbor.identifies + harbor.resumes;
+    const listeners = new Set(process.listeners('SIGINT'));
+    const terminal = memoryIo();
+    // The first bot's check meets QQ's "too many requests" (its wait is QQ's 60 s).
+    qq.failNext('token', { code: 100001 });
+    const started = Date.now();
+    const pending = main(['relay', '--channel', 'qq', '--allow-file-store'], terminal.io);
+    try {
+      // The other bot runs at once, not after the first one's wait.
+      await harbor.waitFor(() => harbor.identifies + harbor.resumes > connections, 10_000);
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(terminal.err).toContain('QQ 说换取令牌的请求太频繁（100001），60 秒后重试');
+      // The waiting bot is named as registered, and it waits under the run's locks: a change to
+      // the bots sees a relay running.
+      expect(terminal.out).toContain('relay 运行中：Lin QQ bot');
+      expect(terminal.out).toContain('relay 运行中：Harbor QQ bot');
+      expect(lockHolder(environmentLock)).toMatchObject({ pid: process.pid });
+      // QQ is not asked again before its backoff ends.
+      await sleep(200);
+      expect(tokenCalls(from).map((call) => call.code)).toEqual([100001]);
+    } finally {
+      // Ctrl+C: the wait ends with the run.
+      for (const listener of process.listeners('SIGINT'))
+        if (!listeners.has(listener)) (listener as () => void)();
+      expect(await pending).toBe(0);
+    }
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(terminal.out).toContain('relay 已停止。');
+    expect(tokenCalls(from)).toHaveLength(1);
+    expect(lockHolder(environmentLock)).toBeNull();
+    const forgotten = await run(['relay', '--forget', '--bot', 'harbor']);
+    expect(forgotten.code).toBe(0);
   });
 });
 

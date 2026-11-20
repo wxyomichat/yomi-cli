@@ -1,6 +1,7 @@
 import { tr } from '../../core/i18n.js';
-import { type QqApi, qqGatewayUrl, QqError } from './qq-api.js';
-import { RelayStopped } from './types.js';
+import { terminalText } from '../../core/ui.js';
+import { type QqApi, qqGatewayUrl, QqError, tokenTooFrequent } from './qq-api.js';
+import { ChannelError, RelayStopped } from './types.js';
 
 /**
  * QQ's WebSocket gateway (https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/websocket.html)
@@ -10,7 +11,8 @@ import { RelayStopped } from './types.js';
  * is rationed per day (`session_start_limit`), so the gateway Resumes whenever it has a session
  * (also one stored by the previous process) and Identifies only when none can be resumed: at most
  * once per 5 s, and never with the day's quota used up. Codes a restart cannot fix end the relay
- * (`RelayStopped`); everything else reconnects, backing off from 1 s to 30 s.
+ * (`RelayStopped`), as does a refused token (`tokenStop`); a token asked for too often (100001)
+ * waits QQ's backoff (`TOKEN_RETRY_MS`); everything else reconnects, backing off from 1 s to 30 s.
  */
 
 /** GROUP_AND_C2C_EVENT: C2C_MESSAGE_CREATE, FRIEND_ADD/DEL, C2C_MSG_REJECT/RECEIVE (and group events). */
@@ -138,6 +140,59 @@ export function tokenStopped(again = 'yomi relay --channel qq --set-app'): Relay
   );
 }
 
+/** Where QQ explains the server IP whitelist (its guide, §8.2). */
+const IP_WHITELIST_GUIDE =
+  'https://bot.q.qq.com/wiki/#_8-2-%E6%9C%8D%E5%8A%A1%E5%99%A8-ip-%E7%99%BD%E5%90%8D%E5%8D%95';
+
+/** QQ's token says the bot is not there (100007, 10004): a wrong AppID, or banned or deleted. */
+export function botGoneText(code: number | string): string {
+  return tr(
+    `QQ 说没有这个机器人，或者它已被封禁、删除（${code}）：请在 q.qq.com 核对 AppID 和这个机器人的状态；删除后 7 天内可以在 https://q.qq.com/qqbot/openclaw/ 恢复。`,
+    `QQ says there is no such bot, or it was banned or deleted (${code}): check the AppID and the bot's status on q.qq.com; a deleted bot can be restored within 7 days at https://q.qq.com/qqbot/openclaw/.`,
+    `QQ dice que ese bot no existe, o que fue bloqueado o eliminado (${code}): revisa el AppID y el estado del bot en q.qq.com; un bot eliminado se puede restaurar en un plazo de 7 días en https://q.qq.com/qqbot/openclaw/.`,
+    `O QQ diz que esse bot não existe, ou que foi bloqueado ou excluído (${code}): confira o AppID e o status do bot em q.qq.com; um bot excluído pode ser restaurado em até 7 dias em https://q.qq.com/qqbot/openclaw/.`,
+  );
+}
+
+/**
+ * QQ refused the token with a code of its own: its words (made safe to print), and the server IP
+ * whitelist as a guess QQ's documentation does not confirm.
+ */
+export function tokenRefusedText(code: number | string, words: string): string {
+  const said = terminalText(words.trim());
+  return tr(
+    `QQ 拒绝了换取令牌（${code}${said ? `：${said}` : ''}）。如果在这个机器人的「服务器 IP 白名单」里加过 IP，有可能是白名单拦了（未确认）：把这台电脑现在的公网 IPv4 加进去，或者清空白名单。说明：${IP_WHITELIST_GUIDE}`,
+    `QQ refused to issue a token (${code}${said ? `: ${said}` : ''}). If you added IPs to the bot's server IP whitelist on q.qq.com, the whitelist may be blocking this computer (unconfirmed): add this computer's current public IPv4, or empty the whitelist. Guide: ${IP_WHITELIST_GUIDE}`,
+    `QQ se negó a emitir un token (${code}${said ? `: ${said}` : ''}). Si agregaste IP a la lista blanca de IP del servidor del bot en q.qq.com, puede que la lista esté bloqueando este equipo (sin confirmar): agrega la IPv4 pública actual de este equipo o vacía la lista. Guía: ${IP_WHITELIST_GUIDE}`,
+    `O QQ se recusou a emitir um token (${code}${said ? `: ${said}` : ''}). Se você adicionou IPs à lista de permissões de IP do servidor do bot em q.qq.com, talvez ela esteja bloqueando este computador (não confirmado): adicione o IPv4 público atual deste computador ou esvazie a lista. Guia: ${IP_WHITELIST_GUIDE}`,
+  );
+}
+
+/** QQ said the token was asked for too often (100001): when the next request goes. */
+export function tokenRetryText(error: QqError): string {
+  const seconds = Math.max(1, Math.round(error.retryAfterMs / 1000));
+  return tr(
+    `QQ 说换取令牌的请求太频繁（${error.code}），${seconds} 秒后重试`,
+    `QQ says the token was requested too often (${error.code}); retrying in ${seconds} s`,
+    `QQ dice que el token se pidió con demasiada frecuencia (${error.code}); se reintentará en ${seconds} s`,
+    `O QQ diz que o token foi pedido com frequência demais (${error.code}); tentando novamente em ${seconds} s`,
+  );
+}
+
+/**
+ * What ends the relay when QQ refuses its token (or REST twice in a row with 401): the
+ * AppID/AppSecret ('token', set them again with `again`), a bot that is gone ('gone'), another
+ * refusal ('refused'); null for anything else.
+ */
+export function tokenStop(error: unknown, again?: string): RelayStopped | null {
+  if (!(error instanceof ChannelError)) return null;
+  if (error.reason === 'unauthorized') return tokenStopped(again);
+  if (error.reason === 'gone') return new RelayStopped('gone', botGoneText(error.code));
+  if (error.reason === 'refused')
+    return new RelayStopped('refused', tokenRefusedText(error.code, error.description));
+  return null;
+}
+
 const STOP_CODES = new Set([4001, 4002, 4010, 4011, 4012, 4013, 4014, 4914, 4915]);
 
 /**
@@ -199,17 +254,23 @@ export class QqGateway {
       } catch (error) {
         if (error instanceof RelayStopped) throw error;
         if (signal.aborted) return;
-        if (error instanceof QqError && error.reason === 'unauthorized')
-          throw tokenStopped(this.options.renewCommand);
-        log(
-          tr(
-            `QQ 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
-            `Can't reach QQ right now, retrying in ${Math.round(backoff / 1000)} s`,
-            `No se puede conectar con QQ en este momento, se reintentará en ${Math.round(backoff / 1000)} s`,
-            `Não foi possível conectar ao QQ agora, tentando novamente em ${Math.round(backoff / 1000)} s`,
-          ),
-        );
-        await sleep(backoff, signal);
+        const stopped = tokenStop(error, this.options.renewCommand);
+        if (stopped) throw stopped;
+        // Too many token requests (100001): no new one before QQ's backoff ends.
+        if (tokenTooFrequent(error)) {
+          log(tokenRetryText(error));
+          await sleep(Math.max(backoff, error.retryAfterMs), signal);
+        } else {
+          log(
+            tr(
+              `QQ 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
+              `Can't reach QQ right now, retrying in ${Math.round(backoff / 1000)} s`,
+              `No se puede conectar con QQ en este momento, se reintentará en ${Math.round(backoff / 1000)} s`,
+              `Não foi possível conectar ao QQ agora, tentando novamente em ${Math.round(backoff / 1000)} s`,
+            ),
+          );
+          await sleep(backoff, signal);
+        }
         backoff = Math.min(backoff * 2, this.timings.backoffMaxMs);
         continue;
       }
@@ -299,7 +360,7 @@ export class QqGateway {
     // the process running and take the owner's messages).
     if (signal.aborted) return { kind: 'reconnect', identify: false, delayMs: 0 };
     const { api, intents = C2C_INTENTS } = this.options;
-    return new Promise<Outcome>((resolve) => {
+    return new Promise<Outcome>((resolve, reject) => {
       const socket = new WebSocket(url);
       this.socket = socket;
       let settled = false;
@@ -320,7 +381,8 @@ export class QqGateway {
         lastTick = now;
       }, this.timings.wakeTickMs);
       wake.unref?.();
-      const finish = (outcome: Outcome) => {
+      // An outcome, or a refused token that run() handles as when /gateway/bot met it.
+      const finish = (outcome: Outcome | QqError) => {
         if (settled) return;
         settled = true;
         clearTimeout(hello);
@@ -335,7 +397,8 @@ export class QqGateway {
         } catch {
           // Already closed.
         }
-        resolve(outcome);
+        if (outcome instanceof QqError) reject(outcome);
+        else resolve(outcome);
       };
       const onAbort = () => finish({ kind: 'reconnect', identify: false, delayMs: 0 });
       signal.addEventListener('abort', onAbort, { once: true });
@@ -356,6 +419,11 @@ export class QqGateway {
         } catch (error) {
           if (error instanceof QqError && error.reason === 'unauthorized') {
             finish({ kind: 'closed', code: 4004 });
+            return;
+          }
+          // A bot gone, another refusal, too many requests: not a connection that failed.
+          if (error instanceof QqError && error.reason !== 'transient') {
+            finish(error);
             return;
           }
           finish({ kind: 'closed', code: 0 });

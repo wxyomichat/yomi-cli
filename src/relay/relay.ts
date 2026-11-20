@@ -651,7 +651,7 @@ export class Relay {
   }
 
   private async prepare() {
-    this.identity = await this.channel.verify();
+    this.identity = await this.channel.verify(this.abort.signal);
     this.state.update({ botUsername: this.identity.handle });
     await this.channel.connect(this.host);
     await this.channel

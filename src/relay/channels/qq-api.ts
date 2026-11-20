@@ -119,6 +119,41 @@ export function qqReason(code: number, status: number): ChannelErrorReason {
   return 'other';
 }
 
+/** The token request, as its failures name it (`QqError.operation`). */
+export const TOKEN_OPERATION = 'POST /app/getAppAccessToken';
+
+/**
+ * The token request's codes, which QQ answers with HTTP 200
+ * (https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html).
+ */
+export const QQ_TOKEN_CODE = {
+  /** The AppID or the AppSecret is wrong. */
+  badSecret: 100016,
+  /** The AppID is not valid, or the bot was banned or deleted. */
+  badApp: 100007,
+  /** No such bot. */
+  noBot: 10004,
+  /** Too many requests; QQ says not how long to wait. */
+  tooFrequent: 100001,
+} as const;
+
+/** After 100001 no token is asked for this long: QQ gives no number, so this wait is our own. */
+export const TOKEN_RETRY_MS = 60_000;
+
+/**
+ * How the relay handles a refused token request: by QQ's code (it answers HTTP 200 with one),
+ * then a server failure or no answer by the HTTP status. An answer with neither a code nor a token
+ * is a refusal of the AppID/AppSecret, as it was before the codes were read.
+ */
+export function tokenReason(code: number, status: number): ChannelErrorReason {
+  if (code === QQ_TOKEN_CODE.badSecret) return 'unauthorized';
+  if (code === QQ_TOKEN_CODE.badApp || code === QQ_TOKEN_CODE.noBot) return 'gone';
+  if (code === QQ_TOKEN_CODE.tooFrequent) return 'rateLimited';
+  if (status === 0 || status >= 500 || status === 429) return 'transient';
+  if (code) return 'refused';
+  return 'unauthorized';
+}
+
 /** A refused or failed QQ call. `status` is the HTTP status (0: no answer). */
 export class QqError extends ChannelError {
   constructor(
@@ -127,18 +162,16 @@ export class QqError extends ChannelError {
     description: string,
     readonly status: number,
     reason: ChannelErrorReason = qqReason(code, status),
+    retryAfterMs = code === QQ_CODE.activeLimit ? 600_000 : code === QQ_CODE.streamLimit ? 1000 : 0,
   ) {
-    super(
-      'qq',
-      operation,
-      code,
-      redact(description).slice(0, 200),
-      reason,
-      code === QQ_CODE.activeLimit ? 600_000 : code === QQ_CODE.streamLimit ? 1000 : 0,
-    );
+    super('qq', operation, code, redact(description).slice(0, 200), reason, retryAfterMs);
     this.name = 'QqError';
   }
 }
+
+/** QQ refused a token request as too frequent (100001): `retryAfterMs` is the wait. */
+export const tokenTooFrequent = (error: unknown): error is QqError =>
+  error instanceof QqError && error.reason === 'rateLimited' && error.operation === TOKEN_OPERATION;
 
 /** QQ's code of an error, 0 when it is not a QQ error. */
 export const codeOf = (error: unknown): number =>
@@ -209,18 +242,41 @@ export type QqTokenOptions = {
   origin: string;
   fetch?: Fetch;
   now?: () => number;
+  /** After QQ's "too many requests" (100001), no token request for this long (`TOKEN_RETRY_MS`). */
+  retryMs?: number;
+  /** Ends a wait for that (the channel's end): the wait fails as QQ's answer did. */
+  signal?: AbortSignal;
 };
+
+/** Waits `ms`, or less when `signal` aborts. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
 
 /**
  * The access token (`POST /app/getAppAccessToken`, `{ appId, clientSecret }` →
  * `{ access_token, expires_in }`, `expires_in` sometimes a string). Asked again when less than
  * 60 s are left: QQ hands out a new one only then, and the old one stays valid for those 60 s.
- * One request at a time; in memory only.
+ * One request at a time; in memory only. QQ refuses with HTTP 200 and a code (`tokenReason`).
+ * After its "too many requests" (100001) the token it has is used while it lasts, and no request
+ * goes out before `retryMs` passed: a get() meanwhile waits for it.
  */
 export class QqTokens {
   private token = '';
   private expiresAt = 0;
   private pending: Promise<string> | null = null;
+  /** QQ's last "too many requests", and when a token may be asked for again. */
+  private limited: QqError | null = null;
+  private retryAt = 0;
   private readonly fetcher: Fetch;
   private readonly now: () => number;
 
@@ -234,11 +290,19 @@ export class QqTokens {
   }
 
   async get(): Promise<string> {
-    if (this.token && this.expiresAt - this.now() >= 60_000) return this.token;
+    const now = this.now();
+    if (this.token && this.expiresAt - now >= 60_000) return this.token;
+    // Asked too often: the token of before while it lasts (QQ keeps it valid until it expires).
+    if (this.token && this.expiresAt > now && now < this.retryAt) return this.token;
     this.pending ??= this.fetchToken().finally(() => {
       this.pending = null;
     });
-    return this.pending;
+    try {
+      return await this.pending;
+    } catch (error) {
+      if (error === this.limited && this.token && this.expiresAt > this.now()) return this.token;
+      throw error;
+    }
   }
 
   /** The token was refused (401, gateway 4004): the next get() asks for a new one. */
@@ -248,7 +312,12 @@ export class QqTokens {
   }
 
   private async fetchToken(): Promise<string> {
-    const operation = 'POST /app/getAppAccessToken';
+    const operation = TOKEN_OPERATION;
+    const wait = this.retryAt - this.now();
+    if (this.limited && wait > 0) {
+      await pause(wait, this.options.signal);
+      if (this.options.signal?.aborted) throw this.limited;
+    }
     const { status, body } = await timedFetch(
       this.fetcher,
       operation,
@@ -273,14 +342,21 @@ export class QqTokens {
     // not a bare value).
     const secret = this.options.secret;
     const message = secret ? said.split(secret).join('***') : said;
-    // A refusal names the AppID or AppSecret; a server failure may pass.
-    throw new QqError(
+    const reason = tokenReason(code, status);
+    const retryMs = this.options.retryMs ?? TOKEN_RETRY_MS;
+    const error = new QqError(
       operation,
       code,
       message,
       status,
-      status >= 500 || status === 429 ? 'transient' : 'unauthorized',
+      reason,
+      reason === 'rateLimited' ? retryMs : 0,
     );
+    if (reason === 'rateLimited') {
+      this.limited = error;
+      this.retryAt = this.now() + retryMs;
+    }
+    throw error;
   }
 }
 

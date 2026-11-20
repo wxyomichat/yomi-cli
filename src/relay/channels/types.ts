@@ -251,8 +251,13 @@ export interface RelayChannel {
   readonly displayName: string;
   readonly caps: ChannelCaps;
 
-  /** Checks the credentials (network); no side effects. Throws ChannelError reason 'unauthorized' when refused. */
-  verify(): Promise<BotIdentity>;
+  /**
+   * Checks the credentials (network); no side effects. Throws ChannelError reason 'unauthorized'
+   * when refused (QQ: also 'gone' and 'refused'). `signal`: the run's own check (`Relay.prepare`),
+   * which may wait as the platform asks until it aborts (QQ's "too many requests" for the token;
+   * a refusal then stops the run). A check without one, before the run, never waits.
+   */
+  verify(signal?: AbortSignal): Promise<BotIdentity>;
   /** Starts receiving. Telegram: webhook check (RelayStopped 'webhook'); QQ: token + gateway; WeChat: notifystart. */
   connect(host: ChannelHost): Promise<void>;
   /**
@@ -297,6 +302,8 @@ export interface RelayChannel {
 export type ChannelErrorReason =
   | 'conflict' // another poller/connection owns the bot (Telegram 409)
   | 'unauthorized' // token/secret refused or revoked
+  | 'gone' // the bot does not exist, or was banned or deleted (QQ token 100007, 10004): never retried
+  | 'refused' // the platform refused for a reason of its own (QQ token, another code): never retried
   | 'blocked' // the person blocked the bot or is not its friend (QQ 40054004)
   | 'rateLimited' // wait `retryAfterMs`
   | 'expired' // the reply context can no longer be used (QQ msg_id expired or 4 replies used; WeChat token stale)
@@ -340,6 +347,10 @@ export class RelayStopped extends Error {
       | 'delisted'
       /** QQ 4915 only. */
       | 'banned'
+      /** QQ's token: no such bot, or it was banned or deleted (100007, 10004). */
+      | 'gone'
+      /** QQ's token: refused with another code (its own words in the message). */
+      | 'refused'
       /** A close code that means a client bug (QQ 4001/4002/4010-4012). */
       | 'protocol'
       /** WeChat: the login ended (repeated -14, 401/403): run --login again. */

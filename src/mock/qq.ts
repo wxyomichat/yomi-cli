@@ -7,15 +7,16 @@ import { type WebSocket, WebSocketServer } from 'ws';
 /**
  * An in-process stand-in for QQ's bot platform (https://bot.q.qq.com/wiki/develop/api-v2/), for
  * end-to-end tests of `yomi relay --channel qq`. It speaks the real wire format — the access
- * token (`POST /app/getAppAccessToken`), REST with `Authorization: QQBot <token>` and errors as
- * `{ code, message }`, the WebSocket gateway (Hello, Identify, Resume, heartbeats, dispatches with
- * `s`, op 7 and 9, close codes) — and enforces what matters to the relay: token expiry, the
- * private-chat intent (close 4014 without it), friends only (40054004), passive replies within a
- * window and 4 per message (40034128), a `(msg_id, msg_seq)` used once (40054005), active messages
- * the person refused (40034105), markdown it cannot parse (40034011 when told so), the stream's
- * rules (index order, replace may not change what was sent: 40007, `input_state: 10` ends it, each
- * response a new `id`), recall within a time limit (40064004), upload size, and the day's session
- * starts (`session_start_limit`). A session keeps its events while no socket is connected, so a
+ * token (`POST /app/getAppAccessToken`, refused with HTTP 200 and a code, as QQ does), REST with
+ * `Authorization: QQBot <token>` and errors as `{ code, message }`, the WebSocket gateway (Hello,
+ * Identify, Resume, heartbeats, dispatches with `s`, op 7 and 9, close codes) — and enforces what
+ * matters to the relay: token expiry, the private-chat intent (close 4014 without it), friends
+ * only (40054004), passive replies within a window and 4 per message (40034128), a
+ * `(msg_id, msg_seq)` used once (40054005), active messages the person refused (40034105),
+ * markdown it cannot parse (40034011 when told so), the stream's rules (index order, replace may
+ * not change what was sent: 40007, `input_state: 10` ends it, each response a new `id`), recall
+ * within a time limit (40064004), upload size, and the day's session starts
+ * (`session_start_limit`). A session keeps its events while no socket is connected, so a
  * Resume (also from a new process) replays them; messages sent with no session are lost, as on
  * QQ. Several bots can share the server (`addApp`), each with its own AppID, AppSecret, tokens,
  * session (one live per bot: a second Identify of the same bot replaces it), day's session starts,
@@ -135,7 +136,10 @@ export type MockQqApp = {
   allowActive(openid: string): void;
   /** Active messages answer 40034100 (the rate limit). */
   limitActive(on: boolean): void;
-  /** The next `times` calls of `path` fail with `failure`. */
+  /**
+   * The next `times` calls of `path` fail with `failure`. A token request answers HTTP 200 with
+   * the code, as QQ does (a 5xx or 429 code is that HTTP status), unless `status` says otherwise.
+   */
   failNext(
     path: 'token' | 'me' | 'gateway' | 'messages' | 'stream_messages' | 'files' | 'recall',
     failure: Failure,
@@ -165,6 +169,8 @@ export type MockQqApp = {
   setSessionLimit(remaining: number, resetAfterMs: number): void;
   /** The AppSecret is reset: tokens issued so far stop working and the old secret is refused. */
   resetSecret(): string;
+  /** Tokens issued so far expire now (the AppSecret stays): calls answer 401 until a new one. */
+  expireTokens(): void;
   identifies: number;
   resumes: number;
   heartbeats: number;
@@ -506,7 +512,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
 
     function accessToken(given: unknown) {
       if (given !== secret)
-        return { status: 401, body: { code: 100016, message: 'invalid appid or secret' } };
+        return { status: 200, body: { code: 100016, message: 'invalid appid or secret' } };
       const now = Date.now();
       const expires = tokens.get(current) ?? 0;
       // A new token only within the last 60 s; the old one stays valid until it expires.
@@ -660,6 +666,10 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
         current = '';
         return secret;
       },
+      expireTokens() {
+        const now = Date.now();
+        for (const token of tokens.keys()) tokens.set(token, now);
+      },
       identifies: 0,
       resumes: 0,
       heartbeats: 0,
@@ -739,9 +749,18 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
       });
 
     if (tokenRequest) {
+      // QQ refuses a token with HTTP 200 and its code; an HTTP error is a server failure.
       const failure = app.failureFor('token');
-      if (failure) return refuse(failure);
-      if (!named) return answer(401, { code: 100016, message: 'invalid appid or secret' });
+      if (failure)
+        return refuse({
+          ...failure,
+          status:
+            failure.status ??
+            ((failure.code >= 500 && failure.code < 600) || failure.code === 429
+              ? failure.code
+              : 200),
+        });
+      if (!named) return answer(200, { code: 100016, message: 'invalid appid or secret' });
       const result = app.accessToken(body.clientSecret);
       return answer(result.status, result.body);
     }

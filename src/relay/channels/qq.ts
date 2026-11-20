@@ -18,14 +18,19 @@ import {
   type QqSent,
   type QqStreamSent,
   QqTokens,
+  TOKEN_RETRY_MS,
+  tokenTooFrequent,
   TOO_LONG_CODES,
 } from './qq-api.js';
 import {
+  botGoneText,
   probeGateway,
   QqGateway,
   type QqDispatch,
   type QqGatewayTimings,
-  tokenStopped,
+  tokenRefusedText,
+  tokenRetryText,
+  tokenStop,
 } from './qq-gateway.js';
 import {
   type Held,
@@ -93,6 +98,8 @@ export const QQ_DEFAULTS = {
   maxPhotoBytes: 5 * 1024 * 1024,
   /** A transient failure is retried once after this. */
   retryDelayMs: 1000,
+  /** After QQ's "too many requests" for the token (100001), no token request for this long. */
+  tokenRetryMs: TOKEN_RETRY_MS,
   /** close() waits this long for held sends before queueing them. */
   closeWaitMs: 3000,
   /** Events waiting to be handled at most (the oldest go). */
@@ -125,6 +132,13 @@ export type QqChannelOptions = Partial<typeof QQ_DEFAULTS> & {
   fetch?: typeof fetch;
   /** What sets the AppSecret again, said when QQ refuses it (the channel's command by default). */
   renewCommand?: string;
+  /** Said before the channel is connected: QQ's "too many requests" answered to verify(). */
+  notice?: (line: string) => void;
+  /**
+   * The bot's name as registered: what a check before the run (verify() without a signal) gives
+   * when QQ says to wait, as the token is then left to the run's own check.
+   */
+  label?: string;
 };
 
 /** The gateway's position in the state file (`gateway`). */
@@ -208,6 +222,8 @@ export class QqChannel implements RelayChannel, QqOutlet {
   private handledSeq = 0;
   private storedAt = 0;
   private saveTimer: ReturnType<typeof setInterval> | null = null;
+  /** Ends a token request waiting out QQ's "too many requests" (the relay's end, close()). */
+  private readonly ending = new AbortController();
 
   constructor(private readonly options: QqChannelOptions) {
     this.settings = { ...QQ_DEFAULTS };
@@ -220,6 +236,8 @@ export class QqChannel implements RelayChannel, QqOutlet {
       secret: options.secret,
       origin,
       fetch: options.fetch,
+      retryMs: this.settings.tokenRetryMs,
+      signal: this.ending.signal,
     });
     this.api = new QqApi(tokens, origin, options.fetch);
     this.caps = {
@@ -348,9 +366,32 @@ export class QqChannel implements RelayChannel, QqOutlet {
 
   // RelayChannel ----------------------------------------------------------------------------
 
-  /** The token (refused: `ChannelError` 'unauthorized'), then the bot's name if QQ gives it. */
-  async verify(): Promise<BotIdentity> {
-    await this.api.tokens.get();
+  /**
+   * The token (refused: a `ChannelError` saying why: 'unauthorized', 'gone', 'refused'), then the
+   * bot's name if QQ gives it. QQ's "too many requests" (100001) is said each time it comes.
+   *
+   * - A check before the run (no `signal`: a command's, before any lock is taken) does not wait,
+   *   as nothing would end that wait and the other bots would wait with it: it gives the bot as
+   *   registered (`label`) and leaves the token to the run's own check.
+   * - The run's own check (`signal`: `Relay.prepare`, under the bot's locks) waits it out until
+   *   the signal aborts, and a refusal stops the run as connect()'s does (`tokenStop`).
+   */
+  async verify(signal?: AbortSignal): Promise<BotIdentity> {
+    if (signal?.aborted) this.ending.abort();
+    else signal?.addEventListener('abort', () => this.ending.abort(), { once: true });
+    for (;;) {
+      try {
+        await this.api.tokens.get();
+        break;
+      } catch (error) {
+        if (!tokenTooFrequent(error) || this.ending.signal.aborted) {
+          if (!signal) throw error;
+          throw tokenStop(error, this.options.renewCommand) ?? error;
+        }
+        this.options.notice?.(tokenRetryText(error));
+        if (!signal) return { id: this.appId, name: this.options.label ?? '', handle: '' };
+      }
+    }
     try {
       const me = await this.api.me();
       return { id: String(me.id || this.appId), name: String(me.username ?? ''), handle: '' };
@@ -370,12 +411,15 @@ export class QqChannel implements RelayChannel, QqOutlet {
         if (isQqContext(context)) this.hold(context, { text, formatted: false });
       },
     });
+    host.signal.addEventListener('abort', () => this.ending.abort(), { once: true });
     try {
       await this.api.tokens.get();
     } catch (error) {
-      if (error instanceof ChannelError && error.reason === 'unauthorized')
-        throw tokenStopped(this.options.renewCommand);
-      throw error;
+      const stopped = tokenStop(error, this.options.renewCommand);
+      if (stopped) throw stopped;
+      if (!tokenTooFrequent(error)) throw error;
+      // Asked too often (100001): the gateway's first token waits QQ's backoff out.
+      host.log(tokenRetryText(error));
     }
     const saved = store.get<string[]>('seen');
     this.seen = Array.isArray(saved) ? saved.filter((id) => typeof id === 'string') : [];
@@ -540,12 +584,14 @@ export class QqChannel implements RelayChannel, QqOutlet {
   }
 
   /**
-   * QQ refused the token twice in a row (the AppSecret was reset): the relay stops with the
-   * command to set it again, instead of failing every send.
+   * QQ refused the token (twice in a row: the AppSecret was reset; the bot is gone; another code):
+   * the relay stops and says what to do, instead of failing every send.
    */
   private refusedToken(error: unknown) {
-    if (!(error instanceof ChannelError) || error.reason !== 'unauthorized' || this.fatal) return;
-    this.fatal = tokenStopped(this.options.renewCommand);
+    if (this.fatal) return;
+    const stopped = tokenStop(error, this.options.renewCommand);
+    if (!stopped) return;
+    this.fatal = stopped;
     this.gateway?.close();
     this.wakeUp();
   }
@@ -958,14 +1004,17 @@ export class QqChannel implements RelayChannel, QqOutlet {
   /**
    * A transient failure (network, 5xx, friend check, bot offline) is retried once after a second,
    * as the same request (the same `msg_seq`); a "duplicate" answer to the retry means the first
-   * one arrived.
+   * one arrived. A token asked for too often (100001) is retried once too: the retry's token
+   * waits QQ's backoff out (or the relay's end).
    */
   private async retried<T>(call: () => Promise<T>, duplicate?: T): Promise<T> {
     try {
       return await call();
     } catch (error) {
-      if (!(error instanceof ChannelError) || error.reason !== 'transient') throw error;
-      await sleep(this.settings.retryDelayMs);
+      const limited = tokenTooFrequent(error);
+      if (!limited && (!(error instanceof ChannelError) || error.reason !== 'transient'))
+        throw error;
+      if (!limited) await sleep(this.settings.retryDelayMs);
       try {
         return await call();
       } catch (again) {
@@ -1067,6 +1116,8 @@ export class QqChannel implements RelayChannel, QqOutlet {
     ]);
     clearTimeout(timer);
     this.closed = true;
+    // A send still waiting for a token QQ said was asked for too often fails now (and is queued).
+    this.ending.abort();
     for (const context of this.recent) {
       if (context.timer) clearTimeout(context.timer);
       context.timer = null;
@@ -1177,13 +1228,34 @@ async function askApp(
   return { appId, secret };
 }
 
+/**
+ * QQ's refusal of the token as the command words it (`--set-app`, a run's start): the
+ * AppID/AppSecret, a bot that is gone, too many requests, another code; null for anything else.
+ */
+function appRefusal(error: unknown): UsageError | null {
+  if (!(error instanceof ChannelError)) return null;
+  if (error.reason === 'unauthorized') return refusedApp();
+  if (error.reason === 'gone') return new UsageError(botGoneText(error.code));
+  if (error.reason === 'refused')
+    return new UsageError(tokenRefusedText(error.code, error.description));
+  if (tokenTooFrequent(error))
+    return new UsageError(
+      tr(
+        `QQ 说请求太频繁（${error.code}）：等一会儿再试（QQ 没说要等多久）。`,
+        `QQ says there were too many requests (${error.code}): wait a little, then try again (QQ doesn't say how long).`,
+        `QQ dice que hubo demasiadas solicitudes (${error.code}): espera un poco y vuelve a intentarlo (QQ no dice cuánto tiempo).`,
+        `O QQ diz que houve solicitações demais (${error.code}): espere um pouco e tente de novo (o QQ não diz quanto tempo).`,
+      ),
+    );
+  return null;
+}
+
 /** Fetches a token: refused → the command's refusal. */
 async function checkApp(api: QqApi): Promise<void> {
   try {
     await api.tokens.get();
   } catch (error) {
-    if (error instanceof ChannelError && error.reason === 'unauthorized') throw refusedApp();
-    throw error;
+    throw appRefusal(error) ?? error;
   }
 }
 
@@ -1272,6 +1344,8 @@ export const qqSetup: ChannelSetup = {
       ...app,
       apiOrigin: process.env.YOMI_QQ_API_ORIGIN,
       renewCommand: botCommand(record, '--set-app'),
+      notice: (line) => warn(context.io, line),
+      label: record.label,
     });
   },
 
@@ -1289,8 +1363,7 @@ export const qqSetup: ChannelSetup = {
     try {
       return await channel.verify();
     } catch (error) {
-      if (error instanceof ChannelError && error.reason === 'unauthorized') throw refusedApp();
-      throw error;
+      throw appRefusal(error) ?? error;
     }
   },
 

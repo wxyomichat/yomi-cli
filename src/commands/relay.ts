@@ -2221,7 +2221,9 @@ type OpenedBot = {
  * checks them with the platform. Credentials set by another command while this started are run
  * only when they are still this bot's; ones of another bot are marked (`otherBot`), never run as
  * this one. null after a warning: nothing to run (a service ends without failing). `several`: one
- * bot of several, whose failure is said and leaves the others running.
+ * bot of several, whose failure is said and leaves the others running. A wait the platform asks
+ * for (QQ's "too many requests") is not waited out here, before any lock, one bot after another:
+ * the bot's own run does that under its locks and signal, while the others start.
  */
 async function openBot(
   context: Context,
