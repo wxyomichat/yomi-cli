@@ -282,7 +282,10 @@ describe('yomi relay --channel qq', () => {
         { input: [closed.appId, closed.secret] },
       );
       expect(warned.code).toBe(0);
-      expect(warned.err).toContain('这个 bot 还没有私聊（单聊）消息事件的权限');
+      expect(warned.err).toContain(
+        'QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启',
+      );
+      expect(warned.err).toContain('AppID 和 AppSecret 已照常保存');
       expect(warned.out).toContain('已添加 bot closed，还没有绑定角色');
       expect(registered(closed.appId)).toMatchObject({ name: 'closed', scope: 'qq:102000077' });
       const listed = await run(['relay', '--list', '--channel', 'qq']);
@@ -306,6 +309,28 @@ describe('yomi relay --channel qq', () => {
       expect(twice.code).toBe(1);
       expect(twice.err).toContain('这个 bot 已经登记在这台电脑上了，名字是 "closed"');
       expect(closed.identifies).toBe(identifies);
+      // Set again while QQ calls the intent invalid (4013): an outdated yomi, not a permission.
+      closed.closeIdentifyWith(4013);
+      const outdated = await run(
+        [
+          'relay',
+          '--channel',
+          'qq',
+          '--set-app',
+          '--bot',
+          'closed',
+          '--token-stdin',
+          '--allow-file-store',
+        ],
+        { input: [closed.appId, closed.secret] },
+      );
+      closed.closeIdentifyWith(null);
+      expect(outdated.code).toBe(0);
+      expect(outdated.err).toContain(
+        '这个版本的 yomi 和 QQ 网关的协议对不上（4013，无效的 intent）：请用 npm install -g @yomichat/cli 升级 yomi。AppID 和 AppSecret 已照常保存。',
+      );
+      expect(outdated.err).not.toContain('权限');
+      expect(outdated.out + outdated.err).not.toContain(closed.secret);
       // Two bots now: which one to set again is asked.
       const which = await run(
         ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],

@@ -159,6 +159,8 @@ export type MockQqApp = {
   drop(): void;
   /** Closes the sockets with `code`. */
   close(code: number): void;
+  /** Every Identify is closed with `code` instead of READY, until this is called with null. */
+  closeIdentifyWith(code: number | null): void;
   /** Heartbeats are no longer acknowledged. */
   withholdAck(on: boolean): void;
   /** Op 7: the client should reconnect and Resume. */
@@ -293,6 +295,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
     let activeLimited = false;
     let recallRefused = false;
     let ackWithheld = false;
+    let identifyClose: number | null = null;
     const inbound = new Map<string, Inbound>();
     const chats = new Map<string, MockQqMessage[]>();
     const streamCalls = new Map<string, MockQqStreamCall[]>();
@@ -529,6 +532,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
     function identify(client: Client, data: Record<string, unknown>) {
       const ws = client.ws;
       const intents = Number(data.intents ?? 0);
+      if (identifyClose !== null) return void ws.close(identifyClose, 'identify refused');
       if (appOptions.c2c === false && intents & (1 << 25))
         return void ws.close(4014, 'disallowed intents');
       if (limit.remaining <= 0) return void ws.close(4006, 'session start limit');
@@ -642,6 +646,9 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
       },
       close(code) {
         for (const ws of socketsOf(app)) ws.close(code, 'closed by the mock');
+      },
+      closeIdentifyWith(code) {
+        identifyClose = code;
       },
       withholdAck(on) {
         ackWithheld = on;

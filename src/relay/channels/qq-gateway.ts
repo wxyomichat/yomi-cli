@@ -84,18 +84,36 @@ const sleep = (ms: number, signal: AbortSignal) =>
     signal.addEventListener('abort', done, { once: true });
   });
 
+/** QQ's FAQ for bots. */
+const QQ_FAQ = 'https://bot.q.qq.com/wiki/bot_FAQ/';
+
+/**
+ * QQ closed the gateway with 4014 (the intent is not allowed): only what is known. QQ's
+ * documentation does not say where a bot gets private-chat events, so nothing here claims a switch.
+ */
+export function noPrivateChatText(): string {
+  return tr(
+    `QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启。请确认 q.qq.com 上这个机器人的「开发设置 → 事件订阅与回调地址」用的是 WebSocket 方式；还不行的话，看 QQ 的常见问题 ${QQ_FAQ} 或者联系 QQ。`,
+    `QQ says this bot has no permission for private chat (C2C) message events (4014), but QQ's documentation doesn't say where to enable it. On q.qq.com, check that the bot's Development settings → Event subscription uses WebSocket; if that doesn't help, see QQ's FAQ at ${QQ_FAQ} or contact QQ.`,
+    `QQ dice que este bot no tiene permiso para los eventos de chat privado (C2C) (4014), pero la documentación de QQ no dice dónde activarlo. En q.qq.com, comprueba que la configuración de desarrollo del bot → suscripción de eventos use WebSocket; si no se soluciona, consulta las preguntas frecuentes de QQ en ${QQ_FAQ} o contacta con QQ.`,
+    `O QQ diz que este bot não tem permissão para os eventos de chat privado (C2C) (4014), mas a documentação do QQ não diz onde ativá-la. Em q.qq.com, confira se as configurações de desenvolvimento do bot → assinatura de eventos usam WebSocket; se não resolver, veja as perguntas frequentes do QQ em ${QQ_FAQ} ou entre em contato com o QQ.`,
+  );
+}
+
+/** QQ closed the gateway with 4013 (an invalid intent): this yomi and QQ's gateway disagree. */
+export function gatewayProtocolText(): string {
+  return tr(
+    '这个版本的 yomi 和 QQ 网关的协议对不上（4013，无效的 intent）：请用 npm install -g @yomichat/cli 升级 yomi。',
+    "This version of yomi doesn't match QQ's gateway protocol (4013, invalid intent): update yomi with npm install -g @yomichat/cli.",
+    'Esta versión de yomi no coincide con el protocolo del gateway de QQ (4013, intent no válido): actualiza yomi con npm install -g @yomichat/cli.',
+    'Esta versão do yomi não corresponde ao protocolo do gateway do QQ (4013, intent inválido): atualize o yomi com npm install -g @yomichat/cli.',
+  );
+}
+
 /** "QQ … (code)": why the relay cannot go on, in the terminal's language. */
 export function gatewayStopped(code: number): RelayStopped {
-  if (code === 4013 || code === 4014)
-    return new RelayStopped(
-      'intents',
-      tr(
-        `这个 QQ bot 没有私聊（单聊）消息事件的权限（${code}）：在 q.qq.com 为这个 bot 开启单聊消息事件后再启动 relay。`,
-        `This QQ bot has no permission for private chat (C2C) message events (${code}): enable private chat events for this bot on q.qq.com, then start the relay again.`,
-        `Este bot de QQ no tiene permiso para los eventos de chat privado (C2C) (${code}): activa los eventos de chat privado para este bot en q.qq.com y vuelve a iniciar el relay.`,
-        `Este bot do QQ não tem permissão para os eventos de chat privado (C2C) (${code}): ative os eventos de chat privado para este bot em q.qq.com e inicie o relay de novo.`,
-      ),
-    );
+  if (code === 4014) return new RelayStopped('intents', noPrivateChatText());
+  if (code === 4013) return new RelayStopped('protocol', gatewayProtocolText());
   if (code === 4914)
     return new RelayStopped(
       'delisted',
@@ -537,13 +555,14 @@ export class QqGateway {
 
 /**
  * `--set-app`'s check of the gateway: one Identify with the private-chat intent (it uses one of
- * the day's session starts), then the socket is closed. 'intents': QQ refused the intent
- * (4013/4014); 'failed': no answer within `timeoutMs` or another close.
+ * the day's session starts), then the socket is closed. 'intents': the bot may not have the
+ * intent (4014); 'protocol': QQ says the intent is invalid (4013); 'failed': no answer within
+ * `timeoutMs` or another close.
  */
 export async function probeGateway(
   api: QqApi,
   timeoutMs = 10_000,
-): Promise<'ok' | 'intents' | 'failed'> {
+): Promise<'ok' | 'intents' | 'protocol' | 'failed'> {
   let url: string;
   try {
     url = qqGatewayUrl(String((await api.gatewayBot()).url ?? ''), api.origin);
@@ -553,7 +572,7 @@ export async function probeGateway(
   return new Promise((resolve) => {
     let settled = false;
     const socket = new WebSocket(url);
-    const done = (result: 'ok' | 'intents' | 'failed') => {
+    const done = (result: 'ok' | 'intents' | 'protocol' | 'failed') => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -594,6 +613,6 @@ export async function probeGateway(
       else if (payload.op === 0 && payload.t === 'READY') done('ok');
     };
     socket.onclose = (event) =>
-      done(event.code === 4013 || event.code === 4014 ? 'intents' : 'failed');
+      done(event.code === 4014 ? 'intents' : event.code === 4013 ? 'protocol' : 'failed');
   });
 }

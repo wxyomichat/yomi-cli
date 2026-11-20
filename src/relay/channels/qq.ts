@@ -24,6 +24,8 @@ import {
 } from './qq-api.js';
 import {
   botGoneText,
+  gatewayProtocolText,
+  noPrivateChatText,
   probeGateway,
   QqGateway,
   type QqDispatch,
@@ -1173,7 +1175,7 @@ function apiFor(app: { appId: string; secret: string }): QqApi {
 function refusedApp(): UsageError {
   return new UsageError(
     tr(
-      'QQ 不接受这个 AppID/AppSecret：请在 QQ 开放平台（q.qq.com）的机器人「开发管理」里核对，AppSecret 重置过就要用新的。',
+      'QQ 不接受这个 AppID/AppSecret：请在 QQ 开放平台（q.qq.com）的机器人「开发设置」里核对，AppSecret 重置过就要用新的。',
       "QQ does not accept this AppID/AppSecret: check them in the bot's development settings on the QQ Open Platform (q.qq.com); if the AppSecret was reset, use the new one.",
       'QQ no acepta este AppID/AppSecret: revísalos en la configuración de desarrollo del bot en la QQ Open Platform (q.qq.com); si el AppSecret se restableció, usa el nuevo.',
       'O QQ não aceita este AppID/AppSecret: confira-os nas configurações de desenvolvimento do bot na QQ Open Platform (q.qq.com); se o AppSecret foi redefinido, use o novo.',
@@ -1193,7 +1195,7 @@ async function askApp(
         io,
         'dim',
         tr(
-          '在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的「开发管理」里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。',
+          '在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的「开发设置」里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。',
           "Create a bot with your own QQ on the QQ Open Platform (q.qq.com) and find its AppID and AppSecret in the bot's development settings (the AppSecret will not be shown as you type). Personal use only.",
           'Crea un bot con tu propia cuenta de QQ en la QQ Open Platform (q.qq.com) y busca su AppID y su AppSecret en la configuración de desarrollo del bot (el AppSecret no se mostrará al escribirlo). Solo para uso personal.',
           'Crie um bot com a sua própria conta do QQ na QQ Open Platform (q.qq.com) e encontre o AppID e o AppSecret nas configurações de desenvolvimento do bot (o AppSecret não aparece enquanto você digita). Somente para uso pessoal.',
@@ -1280,20 +1282,22 @@ export const qqSetup: ChannelSetup = {
     await checkApp(api);
     const me = await api.me().catch(() => null);
     const name = String(me?.username || app.appId);
-    // One Identify with the private-chat intent: QQ refuses it (4013/4014) when the bot may not
-    // receive private chats. It uses one of the day's session starts.
+    // One Identify with the private-chat intent: QQ refuses it when the bot may not receive
+    // private chats (4014) or does not know the intent (4013). It uses one of the day's session
+    // starts.
     const probe = await probeGateway(api);
-    if (probe === 'intents')
+    if (probe === 'intents' || probe === 'protocol') {
+      const why = probe === 'intents' ? noPrivateChatText() : gatewayProtocolText();
       warn(
         io,
         tr(
-          '这个 bot 还没有私聊（单聊）消息事件的权限：在 q.qq.com 为它开启后 relay 才能收到消息。AppID 和 AppSecret 已照常保存。',
-          'This bot has no permission for private chat (C2C) message events yet: enable them on q.qq.com, or the relay will receive nothing. The AppID and AppSecret are saved anyway.',
-          'Este bot todavía no tiene permiso para los eventos de chat privado (C2C): actívalos en q.qq.com o el relay no recibirá nada. El AppID y el AppSecret se guardan de todos modos.',
-          'Este bot ainda não tem permissão para os eventos de chat privado (C2C): ative-os em q.qq.com, senão o relay não vai receber nada. O AppID e o AppSecret são salvos mesmo assim.',
+          `${why}AppID 和 AppSecret 已照常保存。`,
+          `${why} The AppID and AppSecret are saved anyway.`,
+          `${why} El AppID y el AppSecret se guardan de todos modos.`,
+          `${why} O AppID e o AppSecret são salvos mesmo assim.`,
         ),
       );
-    else if (probe === 'failed')
+    } else if (probe === 'failed')
       warn(
         io,
         tr(

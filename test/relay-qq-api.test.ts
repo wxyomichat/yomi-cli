@@ -407,6 +407,7 @@ describe('the QQ gateway', () => {
       [4914, 'delisted'],
       [4915, 'banned'],
       [4014, 'intents'],
+      [4013, 'protocol'],
       [4012, 'protocol'],
     ] as const) {
       const { readies, done } = gateway(qq);
@@ -425,13 +426,39 @@ describe('the QQ gateway', () => {
       const error = (await done) as RelayStopped;
       expect(error).toBeInstanceOf(RelayStopped);
       expect(error.reason).toBe('intents');
-      expect(error.message).toContain('4014');
+      // Only what is known: QQ's documentation names no switch for the intent.
+      expect(error.message).toContain(
+        'QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启',
+      );
+      expect(error.message).toContain('「开发设置 → 事件订阅与回调地址」用的是 WebSocket 方式');
+      expect(error.message).toContain('https://bot.q.qq.com/wiki/bot_FAQ/');
       expect(closed.calls.filter((call) => call.path === '/gateway/bot')).toHaveLength(1);
       expect(await probeGateway(apiFor(closed))).toBe('intents');
       expect(await probeGateway(apiFor(qq))).toBe('ok');
     } finally {
       await closed.shutdown();
     }
+  });
+
+  it('stops on an invalid intent (4013) as a protocol mismatch that an update of yomi fixes', async () => {
+    qq.closeIdentifyWith(4013);
+    try {
+      const identifies = qq.identifies;
+      const { done } = gateway(qq);
+      const error = (await done) as RelayStopped;
+      expect(error).toBeInstanceOf(RelayStopped);
+      expect(error.reason).toBe('protocol');
+      expect(error.message).toContain(
+        '这个版本的 yomi 和 QQ 网关的协议对不上（4013，无效的 intent）',
+      );
+      expect(error.message).toContain('npm install -g @yomichat/cli');
+      expect(error.message).not.toContain('权限');
+      expect(await probeGateway(apiFor(qq))).toBe('protocol');
+      expect(qq.identifies).toBe(identifies);
+    } finally {
+      qq.closeIdentifyWith(null);
+    }
+    expect(await probeGateway(apiFor(qq))).toBe('ok');
   });
 
   it('waits for the day’s session starts instead of identifying without them', async () => {

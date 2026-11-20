@@ -341,7 +341,7 @@ export class RelayStopped extends Error {
       | 'token'
       | 'otherAccount'
       | 'webhook'
-      /** QQ 4013/4014: no permission for private-chat (C2C) events. */
+      /** QQ 4014: no permission for private-chat (C2C) events. */
       | 'intents'
       /** QQ 4914: "delisted, sandbox only", with its own message. */
       | 'delisted'
@@ -351,7 +351,7 @@ export class RelayStopped extends Error {
       | 'gone'
       /** QQ's token: refused with another code (its own words in the message). */
       | 'refused'
-      /** A close code that means a client bug (QQ 4001/4002/4010-4012). */
+      /** A close code that means a client bug or an outdated yomi (QQ 4001/4002/4010-4013). */
       | 'protocol'
       /** WeChat: the login ended (repeated -14, 401/403): run --login again. */
       | 'session',
