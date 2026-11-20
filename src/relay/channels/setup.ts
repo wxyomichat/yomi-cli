@@ -2,7 +2,7 @@ import type { Context } from '../../commands/context.js'; // type-only: no runti
 import type { RelayCommandOptions } from '../../commands/relay.js';
 import type { PairingCode } from '../pairing.js';
 import type { BotRecord } from '../registry.js';
-import type { RelayState } from '../state.js';
+import type { RelayCharacter, RelayState } from '../state.js';
 import type { BotIdentity, ChannelKind, RelayChannel } from './types.js';
 
 /**
@@ -34,6 +34,11 @@ export type AcquiredBot = {
   stored: StoredBot;
   /** The bot as the platform named it, when it was asked. */
   identity: BotIdentity | null;
+  /**
+   * WeChat: who scanned (ilink_user_id). One WeChat account has one ClawBot, whose id a new login
+   * may change, so a bot here that they own already is this ClawBot (signed in again, not added).
+   */
+  owner?: string;
 };
 
 /**
@@ -50,6 +55,17 @@ export type CredentialRequest = {
    * their tokens with a new QR code, so a ClawBot already linked here is not linked twice).
    */
   stored: string[];
+  /**
+   * The names of the bots this concerns: the renewed one, else every bot of the channel, with or
+   * without a stored secret (WeChat names its one bot when a scan to add another is answered that
+   * the ClawBot is bound).
+   */
+  bots: string[];
+  /**
+   * The character a bot added is to talk as (`--character`, checked before anything is asked);
+   * null: none, or a bot is renewed. WeChat names it in how to rebind the scanner's bot instead.
+   */
+  character: RelayCharacter | null;
   /**
    * Refuses (a UsageError) credentials that may not be used here, as soon as they name their bot
    * and before the platform is asked more: another bot than the renewed one, one registered

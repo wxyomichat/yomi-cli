@@ -12,14 +12,13 @@ import type { AddressInfo } from 'node:net';
  * is a long poll with an opaque cursor; `sendmessage` takes only a `context_token` it issued, to
  * that person, within `windowMs`; uploads are decrypted (AES-128-ECB, PKCS#7) and checked against
  * what `getuploadurl` announced. What the server would answer for an expired context is not
- * documented: this mock answers `ret: -2`. One WeChat account may link several ClawBots: each
- * confirmed scan of a new bot id is another ClawBot with its own `bot_token`, `getupdates` stream,
- * cursor and `context_token`s (a token works only for the ClawBot that issued it), and logging one
- * in again replaces only its own token. A scan confirmed with `confirm({ botId })` for a ClawBot of
- * the same user whose live token is in the code's `local_token_list` answers `binded_redirect`,
- * which names no bot. A plain `confirm()` always gives the ClawBot of the newest login
- * (`mock.botId`) a new token and revokes its old one, even when that token is held, so the existing
- * tests stay unchanged. It listens on 127.0.0.1 only; nothing reaches the network.
+ * documented: this mock answers `ret: -2`. One WeChat account has one ClawBot, as a real account
+ * showed: a scan by a user (`ilink_user_id`) whose ClawBot's live token is in the code's
+ * `local_token_list` answers `binded_redirect`, which names no bot; without that token the scan
+ * logs the same ClawBot in again (the same `ilink_bot_id`, a new token, the old one revoked). A user
+ * never gets a second ClawBot; another user gets their own, with its own `bot_token`, `getupdates`
+ * stream, cursor and `context_token`s (a token works only for the ClawBot that issued it). It
+ * listens on 127.0.0.1 only; nothing reaches the network.
  */
 
 type Json = Record<string, unknown>;
@@ -94,7 +93,7 @@ export type MockWechat = {
   owner: string;
   /** The bot id of the newest confirmed login (where `userSends` goes by default). */
   botId: string;
-  /** The linked ClawBots, oldest first; `live` while their token works. */
+  /** The linked ClawBots, one per user, oldest first; `live` while their token works. */
   clawBots(): { botId: string; userId: string; live: boolean }[];
   /** Every request in arrival order. */
   calls: MockWechatCall[];
@@ -107,11 +106,12 @@ export type MockWechat = {
   /** The phone shows `digits`: `need_verifycode` until a poll carries them. */
   askPin(digits: string): void;
   /**
-   * The phone confirms: ClawBot `botId` (by default `mock.botId`) is logged in for `userId` with a
-   * new token, which replaces only that ClawBot's old one; a new `botId` links another ClawBot.
-   * When `botId` names a ClawBot of `userId` whose token is in this code's `local_token_list`, the
-   * answer is `binded_redirect` instead (no new token). Without `botId` that ClawBot always gets a
-   * new token.
+   * `userId` (the owner by default) confirms on the phone. Their ClawBot's live token in this
+   * code's `local_token_list`: `binded_redirect` (no new token). Otherwise their ClawBot is logged
+   * in with a new token that replaces its old one; a user without one gets a ClawBot of their own
+   * (`botId`, else `b1f2_bot@im.bot` for the first, a random id after). `botId` for a user who has
+   * a ClawBot gives it that id instead (a new login changing the id, which real accounts have not
+   * shown): still the one ClawBot. Naming another user's ClawBot is a test's mistake (it throws).
    */
   confirm(options?: { userId?: string; botId?: string; baseurl?: string }): void;
   /** `scaned_but_redirect` to `host` (a bare host, as the server names it). */
@@ -225,7 +225,8 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
   let qrEvents: QrEvent[] = [];
   let pin = '';
   const owner = 'o9cq8_owner@im.wechat';
-  let botId = 'b1f2_bot@im.bot';
+  const firstBotId = 'b1f2_bot@im.bot';
+  let botId = firstBotId;
 
   const clawBot = (id: string) => {
     let bot = clawBots.get(id);
@@ -599,12 +600,24 @@ export async function startMockWechat(options: MockWechatOptions = {}): Promise<
     },
     confirm: (confirmation = {}) => {
       const user = confirmation.userId ?? owner;
-      const named = confirmation.botId ? clawBots.get(confirmation.botId) : undefined;
-      // A ClawBot this computer already holds: WeChat says so, without naming it.
-      if (named?.token && named.user === user && currentTokens.includes(named.token))
+      // One ClawBot per user.
+      const own = [...clawBots.values()].find((bot) => bot.linked && bot.user === user);
+      // Its login held by this computer: WeChat says so, without naming the ClawBot.
+      if (own?.token && currentTokens.includes(own.token))
         return pushQr({ status: 'binded_redirect' });
-      if (confirmation.botId) botId = confirmation.botId;
-      const bot = clawBot(botId);
+      const id =
+        confirmation.botId ??
+        own?.id ??
+        (clawBots.get(firstBotId)?.user ? `b${hex(3)}_bot@im.bot` : firstBotId);
+      const bot = clawBot(id);
+      if (bot.linked && bot.user !== user)
+        throw new Error(`mock wechat: ${id} is the ClawBot of another user`);
+      if (own && own !== bot) {
+        // The same ClawBot under a new id: the old id no longer works.
+        revoke(own);
+        own.linked = false;
+      }
+      botId = bot.id;
       revoke(bot);
       bot.token = 'tok_' + hex(16);
       bot.user = user;

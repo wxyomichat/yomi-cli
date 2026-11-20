@@ -108,7 +108,7 @@ async function startLogin(extra: string[] = []) {
     ['relay', '--channel', 'wechat', '--experimental', '--login', '--allow-file-store', ...extra],
     terminal.io,
   );
-  await terminal.waitFor(/输入 yes 继续/);
+  await terminal.waitFor(/输入 yes 继续|Type yes to continue/);
   terminal.stdin.write('yes\n');
   await until(() => wx.qrcodes.length > codes);
   return {
@@ -201,7 +201,7 @@ describe('yomi relay --channel wechat --experimental --login', () => {
       ilinkUserId: wx.owner,
     });
     expect(out + login.terminal.err).not.toContain(credentials.botToken);
-    // A bot of its own, its state under a scope of its own (one person may link several).
+    // A bot of its own, its state under a scope of its own (whoever scans it).
     const record = registered()!;
     expect(record).toMatchObject({ platformId: wx.botId, scope: `bot:${record.key}` });
     expect(out).toContain('已添加 bot wechat-1，还没有绑定角色');
@@ -229,6 +229,9 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     await login.terminal.waitFor(/数字不对：请再输入一次手机上显示的数字。/);
     login.type('482913');
     await login.terminal.waitFor(/已扫码，请在手机上确认/);
+    // WeChat ended the saved login (a live one held here is answered binded_redirect): the same
+    // person's scan signs their ClawBot in again, here under a new id.
+    wx.revokeTokens();
     wx.confirm({ botId: 'b2_second@im.bot' });
     expect(await login.pending).toBe(0);
     const polls = wx.calls.slice(from).filter((call) => call.endpoint === 'get_qrcode_status');
@@ -268,6 +271,7 @@ describe('yomi relay --channel wechat --experimental --login', () => {
     expect(redirect.terminal.err).toContain('微信返回的 redirect_host 不是微信的地址');
     expect(wx.calls.some((call) => call.host.includes('evil'))).toBe(false);
     const base = await startLogin();
+    wx.revokeTokens();
     wx.confirm({ baseurl: 'https://ilink.evil.example' });
     expect(await base.pending).toBe(1);
     expect(base.terminal.err).toContain('微信返回的 baseurl 不是微信的地址');
@@ -460,15 +464,142 @@ describe('the welcome over WeChat', () => {
   });
 });
 
-describe('several ClawBots of one WeChat account', () => {
-  it('adds each as a bot of its own, signs one in again alone, and never links one twice', async () => {
+describe('one ClawBot per WeChat account', () => {
+  /** Another WeChat account: a ClawBot of its own. */
+  const lin = 'm2_lin@im.wechat';
+  /** The registry, as kept on disk. */
+  const registry = () => BotRegistry.open(context().account).data;
+
+  /** `yomi relay --bot NAME --login` at a terminal (no --experimental: the bot's record has it). */
+  async function signInAgain(name: string) {
+    const terminal = memoryIo({ interactive: true });
+    const codes = wx.qrcodes.length;
+    const pending = main(['relay', '--bot', name, '--login', '--allow-file-store'], terminal.io);
+    await terminal.waitFor(/输入 yes 继续/);
+    terminal.stdin.write('yes\n');
+    await until(() => wx.qrcodes.length > codes);
+    return { terminal, pending };
+  }
+
+  it('adds nothing when the scanner already has the ClawBot here: says how to rebind that bot, or unbind on the phone', async () => {
+    const first = registered()!;
+    const kept = { secret: secret(), state: JSON.stringify(stateOf().data), registry: registry() };
+    // The person whose ClawBot is wechat-1 scans to add another bot for another character: WeChat
+    // answers that the ClawBot is bound here already (its login goes with the code).
+    const add = await startLogin(['--bot', 'wechat-2', '--character', MOCK_NPCS.group]);
+    expect(wx.localTokens.at(-1)).toEqual([parseCredentials(kept.secret)!.botToken]);
+    wx.confirm();
+    expect(await add.pending).toBe(1);
+    // WeChat names neither the ClawBot nor the scanner: most likely wechat-1's account, with the
+    // character given ready to rebind it; else another account whose ClawBot is bound elsewhere.
+    expect(add.terminal.err).toContain(
+      `微信说这个 ClawBot 已经绑定了，所以没有添加新的 bot，也没有保存任何东西：一个微信号只有一个 ClawBot。如果扫码的是 bot wechat-1 的微信号，它的登录不变；要和别的角色聊天，给它换绑角色：yomi relay --bot wechat-1 --character ${MOCK_NPCS.group}。如果扫码的是别的微信号，它的 ClawBot 可能绑定在别处：先在手机微信的设置里解除 ClawBot 的绑定，再运行 --login。`,
+    );
+    expect(add.terminal.err).not.toContain('要重新登录它');
+    expect(add.terminal.out).not.toContain('已添加');
+    // In English too.
+    const english = await startLogin([
+      '--bot',
+      'wechat-2',
+      '--character',
+      MOCK_NPCS.group,
+      '--lang',
+      'en',
+    ]);
+    wx.confirm();
+    expect(await english.pending).toBe(1);
+    expect(english.terminal.err).toContain(
+      `WeChat says this ClawBot is already bound, so no bot was added and nothing was saved: one WeChat account has one ClawBot. If the code was scanned with the WeChat account of the bot wechat-1, its login is unchanged; to chat with another character, rebind it: yomi relay --bot wechat-1 --character ${MOCK_NPCS.group}. If it was scanned with another WeChat account, that account's ClawBot may be bound somewhere else: unbind ClawBot in WeChat's settings on your phone, then run --login again.`,
+    );
+    // Nothing written: no bot, no login, no state; the character went to no bot.
+    expect(registry()).toEqual(kept.registry);
+    expect(registered('wechat-2')).toBeUndefined();
+    expect(registered()).toEqual(first);
+    expect(registered()!.character).toMatchObject({ npcId: npc });
+    expect(secret()).toBe(kept.secret);
+    expect(JSON.stringify(stateOf().data)).toBe(kept.state);
+    // Still one ClawBot for that person, its login working.
+    expect(wx.clawBots().filter((bot) => bot.userId === wx.owner)).toEqual([
+      { botId: first.platformId, userId: wx.owner, live: true },
+    ]);
+  });
+
+  it('signs the same ClawBot in again when WeChat gives it a new login: no bot added, --character not applied', async () => {
+    const first = registered()!;
+    const before = parseCredentials(secret())!;
+    // This computer lost the login: no token goes with the code, and WeChat logs the scanner's
+    // one ClawBot in again (the same ilink_bot_id, a new token).
+    context().store.deleteSecret(first.secretName);
+    const anew = await startLogin(['--bot', 'wechat-3', '--character', MOCK_NPCS.group]);
+    expect(wx.localTokens.at(-1)).toEqual([]);
+    wx.confirm();
+    expect(await anew.pending).toBe(0);
+    expect(anew.terminal.err).toContain(
+      `这个 ClawBot 已经是 bot wechat-1（一个微信号只有一个 ClawBot）：重新登录了它，没有添加新的 bot（--character 和 --bot 没有生效）。要和别的角色聊天，给它换绑角色：yomi relay --bot wechat-1 --character ${MOCK_NPCS.group}`,
+    );
+    expect(anew.terminal.out).toContain('还是同一个微信号：主人、预算和记录都保留。');
+    expect(anew.terminal.out).not.toContain('已添加');
+    expect(registered('wechat-3')).toBeUndefined();
+    const after = parseCredentials(secret())!;
+    expect(after.ilinkBotId).toBe(before.ilinkBotId);
+    expect(after.botToken).not.toBe(before.botToken);
+    expect(registered()).toMatchObject({
+      key: first.key,
+      platformId: first.platformId,
+      character: { npcId: npc },
+      generation: first.generation + 1,
+    });
+    expect(wx.clawBots().filter((bot) => bot.userId === wx.owner)).toHaveLength(1);
+  });
+
+  it("signs the scanner's bot in again when WeChat gives their ClawBot a new id: no bot added", async () => {
+    // Its saved login expired (still kept) or is gone, and WeChat gives the scanner's one ClawBot
+    // a new login under a new id: by its owner, it is still wechat-1.
+    for (const [lost, newId] of [
+      ['expired', 'b7_new@im.bot'],
+      ['deleted', 'b8_new@im.bot'],
+    ] as const) {
+      const first = registered()!;
+      const kept = { revision: registry().revision, bots: registry().bots.length };
+      wx.revokeTokens();
+      if (lost === 'deleted') context().store.deleteSecret(first.secretName);
+      const anew = await startLogin(['--bot', 'wechat-2', '--character', MOCK_NPCS.group]);
+      wx.confirm({ botId: newId });
+      expect(await anew.pending).toBe(0);
+      expect(anew.terminal.err).toContain(
+        `这个 ClawBot 已经是 bot wechat-1（一个微信号只有一个 ClawBot）：重新登录了它，没有添加新的 bot（--character 和 --bot 没有生效）。要和别的角色聊天，给它换绑角色：yomi relay --bot wechat-1 --character ${MOCK_NPCS.group}`,
+      );
+      expect(anew.terminal.out).toContain('还是同一个微信号：主人、预算和记录都保留。');
+      expect(anew.terminal.out).not.toContain('已添加');
+      // No bot added and no character given; wechat-1 now has the new id and a working login.
+      expect(registered('wechat-2')).toBeUndefined();
+      expect(registry().bots).toHaveLength(kept.bots);
+      expect(registry().revision).toBe(kept.revision + 1);
+      expect(registered()).toMatchObject({
+        key: first.key,
+        platformId: newId,
+        character: { npcId: npc },
+        generation: first.generation + 1,
+      });
+      expect(parseCredentials(secret())).toMatchObject({
+        ilinkBotId: newId,
+        ilinkUserId: wx.owner,
+      });
+      expect(stateOf().data.owner!.userId).toBe(wx.owner);
+      expect(wx.clawBots().filter((bot) => bot.userId === wx.owner)).toEqual([
+        { botId: newId, userId: wx.owner, live: true },
+      ]);
+    }
+  });
+
+  it("adds another WeChat account's ClawBot as a bot of its own, signs one in again alone, and never links one twice", async () => {
     const first = registered()!;
     const firstToken = parseCredentials(secret())!.botToken;
-    // Another ClawBot of the same person: a bot of its own, bound to its character.
+    // Another person's ClawBot: a bot of its own, bound to its character.
     const add = await startLogin(['--character', MOCK_NPCS.group]);
     // The logins this computer holds go with the code: a ClawBot linked here is not linked twice.
     expect(wx.localTokens.at(-1)).toEqual([firstToken]);
-    wx.confirm({ botId: 'b9_second@im.bot' });
+    wx.confirm({ userId: lin, botId: 'b9_second@im.bot' });
     expect(await add.pending).toBe(0);
     expect(add.terminal.out).toContain(
       `已添加 bot wechat-2，固定和雾港（${MOCK_NPCS.group}）聊天。`,
@@ -480,7 +611,7 @@ describe('several ClawBots of one WeChat account', () => {
       character: { npcId: MOCK_NPCS.group },
     });
     expect(second.scope).not.toBe(first.scope);
-    expect(stateOf('wechat-2').data.owner!.userId).toBe(wx.owner);
+    expect(stateOf('wechat-2').data.owner!.userId).toBe(lin);
     // The first one's login and state are untouched.
     expect(parseCredentials(secret())!.botToken).toBe(firstToken);
     expect(registered()).toEqual(first);
@@ -498,48 +629,55 @@ describe('several ClawBots of one WeChat account', () => {
     ]);
     expect(taken.code).toBe(1);
     expect(taken.err).toContain(`角色 ${npc} 已经绑在 bot "wechat-1" 上`);
-    // Scanning one of them again to add it: WeChat says it is bound and names none; nothing written.
-    const revision = BotRegistry.open(context().account).data.revision;
+    // Either person scanning again to add a bot: WeChat says it is bound and names none, so the
+    // bot is not named either; nothing written.
+    const revision = registry().revision;
     const twice = await startLogin(['--bot', 'wechat-x']);
     expect(wx.localTokens.at(-1)).toHaveLength(2);
-    wx.confirm({ botId: 'b9_second@im.bot' });
+    wx.confirm();
     expect(await twice.pending).toBe(1);
     expect(twice.terminal.err).toContain(
-      '微信说这个 ClawBot 已经是这台电脑上的一个 bot 了，没有保存任何东西。要重新登录它，运行 yomi relay --bot 名字 --login',
+      '微信说这个 ClawBot 已经绑定了，所以没有添加新的 bot，也没有保存任何东西：一个微信号只有一个 ClawBot。如果扫码的是这台电脑上某个 bot 的微信号，它的登录不变；要和别的角色聊天，给它换绑角色：yomi relay --bot 名字 --character ID（名字见 yomi relay --list）。如果扫码的是别的微信号，它的 ClawBot 可能绑定在别处：先在手机微信的设置里解除 ClawBot 的绑定，再运行 --login。',
     );
-    expect(BotRegistry.open(context().account).data.revision).toBe(revision);
+    const english = await startLogin(['--bot', 'wechat-x', '--lang', 'en']);
+    wx.confirm({ userId: lin });
+    expect(await english.pending).toBe(1);
+    expect(english.terminal.err).toContain(
+      "WeChat says this ClawBot is already bound, so no bot was added and nothing was saved: one WeChat account has one ClawBot. If the code was scanned with the WeChat account of a bot on this computer, its login is unchanged; to chat with another character, rebind it: yomi relay --bot NAME --character ID (the names are in yomi relay --list). If it was scanned with another WeChat account, that account's ClawBot may be bound somewhere else: unbind ClawBot in WeChat's settings on your phone, then run --login again.",
+    );
+    expect(registry().revision).toBe(revision);
+    expect(registered('wechat-x')).toBeUndefined();
 
     // Two bots: --login alone asks which.
     const which = await run(['relay', '--channel', 'wechat', '--experimental', '--login']);
     expect(which.code).toBe(1);
     expect(which.err).toContain('微信有多个 bot（wechat-1、wechat-2）');
 
-    // One signed in again by name: only its token goes with the code, no --experimental needed.
-    const terminal = memoryIo({ interactive: true });
-    const pending = main(
-      ['relay', '--bot', 'wechat-2', '--login', '--allow-file-store'],
-      terminal.io,
-    );
-    await terminal.waitFor(/输入 yes 继续/);
-    terminal.stdin.write('yes\n');
-    await until(() => wx.localTokens.at(-1)?.length === 1);
+    // One signed in again by name: only its token goes with the code. While that login works,
+    // WeChat says it is bound and the login is kept.
+    const held = await signInAgain('wechat-2');
     expect(wx.localTokens.at(-1)).toEqual([parseCredentials(secret('wechat-2'))!.botToken]);
-    wx.confirm();
-    expect(await pending).toBe(0);
-    expect(terminal.out).toContain('还是同一个微信号：主人、预算和记录都保留。');
-    expect(terminal.out).not.toContain('已添加');
-    expect(registered('wechat-2')!.generation).toBe(second.generation + 1);
+    wx.confirm({ userId: lin });
+    expect(await held.pending).toBe(0);
+    expect(held.terminal.out).toContain('保留已经保存的登录');
+    expect(registered('wechat-2')!.generation).toBe(second.generation);
+    // Once WeChat ended it: the same ClawBot, a new login.
+    wx.revokeTokens('b9_second@im.bot');
+    const again = await signInAgain('wechat-2');
+    wx.confirm({ userId: lin });
+    expect(await again.pending).toBe(0);
+    expect(again.terminal.out).toContain('还是同一个微信号：主人、预算和记录都保留。');
+    expect(again.terminal.out).not.toContain('已添加');
+    expect(registered('wechat-2')).toMatchObject({
+      platformId: 'b9_second@im.bot',
+      generation: second.generation + 1,
+    });
     expect(registered()).toEqual(first);
-
-    // A login WeChat confirms anew for a ClawBot this computer has signs that bot in again.
-    const anew = await startLogin(['--bot', 'wechat-3']);
-    wx.confirm();
-    expect(await anew.pending).toBe(0);
-    expect(anew.terminal.err).toContain(
-      '这个 ClawBot 已经是 bot wechat-2：重新登录了它，没有添加新的 bot',
-    );
-    expect(anew.terminal.out).not.toContain('已添加');
-    expect(registered('wechat-3')).toBeUndefined();
+    // One ClawBot per person throughout.
+    expect(wx.clawBots().filter((bot) => bot.userId === lin)).toEqual([
+      { botId: 'b9_second@im.bot', userId: lin, live: true },
+    ]);
+    expect(wx.clawBots().filter((bot) => bot.userId === wx.owner)).toHaveLength(1);
 
     // Removed alone: the other one and its login stay.
     const forgotten = await run(['relay', '--forget', '--bot', 'wechat-2']);

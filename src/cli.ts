@@ -494,8 +494,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         --token-stdin）
   --set-app             QQ：添加 bot，或给 --bot 名字 重新设置 AppID 和 AppSecret（AppSecret 不显示；
                         或配合 --token-stdin）
-  --login               微信：扫码连接一个 ClawBot（添加 bot，或给 --bot 名字 重新登录），扫码的人就是
-                        主人（只能在终端里）
+  --login               微信：扫码连接你的 ClawBot（添加 bot，或给 --bot 名字 重新登录），扫码的人就是
+                        主人（只能在终端里）。一个微信号只连一个 ClawBot：换角色用 --bot 名字 --character ID
   --qr-link             微信：和 --login 一起用，同时打印二维码的链接
   --token-stdin         从标准输入读凭证（Telegram：token；QQ：第一行 AppID，第二行 AppSecret），
                         不接受命令行参数和环境变量
@@ -538,8 +538,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         hidden; or with --token-stdin)
   --set-app             QQ: add a bot, or set the AppID and AppSecret of --bot name again (the AppSecret
                         hidden; or both with --token-stdin)
-  --login               WeChat: link a ClawBot by scanning a QR code (add a bot, or sign --bot name in again);
-                        whoever scans it is the owner (in a terminal only)
+  --login               WeChat: link your ClawBot by scanning a QR code (add a bot, or sign --bot name in
+                        again); whoever scans it is the owner (in a terminal only). One WeChat account links
+                        one ClawBot: to change its character, use --bot name --character ID
   --qr-link             WeChat, with --login: also print the QR code's link
   --token-stdin         Read the credentials from standard input (Telegram: the token; QQ: the AppID on line 1,
                         the AppSecret on line 2), never from arguments or environment variables
@@ -588,8 +589,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         terminal, oculto; o con --token-stdin)
   --set-app             QQ: agrega un bot, o vuelve a configurar el AppID y el AppSecret de --bot nombre (el
                         AppSecret oculto; o ambos con --token-stdin)
-  --login               WeChat: vincula un ClawBot escaneando un código QR (agrega un bot, o vuelve a iniciar la
-                        sesión de --bot nombre); quien lo escanea es el dueño (solo en una terminal)
+  --login               WeChat: vincula tu ClawBot escaneando un código QR (agrega un bot, o vuelve a iniciar
+                        la sesión de --bot nombre); quien lo escanea es el dueño (solo en una terminal). Una
+                        cuenta de WeChat vincula un solo ClawBot: para cambiar su personaje, usa --bot nombre
+                        --character ID
   --qr-link             WeChat, con --login: imprime también el enlace del código QR
   --token-stdin         Lee las credenciales de la entrada estándar (Telegram: el token; QQ: el AppID en la línea 1,
                         el AppSecret en la línea 2), nunca de argumentos ni de variables de entorno
@@ -639,8 +642,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         oculto; ou com --token-stdin)
   --set-app             QQ: adiciona um bot, ou define de novo o AppID e o AppSecret de --bot nome (o AppSecret
                         oculto; ou ambos com --token-stdin)
-  --login               WeChat: vincula um ClawBot escaneando um código QR (adiciona um bot, ou entra de novo com
-                        --bot nome); quem escaneia é o dono (só em um terminal)
+  --login               WeChat: vincula o seu ClawBot escaneando um código QR (adiciona um bot, ou entra de
+                        novo com --bot nome); quem escaneia é o dono (só em um terminal). Uma conta do WeChat
+                        vincula um só ClawBot: para trocar o personagem dele, use --bot nome --character ID
   --qr-link             WeChat, com --login: também imprime o link do código QR
   --token-stdin         Lê as credenciais da entrada padrão (Telegram: o token; QQ: o AppID na linha 1, o
                         AppSecret na linha 2), nunca de argumentos nem de variáveis de ambiente

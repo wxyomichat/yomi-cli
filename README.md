@@ -139,13 +139,13 @@ YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)（英文�
 
 一台电脑可以登记多个 bot（Telegram、QQ、微信混用），每个 bot 固定和一个角色聊天，一个角色只能绑一个 bot：
 
-- 添加：`--set-token`（QQ `--set-app`，微信 `--login`，每个 ClawBot 扫一次码）加上 `--character <ID>`，可以用 `--bot <名字>` 起名；Telegram 和 QQ 再用 `yomi relay --bot <名字> --pair` 配对。
+- 添加：`--set-token`（QQ `--set-app`，微信 `--login`，一个微信号只有一个 ClawBot）加上 `--character <ID>`，可以用 `--bot <名字>` 起名；Telegram 和 QQ 再用 `yomi relay --bot <名字> --pair` 配对。
 - 查看：`yomi relay --list` 列出每个 bot 的通道、角色、主人和状态，以及后台服务是否在运行。
 - 换绑：`yomi relay --bot <名字> --character <ID>`；重新设置凭证或重新登录：`yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）。
 - 删除：`yomi relay --forget --bot <名字>`；全部：`yomi relay --forget --all`。
 - 运行：`yomi relay` 在一个进程里运行全部 bot，共用一次 Yomi 登录、一条长连接和一份花费记录（`--max-spend` 是共用的上限）；`--channel` 或 `--bot a,b` 只运行一部分。
 - 后台服务：`yomi relay --install-service` 每个 Yomi 账号和环境只装一个，运行全部 bot，并替换旧版按通道分开的服务；`--service-status` 显示它和每个 bot 的状态，`--uninstall-service` 删除它。服务运行时添加、重新登录、换绑、删除或配对 bot，命令会先停止服务，在终端里完成改动（包括扫码和配对），再重新启动服务，这期间所有 bot 都离线，通常一分钟左右。
-- 一个微信号连接多个 ClawBot 目前只在本地模拟的服务上测试过，见 [docs/relay-wechat.md](docs/relay-wechat.md)。
+- 微信：一个微信号只有一个 ClawBot，它的 bot 固定一个角色；想和别的角色聊天，用 `yomi relay --bot <名字> --character <ID>` 换绑（后台服务会先停止，换绑后再重新启动）。一台电脑上的几个微信 bot 要用不同的微信号扫码，这一点还没有在真实的微信账号上验证，见 [docs/relay-wechat.md](docs/relay-wechat.md)。
 
 合规提示、扣费上限、年龄与分级拦截、限流这些规则应由服务端对所有渠道统一执行，relay 只做适配。服务端通过 `relay/get_policy` 声明它已经支持哪些能力；没有声明的能力 relay 不会假定支持（只用免费额度时不发送、AI 提示由 relay 自己显示），默认不设上限的转发不受影响。
 

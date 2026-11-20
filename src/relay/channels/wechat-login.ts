@@ -6,8 +6,9 @@ import { sha256 } from '../../core/state.js';
 import { readLine } from '../../core/prompt.js';
 import { confirm, type Io, paint, say, warn } from '../../core/ui.js';
 import type { BotRecord } from '../registry.js';
+import type { RelayCharacter } from '../state.js';
 import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
-import type { CredentialRequest } from './setup.js';
+import { botCommand, type CredentialRequest } from './setup.js';
 import {
   isLoopbackOrigin,
   trustedUrl,
@@ -27,11 +28,16 @@ import {
  * stored. At most three codes per login (a code expires, or the phone's digits were wrong too
  * often), eight minutes in all.
  *
- * One WeChat account may link several ClawBots: each scan that WeChat confirms for a new ClawBot
- * adds a bot (`--login --character ID`), and `--login --bot NAME` signs that one bot in again,
- * sending only its token (multi-bot design §1.2). WeChat names no bot when it answers that the
- * ClawBot is bound here already (`binded_redirect`): signing a bot in again keeps its login, and
- * adding one writes nothing. On `confirmed` the command keeps the login (`CredentialRequest.save`)
+ * One WeChat account has one ClawBot, which talks as its bot's one character; another character is
+ * a rebind on the computer (`--bot NAME --character ID`), never a second ClawBot. A scan that WeChat
+ * confirms for a ClawBot this computer does not have adds a bot (`--login --character ID`): another
+ * WeChat account's. `--login --bot NAME` signs that one bot in again, sending only its token
+ * (multi-bot design §1.2). WeChat names no bot when it answers that the ClawBot is bound
+ * (`binded_redirect`, as it does when its token is sent): signing a bot in again keeps its login,
+ * and adding one writes nothing and says how to rebind that bot instead (named when the channel has
+ * one), or, when another account scanned, to unbind its ClawBot on the phone. A new login WeChat
+ * gives the scanner of a bot here, under its id or another, signs that bot in again
+ * (`AcquiredBot.owner`). On `confirmed` the command keeps the login (`CredentialRequest.save`)
  * and the bot's state gets the scanner as its owner, unless it already has them (the same person
  * keeps their budget, pending charge and records); another scanner of the same bot replaces its
  * owner, whose budget and records go.
@@ -433,6 +439,48 @@ async function agreed(io: Io): Promise<boolean> {
   );
 }
 
+/**
+ * A scan to add a bot answered `binded_redirect` while this computer's logins went with the code:
+ * WeChat says the ClawBot is bound, naming neither it nor the scanner. One WeChat account has one
+ * ClawBot: when the scanner's is a bot here (named when the channel has one), its login is
+ * unchanged and another character is a rebind (to `character` when one was given); when another
+ * account scanned, its ClawBot may be bound elsewhere, and is unbound on the phone first.
+ */
+function linkedHere(bots: string[], character: RelayCharacter | null): UsageError {
+  const only = bots.length === 1 ? bots[0] : '';
+  const name = only || tr('名字', 'NAME', 'NOMBRE', 'NOME');
+  const rebind = botCommand({ name }, `--character ${character?.npcId ?? 'ID'}`);
+  const listed = only
+    ? ''
+    : tr(
+        '（名字见 yomi relay --list）',
+        ' (the names are in yomi relay --list)',
+        ' (los nombres están en yomi relay --list)',
+        ' (os nomes estão em yomi relay --list)',
+      );
+  const whose = only
+    ? tr(
+        ` bot ${only} 的微信号`,
+        `the WeChat account of the bot ${only}`,
+        `la cuenta de WeChat del bot ${only}`,
+        `a conta do WeChat do bot ${only}`,
+      )
+    : tr(
+        '这台电脑上某个 bot 的微信号',
+        'the WeChat account of a bot on this computer',
+        'la cuenta de WeChat de un bot de este equipo',
+        'a conta do WeChat de um bot deste computador',
+      );
+  return new UsageError(
+    tr(
+      `微信说这个 ClawBot 已经绑定了，所以没有添加新的 bot，也没有保存任何东西：一个微信号只有一个 ClawBot。如果扫码的是${whose}，它的登录不变；要和别的角色聊天，给它换绑角色：${rebind}${listed}。如果扫码的是别的微信号，它的 ClawBot 可能绑定在别处：先在手机微信的设置里解除 ClawBot 的绑定，再运行 --login。`,
+      `WeChat says this ClawBot is already bound, so no bot was added and nothing was saved: one WeChat account has one ClawBot. If the code was scanned with ${whose}, its login is unchanged; to chat with another character, rebind it: ${rebind}${listed}. If it was scanned with another WeChat account, that account's ClawBot may be bound somewhere else: unbind ClawBot in WeChat's settings on your phone, then run --login again.`,
+      `WeChat dice que este ClawBot ya está vinculado, así que no se agregó ningún bot y no se guardó nada: una cuenta de WeChat tiene un solo ClawBot. Si el código se escaneó con ${whose}, su inicio de sesión sigue igual; para chatear con otro personaje, cambia su personaje: ${rebind}${listed}. Si se escaneó con otra cuenta de WeChat, el ClawBot de esa cuenta puede estar vinculado en otro lugar: desvincula ClawBot en los ajustes de WeChat en tu teléfono y vuelve a ejecutar --login.`,
+      `O WeChat diz que este ClawBot já está vinculado, então nenhum bot foi adicionado e nada foi salvo: uma conta do WeChat tem um só ClawBot. Se o código foi escaneado com ${whose}, o login dele continua o mesmo; para conversar com outro personagem, troque o personagem dele: ${rebind}${listed}. Se foi escaneado com outra conta do WeChat, o ClawBot dessa conta pode estar vinculado em outro lugar: desvincule o ClawBot nas configurações do WeChat no celular e execute --login de novo.`,
+    ),
+  );
+}
+
 export type WechatLoginSeams = Omit<QrLoginOptions, 'qrLink' | 'apiOrigin' | 'signal'>;
 
 /** `--login`: the notice, the QR flow, then the login kept and the owner. */
@@ -494,16 +542,9 @@ export async function wechatLogin(
       );
       return null;
     }
-    // Which of this computer's ClawBots it is, WeChat does not say: nothing is written.
-    if (tokens.length)
-      throw new UsageError(
-        tr(
-          '微信说这个 ClawBot 已经是这台电脑上的一个 bot 了，没有保存任何东西。要重新登录它，运行 yomi relay --bot 名字 --login（名字见 yomi relay --list）。',
-          'WeChat says this ClawBot is one of the bots on this computer already, so nothing was saved. To sign it in again, run yomi relay --bot NAME --login (the names are in yomi relay --list).',
-          'WeChat dice que este ClawBot ya es uno de los bots de este equipo, así que no se guardó nada. Para volver a iniciar su sesión, ejecuta yomi relay --bot NOMBRE --login (los nombres están en yomi relay --list).',
-          'O WeChat diz que este ClawBot já é um dos bots deste computador, então nada foi salvo. Para entrar com ele de novo, execute yomi relay --bot NOME --login (os nomes estão em yomi relay --list).',
-        ),
-      );
+    // Adding: the scanner's one ClawBot is most likely a bot here already. WeChat names neither
+    // it nor the scanner, so nothing is written, and both cases are said.
+    if (tokens.length) throw linkedHere(request.bots, request.character);
     throw new UsageError(
       tr(
         '微信说这个 ClawBot 已经绑定了，但这台电脑上没有保存登录：先在手机微信的设置里解除 ClawBot 的绑定，再运行 --login。',
@@ -524,7 +565,9 @@ export async function wechatLogin(
   let fresh = false;
   let replaced = false;
   const identity = { id: credentials.ilinkBotId, name: '', handle: '' };
-  const record = request.save({ secret, stored, identity }, (state) => {
+  // The scanner too: their one ClawBot may be a bot here already, under another id.
+  const acquired = { secret, stored, identity, owner: credentials.ilinkUserId };
+  const record = request.save(acquired, (state) => {
     // Another person scanned this bot: its owner, their budget and records go.
     const owner = state.data.owner;
     replaced = Boolean(owner && String(owner.userId) !== credentials.ilinkUserId);

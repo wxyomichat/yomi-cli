@@ -33,8 +33,9 @@ export { characterOwner };
  * - A bot added later (`yomi relay --telegram --set-token`, `--set-app`, `--login`, with or without
  *   `--character`) is a record of its own (`add`): a random key, its secret under
  *   `<the channel's secret name>#<key>`, the state scope and lock its platform id gives (Telegram's
- *   bot id, `qq:<AppID>`), and for WeChat, whose ClawBots one person may link several of, a scope
- *   and lock of its own (`bot:<key>`, `bot-<key>`). A bot already registered is never added twice.
+ *   bot id, `qq:<AppID>`), and for WeChat (one ClawBot per WeChat account, whose id a new login
+ *   may change and whose scanner may change) a scope and lock of its own (`bot:<key>`,
+ *   `bot-<key>`). A bot already registered is never added twice.
  * - Credentials set again for a bot (`renew`) must be that bot's: the same Telegram bot id, the
  *   same QQ AppID; a WeChat login may come with a new ClawBot id, never another registered one.
  * - A run checks the stored credentials against the record (`sameBot`): credentials of another bot

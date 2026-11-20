@@ -275,18 +275,21 @@ describe('the QQ mock with several bots', () => {
   });
 });
 
-describe('the WeChat mock with several ClawBots', () => {
+describe('the WeChat mock with a ClawBot per WeChat account', () => {
+  /** The second WeChat user: their own ClawBot. */
+  const lin = 'u2_lin@im.wechat';
+
   async function mock() {
     const wx = await startMockWechat({ longPollMs: 100, qrPollMs: 100 });
     cleanup.push(() => wx.close());
     return wx;
   }
 
-  /** One QR login: the code (with these tokens kept), the phone confirming `botId`. */
-  async function scan(wx: MockWechat, botId: string | undefined, localTokens: string[] = []) {
+  /** One QR login: the code (with these tokens kept), `userId` confirming on the phone. */
+  async function scan(wx: MockWechat, userId: string, localTokens: string[] = [], botId?: string) {
     const login = new WechatLoginApi(wx.origin);
     const code = await login.qrCode(localTokens);
-    wx.confirm(botId ? { botId } : {});
+    wx.confirm(botId ? { userId, botId } : { userId });
     return login.qrStatus(wx.origin, code.qrcode, '');
   }
 
@@ -312,27 +315,27 @@ describe('the WeChat mock with several ClawBots', () => {
       item_list: [{ type: 1, text_item: { text } }],
     });
 
-  it('links a second ClawBot to the same account: its own token, messages, cursor and context', async () => {
+  it('links a ClawBot of their own to another WeChat user: its own token, messages, cursor and context', async () => {
     const wx = await mock();
-    const first = await scan(wx, 'b1_first@im.bot');
-    const second = await scan(wx, 'b2_second@im.bot', [first.bot_token!]);
+    const first = await scan(wx, wx.owner, [], 'b1_first@im.bot');
+    const second = await scan(wx, lin, [first.bot_token!], 'b2_second@im.bot');
     expect(first).toMatchObject({ status: 'confirmed', ilink_bot_id: 'b1_first@im.bot' });
     expect(second).toMatchObject({
       status: 'confirmed',
       ilink_bot_id: 'b2_second@im.bot',
-      ilink_user_id: wx.owner,
+      ilink_user_id: lin,
     });
     expect(second.bot_token).not.toBe(first.bot_token);
     expect(wx.botId).toBe('b2_second@im.bot');
     expect(wx.clawBots()).toEqual([
       { botId: 'b1_first@im.bot', userId: wx.owner, live: true },
-      { botId: 'b2_second@im.bot', userId: wx.owner, live: true },
+      { botId: 'b2_second@im.bot', userId: lin, live: true },
     ]);
     const one = botApi(wx, first.bot_token!);
     const two = botApi(wx, second.bot_token!);
 
     // The newest ClawBot by default; another by name.
-    const toSecond = wx.userSends('to the second');
+    const toSecond = wx.userSends('to the second', { from: lin });
     const toFirst = wx.userSends('to the first', { bot: 'b1_first@im.bot' });
     const seenByOne = await poll(one);
     const seenByTwo = await poll(two);
@@ -350,10 +353,11 @@ describe('the WeChat mock with several ClawBots', () => {
     expect(refused).toBeInstanceOf(WechatError);
     expect(refused).toMatchObject({ code: -2 });
     await say(one, wx.owner, wx.contextOf(toFirst), 'right bot');
-    await say(two, wx.owner, wx.contextOf(toSecond), 'second bot');
-    expect(wx.texts()).toEqual(['right bot', 'second bot']);
+    await say(two, lin, wx.contextOf(toSecond), 'second bot');
+    expect(wx.texts()).toEqual(['right bot']);
     expect(wx.texts(wx.owner, 'b1_first@im.bot')).toEqual(['right bot']);
-    expect(wx.messages(wx.owner, 'b2_second@im.bot').map((message) => message.bot)).toEqual([
+    expect(wx.texts(lin)).toEqual(['second bot']);
+    expect(wx.messages(lin, 'b2_second@im.bot').map((message) => message.bot)).toEqual([
       'b2_second@im.bot',
     ]);
 
@@ -381,12 +385,12 @@ describe('the WeChat mock with several ClawBots', () => {
 
   it('replays the last batch of the ClawBot named, and of the first to poll when none is', async () => {
     const wx = await mock();
-    const first = await scan(wx, 'b1_first@im.bot');
-    const second = await scan(wx, 'b2_second@im.bot', [first.bot_token!]);
+    const first = await scan(wx, wx.owner, [], 'b1_first@im.bot');
+    const second = await scan(wx, lin, [first.bot_token!], 'b2_second@im.bot');
     const one = botApi(wx, first.bot_token!);
     const two = botApi(wx, second.bot_token!);
     const m1 = wx.userSends('one', { bot: 'b1_first@im.bot' });
-    const m2 = wx.userSends('two', { bot: 'b2_second@im.bot' });
+    const m2 = wx.userSends('two', { bot: 'b2_second@im.bot', from: lin });
     const a1 = await poll(one);
     const a2 = await poll(two);
     expect(ids(a1)).toEqual([String(m1)]);
@@ -407,22 +411,29 @@ describe('the WeChat mock with several ClawBots', () => {
     expect((await poll(two, a2.get_updates_buf)).msgs).toEqual([]);
   });
 
-  it('answers binded_redirect for a ClawBot this computer holds, and renews only the one logged in again', async () => {
+  it('never gives a WeChat user a second ClawBot: bound while its login is held, else the same one logged in again', async () => {
     const wx = await mock();
-    const first = await scan(wx, 'b1_first@im.bot');
-    const second = await scan(wx, 'b2_second@im.bot', [first.bot_token!]);
+    const first = await scan(wx, wx.owner, [], 'b1_first@im.bot');
+    const second = await scan(wx, lin, [first.bot_token!], 'b2_second@im.bot');
     const held = [first.bot_token!, second.bot_token!];
-    // Scanning either linked ClawBot with both tokens held: bound, naming no bot, no new token.
-    for (const id of ['b1_first@im.bot', 'b2_second@im.bot']) {
-      const again = await scan(wx, id, held);
+    // Either user scanning with both logins held, even for another bot id: bound, naming no bot,
+    // no new token.
+    for (const [user, botId] of [
+      [wx.owner, undefined],
+      [lin, undefined],
+      [wx.owner, 'b9_another@im.bot'],
+    ] as const) {
+      const again = await scan(wx, user, held, botId);
       expect(again.status).toBe('binded_redirect');
       expect(again.bot_token).toBeFalsy();
       expect(again.ilink_bot_id).toBeFalsy();
     }
     expect(wx.localTokens.at(-1)).toEqual(held);
-    // A third ClawBot with the same tokens held: linked.
-    const third = await scan(wx, 'b3_third@im.bot', held);
-    expect(third).toMatchObject({ status: 'confirmed', ilink_bot_id: 'b3_third@im.bot' });
+    // A third user with the same logins held: a ClawBot of their own.
+    const third = await scan(wx, 'u3_third@im.wechat', held);
+    expect(third).toMatchObject({ status: 'confirmed', ilink_user_id: 'u3_third@im.wechat' });
+    expect(third.ilink_bot_id).not.toMatch(/^b[12]_/);
+    expect(wx.clawBots()).toHaveLength(3);
 
     // -14 and a revoked token stay with their ClawBot.
     const one = botApi(wx, first.bot_token!);
@@ -436,8 +447,8 @@ describe('the WeChat mock with several ClawBots', () => {
     expect(await poll(two)).toMatchObject({ ret: 0 });
     expect(wx.clawBots().map((bot) => bot.live)).toEqual([false, true, true]);
 
-    // Logged in again (its token no longer works): a new token for that ClawBot only.
-    const renewed = await scan(wx, 'b1_first@im.bot', [first.bot_token!]);
+    // Its token no longer works: the same user's scan logs the same ClawBot in again.
+    const renewed = await scan(wx, wx.owner, [first.bot_token!]);
     expect(renewed).toMatchObject({ status: 'confirmed', ilink_bot_id: 'b1_first@im.bot' });
     expect(renewed.bot_token).not.toBe(first.bot_token);
     const back = botApi(wx, renewed.bot_token!);
@@ -446,13 +457,24 @@ describe('the WeChat mock with several ClawBots', () => {
       [{ type: 1, text_item: { text: 'after renewal' } }],
     ]);
     expect(await poll(two)).toMatchObject({ ret: 0 });
-    // Without a bot id the ClawBot of the latest login gets a new token, even with it held.
-    expect(wx.botId).toBe('b1_first@im.bot');
-    const latest = await scan(wx, undefined, [renewed.bot_token!, ...held.slice(1)]);
+    // Scanned without its live token held: the same ClawBot again, with a new token; the old one
+    // stops working, the other users' ClawBots are untouched.
+    const latest = await scan(wx, wx.owner, held.slice(1));
     expect(latest).toMatchObject({ status: 'confirmed', ilink_bot_id: 'b1_first@im.bot' });
     expect(await failure(poll(back))).toMatchObject({ status: 401 });
     expect(await poll(botApi(wx, latest.bot_token!))).toMatchObject({ ret: 0 });
     expect(await poll(botApi(wx, third.bot_token!))).toMatchObject({ ret: 0 });
     expect(await poll(two)).toMatchObject({ ret: 0 });
+    // A new id for a user's ClawBot (a test naming one): still their one ClawBot.
+    const renamed = await scan(wx, lin, [], 'b2_renamed@im.bot');
+    expect(renamed).toMatchObject({ status: 'confirmed', ilink_bot_id: 'b2_renamed@im.bot' });
+    expect(await failure(poll(two))).toMatchObject({ status: 401 });
+    expect(wx.clawBots()).toEqual([
+      { botId: 'b1_first@im.bot', userId: wx.owner, live: true },
+      { botId: third.ilink_bot_id, userId: 'u3_third@im.wechat', live: true },
+      { botId: 'b2_renamed@im.bot', userId: lin, live: true },
+    ]);
+    // Another user's ClawBot is never given to a scanner.
+    expect(() => wx.confirm({ userId: lin, botId: 'b1_first@im.bot' })).toThrow(/another user/);
   });
 });

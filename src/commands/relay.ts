@@ -1157,8 +1157,8 @@ function credentialsChanged(setup: ChannelSetup): string {
   );
 }
 
-/** The command that binds `name` to a character. */
-const bindCommand = (name: string) => `yomi relay --bot ${name} --character ID`;
+/** The command that binds `name` to a character (`npcId` when it is known). */
+const bindCommand = (name: string, npcId = 'ID') => `yomi relay --bot ${name} --character ${npcId}`;
 
 /** The character id in `input` (a number or a link with one), '' when there is none. */
 const characterIdOf = (input: string) => /([1-9][0-9]{5,19})/.exec(input)?.[1] ?? '';
@@ -2040,6 +2040,8 @@ async function credentialsFlow(
       options,
       renew,
       stored: concerned.flatMap((record) => store.getSecret(record.secretName) ?? []),
+      bots: concerned.map((record) => record.name),
+      character: plan.character,
       atStart: plan.atStart,
       check: (stored) => checkCredentials(registry, setup.kind, renew, stored),
       save: (bot, state) =>
@@ -2105,9 +2107,28 @@ function changeWrites(context: Context) {
 }
 
 /**
+ * The WeChat bot here that the scanner of `bot` owns (`AcquiredBot.owner`): one WeChat account has
+ * one ClawBot, so a new login of theirs is that bot's even under another ClawBot id, whether its
+ * saved login expired or is gone. Its state's owner is the scanner of its last login.
+ */
+function scannersBot(
+  context: Context,
+  registry: BotRegistry,
+  bot: AcquiredBot,
+): BotRecord | undefined {
+  const { owner } = bot;
+  if (!owner) return undefined;
+  return registry
+    .list('wechat')
+    .find((record) => String(stateOf(context, record)?.data.owner?.userId ?? '') === owner);
+}
+
+/**
  * Keeps a new bot (design §1.2): its secret, its state (`state`) and its record, all or nothing
  * (`BotRegistry.add` checks names, characters and platform ids again under its lock). A WeChat
- * ClawBot this computer has already (WeChat confirmed it anew) is signed in again instead, said.
+ * ClawBot this computer has already (WeChat confirmed it anew, by its id or its scanner's: one
+ * WeChat account has one ClawBot) is signed in again instead, said, with how to change its
+ * character.
  */
 function saveAdded(
   context: Context,
@@ -2118,16 +2139,19 @@ function saveAdded(
 ): BotRecord {
   const { setup } = plan;
   registry.commit(() => false);
-  const twin = registry.byPlatform(setup.kind, bot.stored.platformId);
+  const twin =
+    registry.byPlatform(setup.kind, bot.stored.platformId) ??
+    (setup.kind === 'wechat' ? scannersBot(context, registry, bot) : undefined);
   if (twin && setup.kind === 'wechat') {
+    const rebind = bindCommand(twin.name, plan.character?.npcId);
     if (plan.character || plan.name)
       warn(
         context.io,
         tr(
-          `这个 ClawBot 已经是 bot ${twin.name}：重新登录了它，没有添加新的 bot（--character 和 --bot 没有生效）。`,
-          `This ClawBot is the bot ${twin.name} already: it was signed in again, and no bot was added (--character and --bot did not apply).`,
-          `Este ClawBot ya es el bot ${twin.name}: se volvió a iniciar su sesión y no se agregó ningún bot (--character y --bot no se aplicaron).`,
-          `Este ClawBot já é o bot ${twin.name}: o login dele foi feito de novo e nenhum bot foi adicionado (--character e --bot não foram aplicados).`,
+          `这个 ClawBot 已经是 bot ${twin.name}（一个微信号只有一个 ClawBot）：重新登录了它，没有添加新的 bot（--character 和 --bot 没有生效）。要和别的角色聊天，给它换绑角色：${rebind}`,
+          `This ClawBot is the bot ${twin.name} already (one WeChat account has one ClawBot): it was signed in again, and no bot was added (--character and --bot did not apply). To chat with another character, rebind it: ${rebind}`,
+          `Este ClawBot ya es el bot ${twin.name} (una cuenta de WeChat tiene un solo ClawBot): se volvió a iniciar su sesión y no se agregó ningún bot (--character y --bot no se aplicaron). Para chatear con otro personaje, cambia su personaje: ${rebind}`,
+          `Este ClawBot já é o bot ${twin.name} (uma conta do WeChat tem um só ClawBot): o login dele foi feito de novo e nenhum bot foi adicionado (--character e --bot não foram aplicados). Para conversar com outro personagem, troque o personagem dele: ${rebind}`,
         ),
       );
     return saveRenewed(context, registry, twin, bot, state);

@@ -237,7 +237,7 @@ export interface RelayChannel {
   /**
    * Relay state scope: `relay/<sha256(account|scope)[0:16]>.json`, LocalState `relay|<account>|<scope>`,
    * image record key. Telegram: the bot id (unchanged); QQ: `qq:<AppID>`; WeChat: its registry
-   * record's, `bot:<key>` for a ClawBot added under the registry (one person may link several),
+   * record's, `bot:<key>` for a ClawBot added under the registry (whoever scans it),
    * `wx:<sha256(ilink_user_id)[0:16]>` for a login of before it (the owner, not the bot, because a
    * re-login may change ilink_bot_id).
    */
