@@ -22,6 +22,7 @@ import {
   tokenTooFrequent,
   TOO_LONG_CODES,
 } from './qq-api.js';
+import { QQ_CONSOLE_ZH as Z } from './qq-console.js';
 import {
   botGoneText,
   gatewayProtocolText,
@@ -1208,10 +1209,10 @@ function apiFor(app: { appId: string; secret: string }, signal?: AbortSignal): Q
 function refusedApp(): UsageError {
   return new UsageError(
     tr(
-      'QQ 不接受这个 AppID/AppSecret：请在 QQ 开放平台（q.qq.com）的机器人「开发设置」里核对，AppSecret 重置过就要用新的。',
-      "QQ does not accept this AppID/AppSecret: check them in the bot's development settings on the QQ Open Platform (q.qq.com); if the AppSecret was reset, use the new one.",
-      'QQ no acepta este AppID/AppSecret: revísalos en la configuración de desarrollo del bot en la QQ Open Platform (q.qq.com); si el AppSecret se restableció, usa el nuevo.',
-      'O QQ não aceita este AppID/AppSecret: confira-os nas configurações de desenvolvimento do bot na QQ Open Platform (q.qq.com); se o AppSecret foi redefinido, use o novo.',
+      `QQ 不接受这个 AppID/AppSecret：请在 QQ 开放平台（q.qq.com）的机器人${Z.devSettings}里核对，AppSecret 重置过就要用新的。`,
+      `QQ does not accept this AppID/AppSecret: check them in the bot's ${Z.devSettings} (Development settings) on the QQ Open Platform (q.qq.com); if the AppSecret was reset, use the new one.`,
+      `QQ no acepta este AppID/AppSecret: revísalos en ${Z.devSettings} (Configuración de desarrollo) del bot en la QQ Open Platform (q.qq.com); si el AppSecret se restableció, usa el nuevo.`,
+      `O QQ não aceita este AppID/AppSecret: confira-os em ${Z.devSettings} (Configurações de desenvolvimento) do bot na QQ Open Platform (q.qq.com); se o AppSecret foi redefinido, use o novo.`,
     ),
   );
 }
@@ -1228,10 +1229,10 @@ async function askApp(
         io,
         'dim',
         tr(
-          '在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的「开发设置」里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。第一次设置可以用 yomi relay --setup，按步骤来。',
-          "Create a bot with your own QQ on the QQ Open Platform (q.qq.com) and find its AppID and AppSecret in the bot's development settings (the AppSecret will not be shown as you type). Personal use only. The first time, yomi relay --setup takes you through it step by step.",
-          'Crea un bot con tu propia cuenta de QQ en la QQ Open Platform (q.qq.com) y busca su AppID y su AppSecret en la configuración de desarrollo del bot (el AppSecret no se mostrará al escribirlo). Solo para uso personal. La primera vez, yomi relay --setup te guía paso a paso.',
-          'Crie um bot com a sua própria conta do QQ na QQ Open Platform (q.qq.com) e encontre o AppID e o AppSecret nas configurações de desenvolvimento do bot (o AppSecret não aparece enquanto você digita). Somente para uso pessoal. Na primeira vez, yomi relay --setup guia você passo a passo.',
+          `在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的${Z.devSettings}里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。第一次设置可以用 yomi relay --setup，按步骤来。`,
+          `Create a bot with your own QQ on the QQ Open Platform (q.qq.com) and find its AppID and AppSecret in the bot's ${Z.devSettings} (Development settings); the AppSecret will not be shown as you type. Personal use only. The first time, yomi relay --setup takes you through it step by step.`,
+          `Crea un bot con tu propia cuenta de QQ en la QQ Open Platform (q.qq.com) y busca su AppID y su AppSecret en ${Z.devSettings} (Configuración de desarrollo) del bot; el AppSecret no se mostrará al escribirlo. Solo para uso personal. La primera vez, yomi relay --setup te guía paso a paso.`,
+          `Crie um bot com a sua própria conta do QQ na QQ Open Platform (q.qq.com) e encontre o AppID e o AppSecret em ${Z.devSettings} (Configurações de desenvolvimento) do bot; o AppSecret não aparece enquanto você digita. Somente para uso pessoal. Na primeira vez, yomi relay --setup guia você passo a passo.`,
         ),
       ),
     );

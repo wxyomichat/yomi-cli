@@ -11,7 +11,8 @@ import {
   type ScanFailure,
   startScan,
 } from './qq-connect.js';
-import { probeGatewayDetail } from './qq-gateway.js';
+import { QQ_CONSOLE_ZH } from './qq-console.js';
+import { noPrivateChatText, probeGatewayDetail } from './qq-gateway.js';
 import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
 
 /**
@@ -25,29 +26,7 @@ import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
  * outside Chinese: the console has no other language to point at.
  */
 
-/** The names QQ's console shows (q.qq.com), as it shows them; translated beside them elsewhere. */
-export const QQ_CONSOLE_ZH = {
-  bots: '「机器人」',
-  createOrManage: '「去创建或管理我的 QQ 机器人」',
-  createBot: '「+ 创建机器人」',
-  createButton: '「创建机器人」',
-  aiService: '「设置 AI 服务」',
-  manualBinding: '「手动绑定参数」',
-  later: '「稍后连接」',
-  scanToChat: '「扫码对话」',
-  devSettings: '「开发设置」',
-  credentials: '「APPID 接入凭证」',
-  eventSubscription: '「事件订阅与回调地址」',
-  websocket: '「当前以 WebSocket 方式接收事件推送」',
-  ipWhitelist: '「服务器 IP 白名单」',
-  friendScope: '「服务范围 → 好友（私聊） → 允许被其他 QQ 用户添加使用」',
-  testAccounts: '「开发设置 → 开发体验号码设置」',
-  addUser: '「+ 添加用户」',
-  online: '「在线」',
-  mars: '「该机器人去火星了」',
-  /** How the scan page names whoever asks (yomi here), unless Tencent agreed another name. */
-  thirdParty: '「第三方机器人」',
-} as const;
+export { QQ_CONSOLE_ZH };
 
 const Z = QQ_CONSOLE_ZH;
 
@@ -619,14 +598,8 @@ export async function checkPrivateChat(
             ),
       );
     if (probe.result === 'intents') {
-      ui.fail(
-        tr(
-          `QQ 说这个机器人没有私聊（单聊）消息事件的权限（4014）。QQ 的文档没有写在哪里开启。请确认${Z.devSettings} → ${Z.eventSubscription}写的是 WebSocket 方式；还不行的话，看常见问题 ${QQ_LINKS.faq} 或联系 QQ。`,
-          `QQ says the bot has no permission for private (C2C) message events (4014). QQ's documentation doesn't say where to enable it. Check that ${Z.eventSubscription} (Event subscription) in ${Z.devSettings} (Development settings) uses WebSocket; if that doesn't help, see the FAQ at ${QQ_LINKS.faq} or contact QQ.`,
-          `QQ dice que el bot no tiene permiso para los eventos de mensajes privados (C2C) (4014). La documentación de QQ no dice dónde activarlo. Comprueba que ${Z.eventSubscription} (Suscripción de eventos), en ${Z.devSettings} (Configuración de desarrollo), use WebSocket; si no se soluciona, consulta las preguntas frecuentes en ${QQ_LINKS.faq} o contacta con QQ.`,
-          `O QQ diz que o bot não tem permissão para os eventos de mensagens privadas (C2C) (4014). A documentação do QQ não diz onde ativá-la. Confira se ${Z.eventSubscription} (Assinatura de eventos), em ${Z.devSettings} (Configurações de desenvolvimento), usa WebSocket; se não resolver, veja as perguntas frequentes em ${QQ_LINKS.faq} ou entre em contato com o QQ.`,
-        ),
-      );
+      // The relay's own words for 4014 (`yomi relay`, `--set-app`): one text for one refusal.
+      ui.fail(noPrivateChatText());
       await saveOrQuit(
         ui,
         tr(

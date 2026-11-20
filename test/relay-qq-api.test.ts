@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { type WebSocket as WsSocket, WebSocketServer } from 'ws';
 
+import { setLanguage } from '../src/core/i18n.js';
 import { type MockQq, startMockQq } from '../src/mock/qq.js';
 import {
   QQ_API,
@@ -14,8 +15,10 @@ import {
   TOKEN_OPERATION,
   TOKEN_RETRY_MS,
 } from '../src/relay/channels/qq-api.js';
+import { QQ_CONSOLE_ZH } from '../src/relay/channels/qq-console.js';
 import {
   C2C_INTENTS,
+  noPrivateChatText,
   probeGateway,
   QqGateway,
   type QqDispatch,
@@ -31,6 +34,7 @@ import { RelayStopped } from '../src/relay/channels/types.js';
 
 let qq: MockQq;
 const OWNER = 'OPENID_OWNER_1';
+const CJK = /[㐀-鿿＀-￯　-〿]/;
 
 beforeAll(async () => {
   qq = await startMockQq({ heartbeatMs: 80 });
@@ -430,12 +434,40 @@ describe('the QQ gateway', () => {
       expect(error.message).toContain(
         'QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启',
       );
-      expect(error.message).toContain('「开发设置 → 事件订阅与回调地址」用的是 WebSocket 方式');
+      expect(error.message).toContain('「开发设置」 → 「事件订阅与回调地址」用的是 WebSocket 方式');
       expect(error.message).toContain('https://bot.q.qq.com/wiki/bot_FAQ/');
       expect(closed.calls.filter((call) => call.path === '/gateway/bot')).toHaveLength(1);
       expect(await probeGateway(apiFor(closed))).toBe('intents');
       expect(await probeGateway(apiFor(qq))).toBe('ok');
     } finally {
+      await closed.shutdown();
+    }
+  });
+
+  it("names the console's own Chinese labels for 4014 in en, es and pt, each translated after", async () => {
+    const closed = await startMockQq({ c2c: false });
+    try {
+      for (const [lang, subscription, settings] of [
+        ['en', 'Event subscription', 'Development settings'],
+        ['es', 'Suscripción de eventos', 'Configuración de desarrollo'],
+        ['pt', 'Assinatura de eventos', 'Configurações de desenvolvimento'],
+      ] as const) {
+        setLanguage(lang);
+        const { done } = gateway(closed);
+        const error = (await done) as RelayStopped;
+        expect(error.reason, lang).toBe('intents');
+        expect(error.message, lang).toBe(noPrivateChatText());
+        // QQ's console shows only its Chinese names: those, with a translation after them.
+        expect(error.message, lang).toContain(
+          `${QQ_CONSOLE_ZH.eventSubscription} (${subscription})`,
+        );
+        expect(error.message, lang).toContain(`${QQ_CONSOLE_ZH.devSettings} (${settings})`);
+        let rest = error.message;
+        for (const name of Object.values(QQ_CONSOLE_ZH)) rest = rest.replaceAll(name, '');
+        expect(rest.search(CJK), lang).toBe(-1);
+      }
+    } finally {
+      setLanguage(null);
       await closed.shutdown();
     }
   });

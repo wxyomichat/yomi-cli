@@ -1,6 +1,7 @@
 import { tr } from '../../core/i18n.js';
 import { terminalText } from '../../core/ui.js';
 import { type QqApi, qqGatewayUrl, QqError, tokenTooFrequent } from './qq-api.js';
+import { QQ_CONSOLE_ZH as Z } from './qq-console.js';
 import { ChannelError, RelayStopped } from './types.js';
 
 /**
@@ -90,13 +91,15 @@ const QQ_FAQ = 'https://bot.q.qq.com/wiki/bot_FAQ/';
 /**
  * QQ closed the gateway with 4014 (the intent is not allowed): only what is known. QQ's
  * documentation does not say where a bot gets private-chat events, so nothing here claims a switch.
+ * The console's names are its own (`QQ_CONSOLE_ZH`), translated after them outside Chinese. The one
+ * text for 4014: the relay, `--set-app` and the guide's check say it alike.
  */
 export function noPrivateChatText(): string {
   return tr(
-    `QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启。请确认 q.qq.com 上这个机器人的「开发设置 → 事件订阅与回调地址」用的是 WebSocket 方式；还不行的话，看 QQ 的常见问题 ${QQ_FAQ} 或者联系 QQ。`,
-    `QQ says this bot has no permission for private chat (C2C) message events (4014), but QQ's documentation doesn't say where to enable it. On q.qq.com, check that the bot's Development settings → Event subscription uses WebSocket; if that doesn't help, see QQ's FAQ at ${QQ_FAQ} or contact QQ.`,
-    `QQ dice que este bot no tiene permiso para los eventos de chat privado (C2C) (4014), pero la documentación de QQ no dice dónde activarlo. En q.qq.com, comprueba que la configuración de desarrollo del bot → suscripción de eventos use WebSocket; si no se soluciona, consulta las preguntas frecuentes de QQ en ${QQ_FAQ} o contacta con QQ.`,
-    `O QQ diz que este bot não tem permissão para os eventos de chat privado (C2C) (4014), mas a documentação do QQ não diz onde ativá-la. Em q.qq.com, confira se as configurações de desenvolvimento do bot → assinatura de eventos usam WebSocket; se não resolver, veja as perguntas frequentes do QQ em ${QQ_FAQ} ou entre em contato com o QQ.`,
+    `QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014），但 QQ 的文档没有写这个权限在哪里开启。请确认 q.qq.com 上这个机器人的${Z.devSettings} → ${Z.eventSubscription}用的是 WebSocket 方式；还不行的话，看 QQ 的常见问题 ${QQ_FAQ} 或者联系 QQ。`,
+    `QQ says this bot has no permission for private chat (C2C) message events (4014), but QQ's documentation doesn't say where to enable it. On q.qq.com, check that ${Z.eventSubscription} (Event subscription) in the bot's ${Z.devSettings} (Development settings) uses WebSocket; if that doesn't help, see QQ's FAQ at ${QQ_FAQ} or contact QQ.`,
+    `QQ dice que este bot no tiene permiso para los eventos de chat privado (C2C) (4014), pero la documentación de QQ no dice dónde activarlo. En q.qq.com, comprueba que ${Z.eventSubscription} (Suscripción de eventos), en ${Z.devSettings} (Configuración de desarrollo) del bot, use WebSocket; si no se soluciona, consulta las preguntas frecuentes de QQ en ${QQ_FAQ} o contacta con QQ.`,
+    `O QQ diz que este bot não tem permissão para os eventos de chat privado (C2C) (4014), mas a documentação do QQ não diz onde ativá-la. Em q.qq.com, confira se ${Z.eventSubscription} (Assinatura de eventos), em ${Z.devSettings} (Configurações de desenvolvimento) do bot, usa WebSocket; se não resolver, veja as perguntas frequentes do QQ em ${QQ_FAQ} ou entre em contato com o QQ.`,
   );
 }
 

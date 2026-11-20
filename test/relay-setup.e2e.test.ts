@@ -14,6 +14,7 @@ import { acquireProcessLock } from '../src/core/lock.js';
 import { sha256 } from '../src/core/state.js';
 import { type MockQq, type MockQqApp, startMockQq } from '../src/mock/qq.js';
 import { type MockServer, MOCK_NPCS, startMockServer } from '../src/mock/server.js';
+import { noPrivateChatText } from '../src/relay/channels/qq-gateway.js';
 import { BotRegistry } from '../src/relay/registry.js';
 import { servicePlan } from '../src/relay/service.js';
 import { GUIDE_TIMINGS, GuideUi } from '../src/relay/guide/steps.js';
@@ -829,9 +830,9 @@ describe('the check of the gateway', () => {
     const closed = qq.addApp({ botName: 'Closed Lin', c2c: false });
     const quit = guided();
     await throughSaveUntilCheck(quit, closed);
-    await quit.next(
-      /✗ QQ 说这个机器人没有私聊（单聊）消息事件的权限（4014）。QQ 的文档没有写在哪里开启。/,
-    );
+    await quit.next(/✗ QQ 说这个 bot 没有私聊（单聊）消息事件的权限（4014）/);
+    // The relay's one text for 4014, as `yomi relay` and `--set-app` say it: never worded twice.
+    expect(quit.out).toContain(`✗ ${noPrivateChatText()}\n`);
     const options = await quit.next(/s：先保存，配对时会再检查一次 · q：退出，不保存 /);
     expect(options[0]).not.toContain('r：');
     quit.type('q');
