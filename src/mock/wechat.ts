@@ -15,9 +15,11 @@ import type { AddressInfo } from 'node:net';
  * documented: this mock answers `ret: -2`. One WeChat account may link several ClawBots: each
  * confirmed scan of a new bot id is another ClawBot with its own `bot_token`, `getupdates` stream,
  * cursor and `context_token`s (a token works only for the ClawBot that issued it), and logging one
- * in again replaces only its own token. A scan of a ClawBot this computer already holds (its token
- * in the code's `local_token_list`) answers `binded_redirect`, which names no bot. It listens on
- * 127.0.0.1 only; nothing reaches the network.
+ * in again replaces only its own token. A scan confirmed with `confirm({ botId })` for a ClawBot of
+ * the same user whose live token is in the code's `local_token_list` answers `binded_redirect`,
+ * which names no bot. A plain `confirm()` always gives the ClawBot of the newest login
+ * (`mock.botId`) a new token and revokes its old one, even when that token is held, so the existing
+ * tests stay unchanged. It listens on 127.0.0.1 only; nothing reaches the network.
  */
 
 type Json = Record<string, unknown>;
