@@ -13,13 +13,14 @@ import { acquireProcessLock, type LockNote, lockHolder } from '../src/core/lock.
 import { sha256 } from '../src/core/state.js';
 import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
 import { type MockTelegram, startMockTelegram } from '../src/mock/telegram.js';
-import { CHANNEL_KINDS, channelSetup } from '../src/relay/channels/index.js';
+import { CHANNEL_KINDS, type ChannelKind, channelSetup } from '../src/relay/channels/index.js';
 import { type HubStatusFile, hubStatusPath } from '../src/relay/hub/hub.js';
 import { ledgerPath } from '../src/relay/hub/ledger.js';
 import { BotRegistry } from '../src/relay/registry.js';
 import { servicePlan } from '../src/relay/service.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
+import { registerFake } from './helpers/fakeBots.js';
 import { CrashingChannel, type FakeSwitch, StoppingChannel } from './helpers/fakeSetup.js';
 import { memoryIo } from './helpers/io.js';
 
@@ -129,14 +130,18 @@ describe('choosing the channel', () => {
     const none = await run(['relay', '--allow-file-store']);
     expect(none.code).toBe(1);
     expect(none.err).toContain('这台电脑上还没有 bot：用 yomi relay --telegram --set-token');
-    // Credentials, --forget and the service are one channel's: it must be named.
-    for (const flag of ['--set-token', '--forget', '--install-service', '--service-status']) {
+    // A new bot's credentials and the service are one channel's: it must be named.
+    for (const flag of ['--set-token', '--install-service', '--service-status']) {
       const unnamed = await run(['relay', flag, '--allow-file-store']);
       expect(unnamed.code, flag).toBe(1);
       expect(unnamed.err, flag).toContain(
         '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
       );
     }
+    // --forget says what it takes away.
+    const forget = await run(['relay', '--forget', '--allow-file-store']);
+    expect(forget.code).toBe(1);
+    expect(forget.err).toContain('要删除什么？一个 bot：--forget --bot 名字');
     const unknown = await run(['relay', '--channel', 'irc']);
     expect(unknown.code).toBe(1);
     expect(unknown.err).toContain('不认识的通道："irc"。可选 telegram、qq、wechat');
@@ -181,9 +186,19 @@ describe('choosing the channel', () => {
     );
     expect(kept.err).toBe('');
     expect(kept.out).toContain('已保存 @lin_cli_bot 的 token');
-    expect(kept.out).toContain('接下来运行 yomi relay --telegram');
+    // Added: it pairs by its name, whatever the channel has besides.
+    expect(kept.out).toContain(
+      '接下来运行 yomi relay --bot lin_cli_bot --pair，在 Telegram 里完成配对。',
+    );
+    expect(kept.out).toContain(
+      '已添加 bot lin_cli_bot，还没有绑定角色：yomi relay --bot lin_cli_bot --character ID',
+    );
+    // A bot added under the registry keeps its secret under a name of its own.
     const { store, account } = context();
-    expect(store.getSecret(`telegram-bot:${account}`)).toBe(tg.token);
+    const [record] = BotRegistry.open(account).list('telegram');
+    expect(record.secretName).toBe(`telegram-bot:${account}#${record.key}`);
+    expect(store.getSecret(record.secretName)).toBe(tg.token);
+    expect(store.getSecret(`telegram-bot:${account}`)).toBeNull();
   });
 
   it('refuses flags meant for another channel, and WeChat without --experimental (design §6.2)', async () => {
@@ -243,6 +258,7 @@ describe("each channel's names", () => {
     tokenStdin: false,
     pair: false,
     forget: false,
+    all: false,
     characterId: '',
     maxSpend: null,
     allowFileStore: false,
@@ -275,13 +291,19 @@ describe("each channel's names", () => {
       'qq-bot:prod',
       'wechat-ilink:prod',
     ]);
-    const telegram = channelSetup('telegram');
-    expect(telegram.lockNameOf(tg.token)).toBe(String(tg.botId));
-    expect(telegram.lockNameOf('not a token')).toBeNull();
-    expect(channelSetup('qq').lockNameOf(QQ_SECRET)).toBe('qq-1020304');
-    expect(channelSetup('qq').lockNameOf('{"appId":"x1"}')).toBeNull();
-    expect(channelSetup('wechat').lockNameOf(WECHAT_SECRET)).toMatch(/^wx-[0-9a-f]{16}$/);
-    expect(channelSetup('wechat').lockNameOf('{}')).toBeNull();
+    expect(CHANNEL_KINDS.map((kind) => channelSetup(kind).credentialsFlag)).toEqual([
+      '--set-token',
+      '--set-app',
+      '--login',
+    ]);
+    const lockOf = (kind: ChannelKind, secret: string) =>
+      channelSetup(kind).storedBot(secret)?.lockName ?? null;
+    expect(lockOf('telegram', tg.token)).toBe(String(tg.botId));
+    expect(lockOf('telegram', 'not a token')).toBeNull();
+    expect(lockOf('qq', QQ_SECRET)).toBe('qq-1020304');
+    expect(lockOf('qq', '{"appId":"x1"}')).toBeNull();
+    expect(lockOf('wechat', WECHAT_SECRET)).toMatch(/^wx-[0-9a-f]{16}$/);
+    expect(lockOf('wechat', '{}')).toBeNull();
     expect(
       CHANNEL_KINDS.map((kind) => [
         channelSetup(kind).experimental,
@@ -488,9 +510,10 @@ describe('the flow every channel runs', () => {
   const label = (kind: 'qq' | 'wechat') =>
     channelSetup(kind).label({ id: '42', name: 'Lin bot', handle: '' });
 
-  /** Gives the channel's fake an owner, as a pairing or login would. */
+  /** Registers the channel's fake bot and gives it an owner, as a pairing or login would. */
   function paired(kind: 'qq' | 'wechat') {
     const { account } = context();
+    registerFake(account, kind);
     const scope = `fake:${kind}`;
     const state = new RelayState(relayStatePath(account, scope), scope, account, kind);
     state.update({
@@ -566,6 +589,7 @@ describe('the flow every channel runs', () => {
       '--allow-file-store',
     ]);
     expect(unpaired.code).toBe(0);
+    // No WeChat bot yet: the channel's own login.
     expect(unpaired.err).toContain(channelSetup('wechat').unpairedHint());
     expect(unpaired.out).not.toContain('relay 运行中');
     paired('wechat');
@@ -607,8 +631,9 @@ describe('the flow every channel runs', () => {
     expect(result.out.match(/仅限个人使用/g)).toHaveLength(1);
     expect(result.out.match(/实验功能/g)).toHaveLength(1);
     expect(result.out.match(/没有本机花费上限/g)).toHaveLength(1);
-    // Both stopped the same way: said once.
-    expect(result.err.split(StoppingChannel.message)).toHaveLength(2);
+    // Both stopped the same way: each said once, named (what to run would be that bot's).
+    expect(result.err.split(StoppingChannel.message)).toHaveLength(3);
+    for (const name of names) expect(result.err).toContain(`[${name}] ${StoppingChannel.message}`);
     // One sign-in for several channels says so; each kind's policy is read once.
     expect(policyAgents(from).sort((a, b) => String(a[1]).localeCompare(String(b[1])))).toEqual([
       [expect.stringMatching(/ relay-multi$/), 'qq'],
@@ -784,10 +809,10 @@ describe('the flow every channel runs', () => {
   it('starts a crashed bot again from its stored credentials, asking nobody, on a state of its own', async () => {
     paired('qq');
     const { store, account } = context();
-    const qq = BotRegistry.open(account).list('qq')[0].name;
-    const secretName = channelSetup('qq').secretName(account);
+    const { name: qq, secretName } = registerFake(account, 'qq');
     const secret = store.getSecret(secretName);
-    store.setSecret(secretName, secret ?? QQ_SECRET);
+    // Not a real QQ secret: nothing names another bot than the fake's.
+    store.setSecret(secretName, secret ?? 'fake secret');
     const handle = () =>
       new RelayState(relayStatePath(account, 'fake:qq'), 'fake:qq', account, 'qq').data.botUsername;
     Object.assign(fake, { crashes: 1, handle: 'restarted', interactive: [] });
@@ -812,13 +837,11 @@ describe('the flow every channel runs', () => {
         crashes: 1,
         interactive: [],
         needsSecret: true,
-        asked: 0,
         whileRunning: () => store.deleteSecret(secretName),
       });
       const gone = await run(['relay', '--bot', qq, '--allow-file-store'], { interactive: true });
       expect(gone.code).toBe(0);
       expect(fake.interactive).toEqual([true, false]);
-      expect(fake.asked).toBe(0);
       expect(store.getSecret(secretName)).toBeFalsy();
       expect(fake.opened).toHaveLength(1);
     } finally {
@@ -827,7 +850,6 @@ describe('the flow every channel runs', () => {
         handle: undefined,
         interactive: undefined,
         needsSecret: undefined,
-        asked: undefined,
         whileRunning: undefined,
       });
       if (secret) store.setSecret(secretName, secret);

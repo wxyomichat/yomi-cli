@@ -57,7 +57,7 @@
   - QQ：在 QQ 开放平台（q.qq.com）的机器人设置里重置 AppSecret（之后 `yomi relay --channel qq --set-app`），见 [relay-qq.md](relay-qq.md)；
   - 微信：在手机微信里解除 ClawBot 的绑定，见 [relay-wechat.md](relay-wechat.md)。
 
-  还能用这台电脑时，先停掉正在运行的 relay，再对用过的每个通道运行 `yomi relay --channel <通道> --forget`（`--telegram --forget` 也一样；微信不需要 `--experimental`），删除本机这个通道的凭证、配对信息和后台服务。
+  还能用这台电脑时，先停掉正在运行的 relay，再运行 `yomi relay --forget --all`，删除本机所有 bot 的凭证、配对信息、花费记录和后台服务（只删一个：`yomi relay --forget --bot <名字>`）。
 
 - 服务端提供设备列表和按设备撤销之后，CLI 会跟进。
 

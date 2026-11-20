@@ -14,7 +14,8 @@ import {
   TelegramError,
   type TelegramUpdate,
 } from '../telegram.js';
-import type { ChannelSetup } from './setup.js';
+import type { BotRecord } from '../registry.js';
+import { botCommand, type ChannelSetup, type CredentialRequest } from './setup.js';
 import {
   type AskRef,
   type BotCommand,
@@ -52,7 +53,11 @@ export type TelegramChannelOptions = {
   /** Minimum time between two calls in the chat. */
   intervalMs: number;
   pollTimeoutSeconds: number;
+  /** What sets this bot's token again, said when Telegram refuses it (the channel's by default). */
+  renewCommand?: string;
 };
+
+const SET_TOKEN = 'yomi relay --telegram --set-token';
 
 /** All a Telegram reply needs is the chat, which every send names anyway. */
 type TelegramContext = ReplyContext & { channel: 'telegram' };
@@ -140,16 +145,18 @@ export class TelegramChannel implements RelayChannel {
               'Outro programa está recebendo mensagens com este bot (Telegram 409). Só é possível executar um relay por bot.',
             ),
           );
-        if (error instanceof TelegramError && error.unauthorized)
+        if (error instanceof TelegramError && error.unauthorized) {
+          const again = this.options.renewCommand ?? SET_TOKEN;
           throw new RelayStopped(
             'token',
             tr(
-              'Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 yomi relay --telegram --set-token 重新设置。',
-              'Telegram does not accept this bot token (it may have been reset in BotFather). Set it again with yomi relay --telegram --set-token.',
-              'Telegram no acepta este token de bot (puede que se haya restablecido en BotFather). Vuelve a configurarlo con yomi relay --telegram --set-token.',
-              'O Telegram não aceita este token de bot (ele pode ter sido redefinido no BotFather). Configure-o novamente com yomi relay --telegram --set-token.',
+              `Telegram 不认这个 bot token（可能在 BotFather 里重置了）。请用 ${again} 重新设置。`,
+              `Telegram does not accept this bot token (it may have been reset in BotFather). Set it again with ${again}.`,
+              `Telegram no acepta este token de bot (puede que se haya restablecido en BotFather). Vuelve a configurarlo con ${again}.`,
+              `O Telegram não aceita este token de bot (ele pode ter sido redefinido no BotFather). Configure-o novamente com ${again}.`,
             ),
           );
+        }
         host.log(
           tr(
             `Telegram 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
@@ -388,14 +395,21 @@ export const telegramSetup: ChannelSetup = {
     return tr('bot token', 'bot token', 'token del bot', 'token do bot');
   },
   secretName,
+  credentialsFlag: '--set-token',
 
-  wantsCredentials: (options: RelayCommandOptions) => options.setToken,
-
-  async setCredentials(context: Context, options: RelayCommandOptions) {
+  async setCredentials(context: Context, request: CredentialRequest) {
     const { io, store } = context;
-    const token = await askToken(context, options.tokenStdin);
+    const token = await askToken(context, request.options.tokenStdin);
+    // The token names its bot: another one than asked for is refused before Telegram is asked.
+    const stored = telegramSetup.storedBot(token)!;
+    request.check(stored);
     const { me } = await verifiedBot(token);
-    store.setSecret(secretName(context.account), token);
+    const record = request.save({
+      secret: token,
+      stored,
+      identity: { id: String(me.id), name: me.first_name, handle: me.username ?? '' },
+    });
+    if (request.atStart) return record;
     say(
       io,
       tr(
@@ -405,38 +419,27 @@ export const telegramSetup: ChannelSetup = {
         `Token de @${me.username ?? me.first_name} salvo (${store.kind === 'file' ? 'arquivo local, modo 0600' : 'Keychain do sistema'}).`,
       ),
     );
+    // An added bot pairs by its name: the channel's command asks which once it has several, and
+    // a background service running is stopped for the pairing and started again (said).
+    const next = request.renew ? 'yomi relay --telegram' : botCommand(record, '--pair');
     say(
       io,
       tr(
-        '接下来运行 yomi relay --telegram，在 Telegram 里完成配对。',
-        'Next, run yomi relay --telegram and finish pairing in Telegram.',
-        'A continuación, ejecuta yomi relay --telegram y completa la vinculación en Telegram.',
-        'Em seguida, execute yomi relay --telegram e conclua o pareamento no Telegram.',
+        `接下来运行 ${next}，在 Telegram 里完成配对。`,
+        `Next, run ${next} and finish pairing in Telegram.`,
+        `A continuación, ejecuta ${next} y completa la vinculación en Telegram.`,
+        `Em seguida, execute ${next} e conclua o pareamento no Telegram.`,
       ),
     );
-    return { id: String(me.id), name: me.first_name, handle: me.username ?? '' };
+    return record;
   },
 
-  async open(context: Context, options: RelayCommandOptions) {
-    const { io, store } = context;
-    let token = store.getSecret(secretName(context.account));
+  async open(context: Context, record: BotRecord, options: RelayCommandOptions) {
+    const token = context.store.getSecret(record.secretName);
     if (!token) {
-      if (!io.interactive && !options.tokenStdin) {
-        // A service restarting would not fix this: say so and end without failing.
-        warn(
-          io,
-          tr(
-            '还没有设置 bot token：先运行 yomi relay --telegram --set-token',
-            'No bot token set yet: run yomi relay --telegram --set-token first',
-            'Todavía no hay un token de bot configurado: ejecuta primero yomi relay --telegram --set-token',
-            'Ainda não há token de bot configurado: execute primeiro yomi relay --telegram --set-token',
-          ),
-        );
-        return null;
-      }
-      token = await askToken(context, options.tokenStdin);
-      await verifiedBot(token);
-      store.setSecret(secretName(context.account), token);
+      // A service restarting would not fix this: say so and end without failing.
+      warn(context.io, telegramSetup.missingCredentials(record));
+      return null;
     }
     const bot = new TelegramBot(token, { apiOrigin: process.env.YOMI_TELEGRAM_API_ORIGIN });
     // The Relay built this from the bot before channels, with the command's timings.
@@ -444,7 +447,18 @@ export const telegramSetup: ChannelSetup = {
       drafts: options.drafts,
       intervalMs: 1000,
       pollTimeoutSeconds: 25,
+      renewCommand: botCommand(record, '--set-token'),
     });
+  },
+
+  missingCredentials: (record?: BotRecord) => {
+    const command = record ? botCommand(record, '--set-token') : SET_TOKEN;
+    return tr(
+      `还没有设置 bot token：先运行 ${command}`,
+      `No bot token set yet: run ${command} first`,
+      `Todavía no hay un token de bot configurado: ejecuta primero ${command}`,
+      `Ainda não há token de bot configurado: execute primeiro ${command}`,
+    );
   },
 
   async verify(channel) {
@@ -455,8 +469,6 @@ export const telegramSetup: ChannelSetup = {
       throw error;
     }
   },
-
-  lockNameOf: (secret: string) => (BOT_TOKEN.test(secret) ? secret.split(':')[0] : null),
 
   /** The bot id is the token's first part: the scope, the lock and the platform id at once. */
   storedBot(secret: string) {
@@ -504,13 +516,15 @@ export const telegramSetup: ChannelSetup = {
     say(io);
   },
 
-  unpairedHint: () =>
-    tr(
-      '还没有配对：请在终端里运行一次 yomi relay --telegram，按提示在 Telegram 里发送配对码。',
-      'Not paired yet: run yomi relay --telegram once in a terminal and send the pairing code in Telegram as prompted.',
-      'Todavía no está vinculado: ejecuta yomi relay --telegram una vez en una terminal y envía el código de vinculación en Telegram según las indicaciones.',
-      'Ainda não pareado: execute yomi relay --telegram uma vez em um terminal e envie o código de pareamento no Telegram conforme indicado.',
-    ),
+  unpairedHint: (record?: BotRecord) => {
+    const command = record ? botCommand(record, '--pair') : 'yomi relay --telegram';
+    return tr(
+      `还没有配对：请在终端里运行一次 ${command}，按提示在 Telegram 里发送配对码。`,
+      `Not paired yet: run ${command} once in a terminal and send the pairing code in Telegram as prompted.`,
+      `Todavía no está vinculado: ejecuta ${command} una vez en una terminal y envía el código de vinculación en Telegram según las indicaciones.`,
+      `Ainda não pareado: execute ${command} uma vez em um terminal e envie o código de pareamento no Telegram conforme indicado.`,
+    );
+  },
 
   serviceArgs: (options: RelayCommandOptions) => ({
     lead: ['--telegram'],

@@ -13,10 +13,12 @@ import { acquireProcessLock, type LockNote } from '../src/core/lock.js';
 import { sha256 } from '../src/core/state.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { type MockTelegram, startMockTelegram } from '../src/mock/telegram.js';
-import type { ChannelKind } from '../src/relay/channels/index.js';
+import { type ChannelKind, channelSetup } from '../src/relay/channels/index.js';
+import { BotRegistry } from '../src/relay/registry.js';
 import { servicePlan } from '../src/relay/service.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
+import { registerFake } from './helpers/fakeBots.js';
 import { type FakeSwitch, StoppingChannel } from './helpers/fakeSetup.js';
 import { memoryIo } from './helpers/io.js';
 
@@ -24,10 +26,10 @@ import { memoryIo } from './helpers/io.js';
  * One relay per Yomi account and environment, whatever the channel, Telegram included (design
  * §5.2, decision §12.2): every relay holds the environment's lock (`relay-env-<sha256(account)
  * [0:16]>.lock`) besides its bot's; a second relay is refused with the channel, bot and process
- * of the one that runs; `--set-app` and `--login` are refused while a relay runs (and hold the
- * lock themselves); `--install-service` is refused beside another channel's installed service;
- * the lock of a process that is gone is taken over. QQ and WeChat run as scripted channels
- * (`fakeSetup`), Telegram against the mock Bot API.
+ * of the one that runs; setting credentials (`--set-token`, `--set-app`, `--login`) is refused
+ * while a relay runs in a terminal (and holds the lock itself); `--install-service` is refused
+ * beside another channel's installed service; the lock of a process that is gone is taken over.
+ * QQ and WeChat run as scripted channels (`fakeSetup`), Telegram against the mock Bot API.
  */
 
 const fake: FakeSwitch = vi.hoisted(() => ({ on: false, opened: [] }));
@@ -56,9 +58,9 @@ function setEnv(values: Record<string, string>) {
   }
 }
 
-async function run(args: string[]) {
+async function run(args: string[], options: Parameters<typeof memoryIo>[0] = {}) {
   process.exitCode = undefined;
-  const terminal = memoryIo();
+  const terminal = memoryIo(options);
   const code = await main(args, terminal.io);
   return { code, out: terminal.out, err: terminal.err };
 }
@@ -103,9 +105,10 @@ const context = () => createContext(memoryIo().io, {});
 const environmentLock = () =>
   join(configDir(), 'locks', `relay-env-${sha256(context().account).slice(0, 16)}.lock`);
 
-/** Gives a scripted channel's relay an owner, as a pairing or login would. */
+/** Registers a scripted channel's bot and gives it an owner, as a pairing or login would. */
 function paired(kind: 'qq' | 'wechat') {
   const { account } = context();
+  registerFake(account, kind);
   const scope = `fake:${kind}`;
   new RelayState(relayStatePath(account, scope), scope, account, kind).update({
     owner: { userId: 'owner-1', chatId: 'owner-1', name: '', language: '', pairedAt: Date.now() },
@@ -184,6 +187,7 @@ afterAll(async () => {
 describe('one relay per Yomi account and environment', () => {
   it('refuses a second relay, whatever its channel, naming the channel, bot and process that runs', async () => {
     paired('qq');
+    registerFake(context().account, 'wechat');
     const running = await startTelegram();
     try {
       // The lock says who holds it: the bots of the relay (by channel, name and label), its
@@ -213,14 +217,23 @@ describe('one relay per Yomi account and environment', () => {
 
       // A second Telegram bot of the same environment too (it ran beside the first before).
       const { store, account } = context();
+      const added = BotRegistry.open(account).add(
+        {
+          kind: 'telegram',
+          stored: channelSetup('telegram').storedBot(other.token)!,
+          label: '@lin_other_bot',
+          handle: 'lin_other_bot',
+        },
+        (record) => store.setSecret(record.secretName, other.token),
+      );
       setEnv({ YOMI_TELEGRAM_API_ORIGIN: other.origin });
-      store.setSecret(`telegram-bot:${account}`, other.token);
       let second;
       try {
-        second = await run(['relay', '--telegram', '--allow-file-store']);
+        second = await run(['relay', '--bot', added.name, '--allow-file-store']);
       } finally {
         setEnv({ YOMI_TELEGRAM_API_ORIGIN: tg.origin });
-        store.setSecret(`telegram-bot:${account}`, tg.token);
+        BotRegistry.open(account).remove(added.key);
+        store.deleteSecret(added.secretName);
       }
       expect(second.code).toBe(1);
       expect(second.err).toContain(
@@ -283,10 +296,18 @@ describe('one relay per Yomi account and environment', () => {
       expect(english.err).toContain(
         `Relay is running (Telegram bot @lin_env_bot, process ${process.pid}): stop it first (Ctrl+C, or yomi relay --telegram --uninstall-service), then --set-app.`,
       );
-      // Telegram's own --set-token is not affected (here it stops at the keychain check).
-      const token = await run(['relay', '--telegram', '--set-token', '--token-stdin']);
-      expect(token.err).toContain('--allow-file-store');
-      expect(token.err).not.toContain('relay 正在运行');
+      // --set-token too, once past the keychain check (before it, the keychain is the refusal).
+      const keychain = await run(['relay', '--telegram', '--set-token', '--token-stdin']);
+      expect(keychain.err).toContain('--allow-file-store');
+      expect(keychain.err).not.toContain('relay 正在运行');
+      const token = await run(
+        ['relay', '--telegram', '--set-token', '--token-stdin', '--allow-file-store'],
+        { input: [tg.token] },
+      );
+      expect(token.code).toBe(1);
+      expect(token.err).toContain(
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --set-token。`,
+      );
       // The real QQ setup (no fake) is refused the same way, before it asks for anything.
       fake.on = false;
       const real = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);

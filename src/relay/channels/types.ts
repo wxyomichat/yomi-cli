@@ -236,12 +236,16 @@ export interface RelayChannel {
   readonly kind: ChannelKind;
   /**
    * Relay state scope: `relay/<sha256(account|scope)[0:16]>.json`, LocalState `relay|<account>|<scope>`,
-   * image record key. Telegram: the bot id (unchanged); QQ: `qq:<AppID>`; WeChat:
-   * `wx:<sha256(ilink_user_id)[0:16]>` — the owner, not the bot, because a re-login may change
-   * ilink_bot_id.
+   * image record key. Telegram: the bot id (unchanged); QQ: `qq:<AppID>`; WeChat: its registry
+   * record's, `bot:<key>` for a ClawBot added under the registry (one person may link several),
+   * `wx:<sha256(ilink_user_id)[0:16]>` for a login of before it (the owner, not the bot, because a
+   * re-login may change ilink_bot_id).
    */
   readonly scope: string;
-  /** `locks/relay-<lockName>.lock`. Telegram: bot id (unchanged); QQ: `qq-<AppID>`; WeChat: `wx-<same 16 hex>`. */
+  /**
+   * `locks/relay-<lockName>.lock`. Telegram: bot id (unchanged); QQ: `qq-<AppID>`; WeChat:
+   * `bot-<key>`, or `wx-<same 16 hex>` for a login of before the registry.
+   */
   readonly lockName: string;
   /** 'Telegram', 'QQ', tr('微信', 'WeChat', 'WeChat', 'WeChat'). Used in logs and texts. */
   readonly displayName: string;

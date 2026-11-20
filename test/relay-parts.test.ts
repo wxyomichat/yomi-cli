@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
@@ -14,7 +14,14 @@ import { type CharacterProfile, ChatRefusal, refusalOf } from '../src/chat/api.j
 import { cutText, htmlToText, introductionOf } from '../src/chat/introduction.js';
 import { PairingCode } from '../src/relay/pairing.js';
 import { unknownOutcome } from '../src/relay/relay.js';
-import { installService, servicePlan, uninstallService } from '../src/relay/service.js';
+import {
+  installService,
+  pauseService,
+  resumeService,
+  servicePid,
+  servicePlan,
+  uninstallService,
+} from '../src/relay/service.js';
 import { forgetRelayStates, RelayState, relayStatePath } from '../src/relay/state.js';
 import { type BudgetStatus, relayTexts } from '../src/relay/texts.js';
 
@@ -98,6 +105,50 @@ describe('the background service', () => {
     // systemd does not expand variables in Environment=, only in ExecStart.
     expect(plan.content).toContain('Environment="NOTE=100%% $HOME"');
     expect(plan.content).toContain('Restart=on-failure');
+  });
+
+  it('stops a running service for a change and starts it again, and says which process it runs as', () => {
+    const home = mkdtempSync(join(tmpdir(), 'yomi-home-'));
+    const ran: string[] = [];
+    const runner =
+      (output: string, status = 0) =>
+      (command: string, args: string[]) => {
+        ran.push([command, ...args].join(' '));
+        return { status, output };
+      };
+    const mac = servicePlan({ ...base, platform: 'darwin', home, uid: 501 });
+    // Not installed: nobody is asked.
+    expect(servicePid(mac, runner('pid = 4321'))).toBe(0);
+    expect(ran).toEqual([]);
+    mkdirSync(dirname(mac.path), { recursive: true });
+    writeFileSync(mac.path, mac.content);
+    expect(servicePid(mac, runner('state = running\n\tpid = 4321\n'))).toBe(4321);
+    expect(servicePid(mac, runner('state = not running'))).toBe(0);
+    expect(servicePid(mac, runner('', 113))).toBe(0);
+    ran.length = 0;
+    pauseService(mac, runner(''));
+    expect(resumeService(mac, runner(''))).toBe(true);
+    expect(resumeService(mac, runner('Bootstrap failed', 5))).toBe(false);
+    expect(ran.slice(0, 2)).toEqual([
+      `launchctl bootout gui/501/${mac.label}`,
+      `launchctl bootstrap gui/501 ${mac.path}`,
+    ]);
+    // The unit stays installed.
+    expect(readFileSync(mac.path, 'utf8')).toBe(mac.content);
+    const linux = servicePlan({ ...base, platform: 'linux', home, uid: 1000 });
+    expect(linux.pid).toEqual([
+      'systemctl',
+      '--user',
+      'show',
+      '--property',
+      'MainPID',
+      '--value',
+      linux.label,
+    ]);
+    expect([linux.pause, linux.resume]).toEqual([
+      ['systemctl', '--user', 'stop', linux.label],
+      ['systemctl', '--user', 'start', linux.label],
+    ]);
   });
 
   it('installs and removes through the runner, leaving the directory mode alone', () => {

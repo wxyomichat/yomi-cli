@@ -1,13 +1,13 @@
 import type { Context } from '../../commands/context.js';
-import type { RelayCommandOptions } from '../../commands/relay.js';
 import { asciiJson } from '../../core/credentials.js';
 import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
 import { sha256 } from '../../core/state.js';
 import { readLine } from '../../core/prompt.js';
-import { confirm, type Io, paint, say } from '../../core/ui.js';
-import { RelayState, relayStatePath } from '../state.js';
+import { confirm, type Io, paint, say, warn } from '../../core/ui.js';
+import type { BotRecord } from '../registry.js';
 import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
+import type { CredentialRequest } from './setup.js';
 import {
   isLoopbackOrigin,
   trustedUrl,
@@ -20,16 +20,22 @@ import {
 /**
  * `yomi relay --channel wechat --experimental --login` (design §10.2): the QR login, at a
  * terminal only, while the environment's lock is held (commands/relay.ts). Whoever scans becomes
- * the relay's owner and spends this Yomi account's gems by Yomi's normal rules (no cap unless the
- * relay runs with --max-spend), so the code is treated like a password: the link is printed only with `--qr-link` (or when the terminal is too narrow to draw
- * the code), the drawing and the link are erased from the terminal when the flow ends, and the
- * `qrcode` value is never logged or stored. At most three codes per login (a code expires, or
- * the phone's digits were wrong too often), eight minutes in all. On `confirmed` the login is
- * kept in the keychain and the scanner's relay state gets them as its owner, unless it already
- * has one (the same person keeps their budget, pending charge and records).
+ * the bot's owner and spends this Yomi account's gems by Yomi's normal rules (no cap unless the
+ * relay runs with --max-spend), so the code is treated like a password: the link is printed only
+ * with `--qr-link` (or when the terminal is too narrow to draw the code), the drawing and the link
+ * are erased from the terminal when the flow ends, and the `qrcode` value is never logged or
+ * stored. At most three codes per login (a code expires, or the phone's digits were wrong too
+ * often), eight minutes in all.
+ *
+ * One WeChat account may link several ClawBots: each scan that WeChat confirms for a new ClawBot
+ * adds a bot (`--login --character ID`), and `--login --bot NAME` signs that one bot in again,
+ * sending only its token (multi-bot design §1.2). WeChat names no bot when it answers that the
+ * ClawBot is bound here already (`binded_redirect`): signing a bot in again keeps its login, and
+ * adding one writes nothing. On `confirmed` the command keeps the login (`CredentialRequest.save`)
+ * and the bot's state gets the scanner as its owner, unless it already has them (the same person
+ * keeps their budget, pending charge and records); another scanner of the same bot replaces its
+ * owner, whose budget and records go.
  */
-
-const secretName = (account: string) => `wechat-ilink:${account}`;
 
 /** What `--login` keeps in the keychain (design §5.3). */
 export type WechatCredentials = {
@@ -238,7 +244,7 @@ function show(screen: Screen, io: Io, link: string, qrLink: boolean, count: numb
 export async function qrLogin(
   io: Io,
   options: QrLoginOptions,
-  storedToken: string | null,
+  storedTokens: string[],
 ): Promise<QrLoginResult> {
   const api = new WechatLoginApi(wechatOrigin(options.apiOrigin), options.fetch);
   const loopback = isLoopbackOrigin(api.origin);
@@ -266,7 +272,7 @@ export async function qrLogin(
             `${maxCodes} códigos QR passaram sem login: execute --login de novo.`,
           ),
         );
-      const code = await api.qrCode(storedToken ? [storedToken] : [], signal);
+      const code = await api.qrCode(storedTokens, signal);
       show(screen, io, code.qrcode_img_content, options.qrLink, codes);
       let origin = api.origin;
       let verifyCode = '';
@@ -429,13 +435,13 @@ async function agreed(io: Io): Promise<boolean> {
 
 export type WechatLoginSeams = Omit<QrLoginOptions, 'qrLink' | 'apiOrigin' | 'signal'>;
 
-/** `--login`: the notice, the QR flow, then the keychain and the owner. */
+/** `--login`: the notice, the QR flow, then the login kept and the owner. */
 export async function wechatLogin(
   context: Context,
-  options: RelayCommandOptions,
+  request: CredentialRequest,
   seams: WechatLoginSeams = {},
-): Promise<void> {
-  const { io, store, account } = context;
+): Promise<BotRecord | null> {
+  const { io, store } = context;
   if (!io.interactive)
     throw new UsageError(
       tr(
@@ -447,9 +453,11 @@ export async function wechatLogin(
     );
   if (!(await agreed(io))) {
     say(io, cancelled().message);
-    return;
+    return null;
   }
-  const storedToken = parseCredentials(store.getSecret(secretName(account)))?.botToken ?? null;
+  // The tokens this computer holds go with the request for a code: a ClawBot already linked here
+  // is answered `binded_redirect`, never linked a second time.
+  const tokens = request.stored.flatMap((secret) => parseCredentials(secret)?.botToken ?? []);
   // Ctrl+C ends the flow cleanly, so the code is erased from the terminal.
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -460,11 +468,11 @@ export async function wechatLogin(
       io,
       {
         ...seams,
-        qrLink: options.qrLink,
+        qrLink: request.options.qrLink,
         apiOrigin: process.env.YOMI_WECHAT_API_ORIGIN,
         signal: controller.signal,
       },
-      storedToken,
+      tokens,
     );
   } catch (error) {
     if (controller.signal.aborted) throw cancelled();
@@ -474,14 +482,26 @@ export async function wechatLogin(
     process.removeListener('SIGINT', stop);
   }
   if (result.kind === 'bound') {
-    if (storedToken)
-      return void say(
+    if (request.renew && tokens.length) {
+      say(
         io,
         tr(
           '微信说这个 ClawBot 已经绑定在这台电脑上：保留已经保存的登录。',
           'WeChat says this ClawBot is already bound here: kept the saved login.',
           'WeChat dice que este ClawBot ya está vinculado aquí: se mantiene el inicio de sesión guardado.',
           'O WeChat diz que este ClawBot já está vinculado aqui: o login salvo foi mantido.',
+        ),
+      );
+      return null;
+    }
+    // Which of this computer's ClawBots it is, WeChat does not say: nothing is written.
+    if (tokens.length)
+      throw new UsageError(
+        tr(
+          '微信说这个 ClawBot 已经是这台电脑上的一个 bot 了，没有保存任何东西。要重新登录它，运行 yomi relay --bot 名字 --login（名字见 yomi relay --list）。',
+          'WeChat says this ClawBot is one of the bots on this computer already, so nothing was saved. To sign it in again, run yomi relay --bot NAME --login (the names are in yomi relay --list).',
+          'WeChat dice que este ClawBot ya es uno de los bots de este equipo, así que no se guardó nada. Para volver a iniciar su sesión, ejecuta yomi relay --bot NOMBRE --login (los nombres están en yomi relay --list).',
+          'O WeChat diz que este ClawBot já é um dos bots deste computador, então nada foi salvo. Para entrar com ele de novo, execute yomi relay --bot NOME --login (os nomes estão em yomi relay --list).',
         ),
       );
     throw new UsageError(
@@ -494,24 +514,37 @@ export async function wechatLogin(
     );
   }
   const { credentials } = result;
-  store.setSecret(secretName(account), asciiJson(credentials));
-  const scope = wechatScope(credentials.ilinkUserId);
-  const state = new RelayState(relayStatePath(account, scope), scope, account, 'wechat');
-  const fresh = !state.data.owner;
-  // The same person keeps their owner record, budget, pending charge and queue: never reset here.
-  // A new owner is owed the welcome, given before the answer to their first message.
-  if (fresh)
-    state.bindOwner({
-      userId: credentials.ilinkUserId,
-      chatId: credentials.ilinkUserId,
-      name: '',
-      language: '',
-      pairedAt: Date.now(),
-    });
-  // A new login starts healthy: an hour's pause or a count of stale logins is the old one's.
-  const channel = state.channelStore();
-  if (channel.get('pausedUntil') !== undefined) channel.set('pausedUntil', undefined);
-  if (channel.get('expiredCount') !== undefined) channel.set('expiredCount', undefined);
+  const secret = asciiJson(credentials);
+  const stored = {
+    platformId: credentials.ilinkBotId,
+    scope: wechatScope(credentials.ilinkUserId),
+    lockName: `wx-${ownerHash(credentials.ilinkUserId)}`,
+  };
+  request.check(stored);
+  let fresh = false;
+  let replaced = false;
+  const identity = { id: credentials.ilinkBotId, name: '', handle: '' };
+  const record = request.save({ secret, stored, identity }, (state) => {
+    // Another person scanned this bot: its owner, their budget and records go.
+    const owner = state.data.owner;
+    replaced = Boolean(owner && String(owner.userId) !== credentials.ilinkUserId);
+    if (replaced) state.resetOwner();
+    fresh = !state.data.owner;
+    // The same person keeps their owner record, budget, pending charge and queue. A new owner is
+    // owed the welcome, given before the answer to their first message.
+    if (fresh)
+      state.bindOwner({
+        userId: credentials.ilinkUserId,
+        chatId: credentials.ilinkUserId,
+        name: '',
+        language: '',
+        pairedAt: Date.now(),
+      });
+    // A new login starts healthy: an hour's pause or a count of stale logins is the old one's.
+    const channel = state.channelStore();
+    if (channel.get('pausedUntil') !== undefined) channel.set('pausedUntil', undefined);
+    if (channel.get('expiredCount') !== undefined) channel.set('expiredCount', undefined);
+  });
   say(
     io,
     tr(
@@ -521,6 +554,16 @@ export async function wechatLogin(
       `Login do WeChat ClawBot salvo (${store.kind === 'file' ? 'arquivo local, modo 0600' : 'Keychain do sistema'}).`,
     ),
   );
+  if (replaced)
+    warn(
+      io,
+      tr(
+        `bot ${record.name} 换了一个微信号扫码：之前的主人、预算和记录已清除。`,
+        `Another WeChat account scanned for the bot ${record.name}: its previous owner, budget and records were removed.`,
+        `Otra cuenta de WeChat escaneó para el bot ${record.name}: se eliminaron su dueño anterior, su presupuesto y sus registros.`,
+        `Outra conta do WeChat escaneou para o bot ${record.name}: o dono anterior, o orçamento e os registros dele foram removidos.`,
+      ),
+    );
   say(
     io,
     fresh
@@ -537,13 +580,15 @@ export async function wechatLogin(
           'A mesma conta do WeChat de antes: o registro de dono, o orçamento e os registros foram mantidos.',
         ),
   );
-  say(
-    io,
-    tr(
-      '接下来运行 yomi relay --channel wechat --experimental（可以加 --character 和 --max-spend）。',
-      'Next, run yomi relay --channel wechat --experimental (with --character and --max-spend as needed).',
-      'A continuación, ejecuta yomi relay --channel wechat --experimental (con --character y --max-spend si hace falta).',
-      'Em seguida, execute yomi relay --channel wechat --experimental (com --character e --max-spend se precisar).',
-    ),
-  );
+  if (!request.atStart)
+    say(
+      io,
+      tr(
+        '接下来运行 yomi relay --channel wechat --experimental（可以加 --character 和 --max-spend）。',
+        'Next, run yomi relay --channel wechat --experimental (with --character and --max-spend as needed).',
+        'A continuación, ejecuta yomi relay --channel wechat --experimental (con --character y --max-spend si hace falta).',
+        'Em seguida, execute yomi relay --channel wechat --experimental (com --character e --max-spend se precisar).',
+      ),
+    );
+  return record;
 }

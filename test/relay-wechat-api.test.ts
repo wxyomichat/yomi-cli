@@ -350,11 +350,16 @@ describe('the saved login', () => {
     expect(channel.scope).toBe(wechatScope('o@im.wechat'));
     expect(channel.scope).toMatch(/^wx:[0-9a-f]{16}$/);
     expect(channel.lockName).toBe(`wx-${channel.scope.slice(3)}`);
-    expect(wechatSetup.lockNameOf(secret)).toBe(channel.lockName);
-    // Another bot of the same scanner: the same relay state.
+    expect(wechatSetup.storedBot(secret)?.lockName).toBe(channel.lockName);
+    // Another bot of the same scanner: the same relay state, for a login of before the registry.
     expect(new WechatChannel({ ...credentials, ilinkBotId: 'other@im.bot' }).scope).toBe(
       channel.scope,
     );
+    // A ClawBot added under the registry has its record's own.
+    const own = new WechatChannel(credentials, {
+      place: { scope: 'bot:0123456789ab', lockName: 'bot-0123456789ab' },
+    });
+    expect([own.scope, own.lockName]).toEqual(['bot:0123456789ab', 'bot-0123456789ab']);
     expect(channel.caps).toMatchObject({ maxText: 2000, quotes: false, pairing: 'login' });
     expect(wechatSetup.serviceArgs({} as never)).toEqual({
       lead: ['--channel', 'wechat', '--experimental'],
@@ -397,7 +402,7 @@ describe('the QR on screen', () => {
 
   it('is erased from a terminal when the login ends, link and all', async () => {
     const screen = terminal(120);
-    const pending = qrLogin(screen.io, { qrLink: true, apiOrigin: wx.origin }, null);
+    const pending = qrLogin(screen.io, { qrLink: true, apiOrigin: wx.origin }, []);
     await screen.waitFor(/用手机微信扫上面的二维码并确认/);
     const link = wx.qrcodes.at(-1)!;
     wx.scan();
@@ -415,7 +420,7 @@ describe('the QR on screen', () => {
 
   it('prints the link instead when the terminal is too narrow to draw the code, and erases every row of it', async () => {
     const screen = terminal(30);
-    const pending = qrLogin(screen.io, { qrLink: false, apiOrigin: wx.origin }, null);
+    const pending = qrLogin(screen.io, { qrLink: false, apiOrigin: wx.origin }, []);
     await screen.waitFor(/终端太窄，画不下二维码/);
     const link = wx.qrcodes.at(-1)!;
     expect(screen.out).toContain(link);

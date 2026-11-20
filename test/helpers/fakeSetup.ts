@@ -1,4 +1,5 @@
-import type { ChannelSetup } from '../../src/relay/channels/setup.js';
+import type { ChannelSetup, CredentialRequest } from '../../src/relay/channels/setup.js';
+import type { BotRecord } from '../../src/relay/registry.js';
 import {
   type BotIdentity,
   type ChannelKind,
@@ -10,8 +11,9 @@ import { FakeChannel } from './fakeChannel.js';
 /**
  * A channel's real `ChannelSetup` with its channel swapped for a `FakeChannel` while a test says
  * so: `yomi relay --channel <kind>` then runs its whole flow (flags, keychain check, sign-in,
- * production, lock, pairing, start-up lines, the relay itself) on a scripted channel, with the
- * setup's own names, texts, service words and lock. Used with `vi.mock` on the channel's module:
+ * production, locks, pairing, start-up lines, the relay itself) on a scripted channel for a bot
+ * registered with `registerFake`, with the setup's own names, texts and service words. Used with
+ * `vi.mock` on the channel's module:
  *
  *   const fake = vi.hoisted(() => ({ on: false, opened: [] }));
  *   vi.mock('../src/relay/channels/qq.js', async (importOriginal) => {
@@ -27,10 +29,10 @@ export type FakeSwitch = {
   /** The channels open() gave, in order. */
   opened: FakeChannel[];
   /**
-   * Run in place of the real setCredentials (--set-app, --login) while `on`; none: nothing is
-   * asked or saved.
+   * Run in place of the real setCredentials (--set-app, --login) while `on`, with what the command
+   * asked for (it may keep a bot with `request.save`); none: nothing is asked or saved.
    */
-  setCredentials?: () => void | Promise<void>;
+  setCredentials?: (request: CredentialRequest) => void | Promise<void>;
   /** Run by each StoppingChannel as its relay asks for events (the relay runs), before it stops. */
   whileRunning?: () => void;
   /** Channels whose open() fails (a network error, say). */
@@ -43,12 +45,8 @@ export type FakeSwitch = {
   handle?: string;
   /** Whether someone could be asked, by each open() (records it when set). */
   interactive?: boolean[];
-  /**
-   * open() needs the channel's stored secret, as a real one does: missing, it asks (counted in
-   * `asked`, storing what was typed) when someone can answer, else opens nothing.
-   */
+  /** open() needs the bot's stored secret, as a real one does: missing, it opens nothing. */
   needsSecret?: boolean;
-  asked?: number;
 };
 
 /** Connects, then stops the relay at once (`RelayStopped`) when it asks for events. */
@@ -79,32 +77,26 @@ export function fakeSetup(
   identity: BotIdentity = { id: '42', name: 'Lin bot', handle: '' },
 ): ChannelSetup {
   const overrides: Partial<ChannelSetup> = {
-    // The channel's own credential flag (the command checked which flags the channel takes).
-    wantsCredentials: (options) =>
-      fake.on ? options.setApp || options.login : real.wantsCredentials(options),
-    setCredentials: async (context, options) => {
-      if (!fake.on) return real.setCredentials(context, options);
-      await fake.setCredentials?.();
-      return null;
+    setCredentials: async (context, request) => {
+      if (!fake.on) return real.setCredentials(context, request);
+      let kept: BotRecord | null = null;
+      await fake.setCredentials?.({
+        ...request,
+        save: (bot, state) => (kept = request.save(bot, state)),
+      });
+      return kept;
     },
-    open: async (context, options) => {
-      if (!fake.on) return real.open(context, options);
+    open: async (context, record, options) => {
+      if (!fake.on) return real.open(context, record, options);
       fake.interactive?.push(context.io.interactive);
       if (fake.failOpen?.includes(real.kind)) throw new Error(`${real.kind} could not open`);
-      const secretName = real.secretName(context.account);
-      if (fake.needsSecret && !context.store.getSecret(secretName)) {
-        if (!context.io.interactive) return null;
-        fake.asked = (fake.asked ?? 0) + 1;
-        context.store.setSecret(secretName, 'typed in');
-      }
+      if (fake.needsSecret && !context.store.getSecret(record.secretName)) return null;
       const crashing = Boolean(fake.crashes);
       if (crashing) fake.crashes = (fake.crashes ?? 0) - 1;
+      const named = fake.handle ? { ...identity, handle: fake.handle } : identity;
       const channel = crashing
-        ? new CrashingChannel({ kind: real.kind, identity })
-        : new StoppingChannel({
-            kind: real.kind,
-            identity: fake.handle ? { ...identity, handle: fake.handle } : identity,
-          });
+        ? new CrashingChannel({ kind: real.kind, identity, scope: record.scope })
+        : new StoppingChannel({ kind: real.kind, identity: named, scope: record.scope });
       channel.whileRunning = fake.whileRunning ?? null;
       fake.opened.push(channel);
       return channel;

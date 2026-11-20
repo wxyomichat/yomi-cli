@@ -341,11 +341,18 @@ export class RelayState {
   }
 
   /**
-   * A new pairing: the next person agrees to spending afresh and sees none of the old replies. Who
-   * was welcomed stays: the same owner pairing again is not welcomed twice.
+   * A new pairing: the next person agrees to spending afresh and sees none of the old replies (nor
+   * what a channel still had queued for the owner before, or questions it asked them). Who was
+   * welcomed stays: the same owner pairing again is not welcomed twice.
    */
   resetOwner() {
+    const channel = this.data.channel ? { ...this.data.channel } : undefined;
+    if (channel) {
+      delete channel.queue;
+      delete channel.questions;
+    }
     this.update({
+      ...(channel ? { channel } : {}),
       owner: null,
       billing: freshBilling(),
       billingPause: '',

@@ -61,6 +61,8 @@ export type QqGatewayOptions = {
   session: { sessionId: string; seq: number } | null;
   intents?: number;
   timings?: Partial<QqGatewayTimings>;
+  /** What sets the AppSecret again, said when QQ refuses it (`tokenStopped`'s default). */
+  renewCommand?: string;
 };
 
 /** How one connection ended. */
@@ -124,14 +126,14 @@ export function gatewayStopped(code: number): RelayStopped {
 }
 
 /** QQ refused the AppID/AppSecret (token, REST 401, gateway 4004 twice). */
-export function tokenStopped(): RelayStopped {
+export function tokenStopped(again = 'yomi relay --channel qq --set-app'): RelayStopped {
   return new RelayStopped(
     'token',
     tr(
-      'QQ 不认这个 AppID/AppSecret（可能在 q.qq.com 重置了）。请用 yomi relay --channel qq --set-app 重新设置。',
-      'QQ does not accept this AppID/AppSecret (it may have been reset on q.qq.com). Set them again with yomi relay --channel qq --set-app.',
-      'QQ no acepta este AppID/AppSecret (puede que se haya restablecido en q.qq.com). Vuelve a configurarlos con yomi relay --channel qq --set-app.',
-      'O QQ não aceita este AppID/AppSecret (ele pode ter sido redefinido em q.qq.com). Configure-os novamente com yomi relay --channel qq --set-app.',
+      `QQ 不认这个 AppID/AppSecret（可能在 q.qq.com 重置了）。请用 ${again} 重新设置。`,
+      `QQ does not accept this AppID/AppSecret (it may have been reset on q.qq.com). Set them again with ${again}.`,
+      `QQ no acepta este AppID/AppSecret (puede que se haya restablecido en q.qq.com). Vuelve a configurarlos con ${again}.`,
+      `O QQ não aceita este AppID/AppSecret (ele pode ter sido redefinido em q.qq.com). Configure-os novamente com ${again}.`,
     ),
   );
 }
@@ -197,7 +199,8 @@ export class QqGateway {
       } catch (error) {
         if (error instanceof RelayStopped) throw error;
         if (signal.aborted) return;
-        if (error instanceof QqError && error.reason === 'unauthorized') throw tokenStopped();
+        if (error instanceof QqError && error.reason === 'unauthorized')
+          throw tokenStopped(this.options.renewCommand);
         log(
           tr(
             `QQ 暂时连不上，${Math.round(backoff / 1000)} 秒后重试`,
@@ -232,7 +235,7 @@ export class QqGateway {
       if (code === 4004) {
         // The token was refused: a new one, and the session is kept.
         authFailures += 1;
-        if (authFailures >= 2) throw tokenStopped();
+        if (authFailures >= 2) throw tokenStopped(this.options.renewCommand);
         this.options.api.tokens.invalidate();
         continue;
       }

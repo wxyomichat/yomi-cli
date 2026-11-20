@@ -84,10 +84,10 @@ async function signIn() {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-/** The QQ bot the registry holds for the saved AppID and AppSecret. */
-const registered = () => {
+/** The QQ bots the registry holds, by AppID. */
+const registered = (appId: string) => {
   const { account } = createContext(memoryIo().io, {});
-  return BotRegistry.open(account).bySecret('qq', `qq-bot:${account}`);
+  return BotRegistry.open(account).byPlatform('qq', appId);
 };
 const sends = () =>
   mock.state.requests.filter((request) => request.path === 'conversation/send_message');
@@ -252,21 +252,67 @@ describe('yomi relay --channel qq', () => {
     expect(badId.code).toBe(1);
     expect(badId.err).toContain('这不像是 QQ 机器人的 AppID');
 
-    // A bot without the private-chat intent: saved, with a warning.
+    // Set again for the channel's one bot: only its own AppID. Another one is refused before QQ
+    // is asked (no token, no probe), and nothing is saved.
     const closed = await startMockQq({ c2c: false, appId: '102000077' });
     try {
       setEnv({ YOMI_QQ_API_ORIGIN: closed.origin });
-      const warned = await run(
+      const refused = await run(
         ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+        { input: [closed.appId, closed.secret] },
+      );
+      expect(refused.code).toBe(1);
+      expect(refused.err).toContain('这些凭证属于另一个 bot');
+      expect(closed.identifies).toBe(0);
+      // Added as a bot of its own (a name given): saved, with a warning about its intents.
+      const warned = await run(
+        [
+          'relay',
+          '--channel',
+          'qq',
+          '--set-app',
+          '--bot',
+          'closed',
+          '--token-stdin',
+          '--allow-file-store',
+        ],
         { input: [closed.appId, closed.secret] },
       );
       expect(warned.code).toBe(0);
       expect(warned.err).toContain('这个 bot 还没有私聊（单聊）消息事件的权限');
-      // Another AppID: the channel's bot is that one now, never refused as another bot's.
-      expect(registered()).toMatchObject({ name: 'qq-0077', scope: 'qq:102000077' });
+      expect(warned.out).toContain('已添加 bot closed，还没有绑定角色');
+      expect(registered(closed.appId)).toMatchObject({ name: 'closed', scope: 'qq:102000077' });
       const listed = await run(['relay', '--list', '--channel', 'qq']);
-      expect(listed.out).toContain('qq-0077  QQ');
+      expect(listed.out).toContain('closed  QQ');
       expect(listed.out).not.toContain('凭证属于另一个 bot');
+      // Never added twice: refused before QQ is asked again.
+      const identifies = closed.identifies;
+      const twice = await run(
+        [
+          'relay',
+          '--channel',
+          'qq',
+          '--set-app',
+          '--bot',
+          'again',
+          '--token-stdin',
+          '--allow-file-store',
+        ],
+        { input: [closed.appId, closed.secret] },
+      );
+      expect(twice.code).toBe(1);
+      expect(twice.err).toContain('这个 bot 已经登记在这台电脑上了，名字是 "closed"');
+      expect(closed.identifies).toBe(identifies);
+      // Two bots now: which one to set again is asked.
+      const which = await run(
+        ['relay', '--channel', 'qq', '--set-app', '--token-stdin', '--allow-file-store'],
+        { input: [closed.appId, closed.secret] },
+      );
+      expect(which.code).toBe(1);
+      expect(which.err).toContain('QQ 有多个 bot（qq-0001、closed）');
+      const forgotten = await run(['relay', '--forget', '--bot', 'closed']);
+      expect(forgotten.code).toBe(0);
+      expect(registered(closed.appId)).toBeUndefined();
     } finally {
       setEnv({ YOMI_QQ_API_ORIGIN: qq.origin });
       await closed.shutdown();
@@ -276,8 +322,9 @@ describe('yomi relay --channel qq', () => {
       { input: [qq.appId, qq.secret] },
     );
     expect(again.code).toBe(0);
-    // Back to the first AppID: its bot again (the next test runs it).
-    expect(registered()).toMatchObject({ scope: `qq:${qq.appId}`, label: 'Lin QQ bot' });
+    // Its own AppID again: the same bot (the next test runs it).
+    expect(again.out).not.toContain('已添加');
+    expect(registered(qq.appId)).toMatchObject({ scope: `qq:${qq.appId}`, label: 'Lin QQ bot' });
   });
 
   it('pairs with /pair in the private chat, ignores strangers, and stops when QQ delists the bot', async () => {

@@ -16,6 +16,7 @@ import {
   MAX_BOTS_PER_KIND,
   migrateRegistry,
   registryPath,
+  sameBot,
 } from '../src/relay/registry.js';
 import {
   forgetRelayStates,
@@ -29,8 +30,9 @@ import { TelegramBot } from '../src/relay/telegram.js';
 /**
  * The bot registry (relay/registry.ts): the takeover of the bots each channel's credentials
  * stored before it (scope, secret name and lock kept, nothing else written, nothing resent), the
- * rule for two of them on one character, credentials set later (the same bot kept, another one
- * replacing it), the checks every change goes through, what each channel reads offline from a
+ * rule for two of them on one character, bots added later (a record, secret name and, for WeChat,
+ * a scope of their own; never twice for one bot; signed in again only with their own credentials),
+ * the checks every change goes through, what each channel reads offline from a
  * stored secret, and one character per bot (binding another one, whom a character was shown to,
  * the welcome it owes).
  */
@@ -114,7 +116,7 @@ describe('the takeover of the bots stored before the registry', () => {
       const setup = channelSetup(record.kind);
       expect(record.secretName).toBe(setup.secretName(ACCOUNT));
       expect(record.scope).toBe(scopes[record.kind]);
-      expect(record.lockName).toBe(setup.lockNameOf(store.getSecret(record.secretName)!));
+      expect(record.lockName).toBe(setup.storedBot(store.getSecret(record.secretName)!)!.lockName);
       expect(record.migratedFrom).toBe(record.kind);
       expect(record.createdAt).toBe(77);
       expect(record.generation).toBe(0);
@@ -216,14 +218,13 @@ describe('the takeover of the bots stored before the registry', () => {
     // An unusable username, and names already taken.
     legacyState(dir, 'telegram', { botUsername: '' });
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const qqBot = (appId: string, secretName: string) =>
-      registry.adopt({
+    const qqBot = (appId: string) =>
+      registry.add({
         kind: 'qq',
-        secretName,
         stored: { platformId: appId, scope: `qq:${appId}`, lockName: `qq-${appId}` },
-      }).record;
-    expect(qqBot('7770304', 'qq-bot:a').name).toBe('qq-0304');
-    const renamed = qqBot('8880304', 'qq-bot:b');
+      });
+    expect(qqBot('7770304').name).toBe('qq-0304');
+    const renamed = qqBot('8880304');
     expect(renamed.name).toBe('qq-0304-2');
     registry.commit((file) => {
       file.bots.find((record) => record.key === renamed.key)!.name = 'telegram';
@@ -242,104 +243,199 @@ describe('the takeover of the bots stored before the registry', () => {
   });
 });
 
-describe('credentials set later', () => {
+describe('bots added later', () => {
   const telegramBot = (platformId: string) => ({
     platformId,
     scope: platformId,
     lockName: platformId,
   });
+  const wechatBot = (platformId: string) => ({
+    ...channelSetup('wechat').storedBot(WECHAT_SECRET)!,
+    platformId,
+  });
 
-  it('keep the registered bot when they are its own, and replace it with the bot they belong to otherwise', () => {
+  it('get a record and a secret name of their own, never twice for one bot', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const secretName = channelSetup('telegram').secretName(ACCOUNT);
-    const first = registry.adopt({
-      kind: 'telegram',
-      secretName,
-      stored: telegramBot('7000000001'),
+    const written: string[] = [];
+    const first = registry.add(
+      {
+        kind: 'telegram',
+        stored: telegramBot('7000000001'),
+        label: '@first_bot',
+        handle: 'first_bot',
+      },
+      (record) => written.push(record.secretName),
+    );
+    expect(first).toMatchObject({
+      name: 'first_bot',
       label: '@first_bot',
-      handle: 'first_bot',
+      platformUser: 'first_bot',
+      scope: '7000000001',
+      lockName: '7000000001',
+      secretName: `${channelSetup('telegram').secretName(ACCOUNT)}#${first.key}`,
+      character: null,
+      boundAt: 0,
     });
-    expect(first.record).toMatchObject({ name: 'first_bot', label: '@first_bot' });
-    expect(first.record.migratedFrom).toBeUndefined();
-    const same = registry.adopt({
-      kind: 'telegram',
-      secretName,
+    expect(first.migratedFrom).toBeUndefined();
+    // What goes with it was written under the lock, before the registry.
+    expect(written).toEqual([first.secretName]);
+    // The same bot again: refused, naming it; nothing written.
+    const revision = registry.data.revision;
+    expect(() => registry.add({ kind: 'telegram', stored: telegramBot('7000000001') })).toThrow(
+      'first_bot',
+    );
+    expect(BotRegistry.open(ACCOUNT, dir).data.revision).toBe(revision);
+    // A name given, a character given.
+    const second = registry.add(
+      { kind: 'telegram', stored: telegramBot('7000000002'), name: 'lin', character: LIN },
+      undefined,
+      9,
+    );
+    expect(second).toMatchObject({ name: 'lin', character: LIN, boundAt: 9 });
+    // A name or a character another bot has: refused, and effects that failed write nothing.
+    expect(() =>
+      registry.add({ kind: 'telegram', stored: telegramBot('7000000003'), name: 'lin' }),
+    ).toThrow(UsageError);
+    expect(() =>
+      registry.add({
+        kind: 'qq',
+        stored: { platformId: '1', scope: 'qq:1', lockName: 'qq-1' },
+        character: LIN,
+      }),
+    ).toThrow(DuplicateCharacter);
+    expect(() =>
+      registry.add({ kind: 'telegram', stored: telegramBot('7000000004') }, () => {
+        throw new Error('keychain locked');
+      }),
+    ).toThrow('keychain locked');
+    expect(
+      BotRegistry.open(ACCOUNT, dir)
+        .list()
+        .map((record) => record.name),
+    ).toEqual(['first_bot', 'lin']);
+  });
+
+  it('give each WeChat ClawBot a scope and lock of its own, even of one scanner', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    const one = registry.add({ kind: 'wechat', stored: wechatBot('bot-1@im.bot') });
+    const two = registry.add({ kind: 'wechat', stored: wechatBot('bot-2@im.bot') });
+    expect([one.name, two.name]).toEqual(['wechat-1', 'wechat-2']);
+    expect(one).toMatchObject({ scope: `bot:${one.key}`, lockName: `bot-${one.key}` });
+    expect(two.scope).not.toBe(one.scope);
+    expect(one.experimentalAcceptedAt).toBeGreaterThan(0);
+    // Their logins are told apart by the ClawBot, not the scanner they share.
+    expect(sameBot(one, wechatBot('bot-1@im.bot'))).toBe(true);
+    expect(sameBot(one, wechatBot('bot-2@im.bot'))).toBe(false);
+    // A login of before the registry: its scanner names it, and so does its ClawBot once another
+    // person signed it in again.
+    const { registry: legacy } = migrateRegistry({
+      account: ACCOUNT,
+      store: secrets({ wechat: WECHAT_SECRET }),
+      dir: mkdtempSync(join(tmpdir(), 'yomi-registry-')),
+    });
+    const [old] = legacy.list();
+    const otherScanner = { platformId: 'bot-1@im.bot', scope: 'wx:0000000000000000', lockName: '' };
+    expect(sameBot(old, wechatBot('bot-9@im.bot'))).toBe(true);
+    expect(sameBot(old, otherScanner)).toBe(true);
+    expect(sameBot(old, { ...otherScanner, platformId: 'bot-9@im.bot' })).toBe(false);
+  });
+
+  it('are signed in again only with their own credentials; a WeChat login may name a new ClawBot id', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    const bot = registry.add({ kind: 'telegram', stored: telegramBot('7000000001') });
+    const renewed = registry.renew(bot.key, {
       stored: telegramBot('7000000001'),
-      label: '@first_bot',
-      handle: 'first_bot',
+      label: '@renamed_bot',
+      handle: 'renamed_bot',
     });
-    expect(same.record.key).toBe(first.record.key);
-    // Nothing changed: nothing written.
-    expect(registry.data.revision).toBe(1);
-    const other = registry.adopt({
-      kind: 'telegram',
-      secretName,
-      stored: telegramBot('7000000002'),
-      handle: 'second_bot',
+    expect(renewed).toMatchObject({
+      label: '@renamed_bot',
+      platformUser: 'renamed_bot',
+      generation: 1,
     });
-    expect(other.record.key).not.toBe(first.record.key);
-    expect(registry.list()).toEqual([other.record]);
-    expect(other.record).toMatchObject({ name: 'second_bot', scope: '7000000002' });
+    // Another bot's: refused, nothing written.
+    const revision = registry.data.revision;
+    let error: unknown;
+    try {
+      registry.renew(bot.key, { stored: telegramBot('7000000002') });
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as Error).message).toContain(`yomi relay --forget --bot ${bot.name}`);
+    expect(BotRegistry.open(ACCOUNT, dir).data.revision).toBe(revision);
+    // WeChat: a new id for the same ClawBot, never one another bot has.
+    const one = registry.add({ kind: 'wechat', stored: wechatBot('bot-1@im.bot') });
+    const two = registry.add({ kind: 'wechat', stored: wechatBot('bot-2@im.bot') });
+    expect(registry.renew(one.key, { stored: wechatBot('bot-3@im.bot') }).platformId).toBe(
+      'bot-3@im.bot',
+    );
+    expect(() => registry.renew(one.key, { stored: wechatBot('bot-2@im.bot') })).toThrow(two.name);
+    // A bot removed meanwhile: refused, not recreated.
+    expect(registry.remove(bot.key)).toBe(true);
+    expect(registry.remove(bot.key)).toBe(false);
+    expect(() => registry.renew(bot.key, { stored: telegramBot('7000000001') })).toThrow(
+      UsageError,
+    );
   });
 
   it('fill in a platform id; WeChat’s may change for the same scanner, the others’ never do', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
-    const registry = BotRegistry.open(ACCOUNT, dir);
-    const stored = channelSetup('wechat').storedBot(WECHAT_SECRET)!;
-    const secretName = channelSetup('wechat').secretName(ACCOUNT);
-    const { record } = registry.adopt({
-      kind: 'wechat',
-      secretName,
-      stored: { ...stored, platformId: '' },
+    const store = secrets({
+      wechat: JSON.stringify({ ...JSON.parse(WECHAT_SECRET), ilinkBotId: '' }),
     });
+    const { registry } = migrateRegistry({ account: ACCOUNT, store, dir });
+    const [record] = registry.list();
     expect(record.platformId).toBe('');
+    const stored = channelSetup('wechat').storedBot(WECHAT_SECRET)!;
     expect(registry.refresh(record, { stored }).platformId).toBe('bot-1@im.bot');
-    const relogged = registry.adopt({
-      kind: 'wechat',
-      secretName,
-      stored: { ...stored, platformId: 'bot-2@im.bot' },
-    });
-    expect(relogged.record).toMatchObject({ key: record.key, platformId: 'bot-2@im.bot' });
-    const telegram = registry.adopt({
-      kind: 'telegram',
-      secretName: 'telegram-bot:x',
-      stored: telegramBot('7000000001'),
-    }).record;
+    expect(
+      registry.refresh(record, { stored: { ...stored, platformId: 'bot-2@im.bot' } }).platformId,
+    ).toBe('bot-2@im.bot');
+    const telegram = registry.add({ kind: 'telegram', stored: telegramBot('7000000001') });
     expect(
       registry.refresh(telegram, { stored: { ...telegramBot('7000000001'), platformId: '9' } })
         .platformId,
     ).toBe('7000000001');
   });
 
+  it('are never taken over again from a secret of before the registry naming the same bot', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
+    const registry = BotRegistry.open(ACCOUNT, dir);
+    registry.add({ kind: 'telegram', stored: telegramBot('7000000001') });
+    const { registry: after } = migrateRegistry({
+      account: ACCOUNT,
+      store: secrets({ telegram: TOKEN }),
+      dir,
+    });
+    expect(after.list()).toHaveLength(1);
+    // Another bot's is taken over.
+    const { registry: other } = migrateRegistry({
+      account: ACCOUNT,
+      store: secrets({ telegram: OTHER_TOKEN }),
+      dir,
+    });
+    expect(other.list().map((record) => record.platformId)).toEqual(['7000000001', '7000000002']);
+  });
+
   it('take no character another bot has', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const a = registry.adopt({
-      kind: 'telegram',
-      secretName: 'telegram-bot:a',
-      stored: telegramBot('7000000001'),
-    }).record;
+    const a = registry.add({ kind: 'telegram', stored: telegramBot('7000000001') });
     registry.bindCharacter(a.key, LIN, characterOwner('telegram', 1), 5);
     expect(registry.find(a.name)).toMatchObject({ character: LIN, boundAt: 5 });
-    // A state file with the same character: the new bot comes without it, with a warning.
-    const scope = '7000000002';
-    new RelayState(relayStatePath(ACCOUNT, scope, dir), scope, ACCOUNT).update({
-      character: LIN,
-    });
-    const b = registry.adopt({
+    const b = registry.add({
       kind: 'telegram',
-      secretName: 'telegram-bot:b',
-      stored: telegramBot(scope),
+      stored: telegramBot('7000000002'),
       handle: 'b_bot',
     });
-    expect(b.record.character).toBeNull();
-    expect(b.warnings).toHaveLength(1);
     // Nor when the relay switches to it.
-    registry.bindCharacter(b.record.key, LIN, '');
+    registry.bindCharacter(b.key, LIN, '');
     expect(registry.find('b_bot')!.character).toBeNull();
     registry.bindCharacter(a.key, null, '');
-    registry.bindCharacter(b.record.key, LIN, characterOwner('telegram', 2));
+    registry.bindCharacter(b.key, LIN, characterOwner('telegram', 2));
     expect(registry.find('b_bot')!.character).toEqual(LIN);
     expect(registry.data.characterOwners[LIN.npcId]).toBe(characterOwner('telegram', 2));
   });
@@ -349,11 +445,10 @@ describe('every change', () => {
   it('is checked again under the lock: a duplicate character, a bad name, too many bots', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const record = registry.adopt({
+    const record = registry.add({
       kind: 'qq',
-      secretName: 'qq-bot:a',
       stored: { platformId: '1020304', scope: 'qq:1020304', lockName: 'qq-1020304' },
-    }).record;
+    });
     registry.bindCharacter(record.key, LIN, '');
     const revision = registry.data.revision;
     const refused = (change: Parameters<BotRegistry['commit']>[0]) => {
@@ -368,9 +463,15 @@ describe('every change', () => {
     };
     expect(
       refused((file) => {
-        file.bots.push({ ...record, key: 'k2', name: 'other', character: LIN });
+        file.bots.push({ ...record, key: 'k2', name: 'other', platformId: '2', character: LIN });
       }),
     ).toContain('一个角色只能绑一个 bot');
+    // One bot registered twice.
+    expect(
+      refused((file) => {
+        file.bots.push({ ...record, key: 'k2', name: 'other', character: null });
+      }),
+    ).toContain(`这个 bot 已经登记在这台电脑上了，名字是 "${record.name}"`);
     expect(
       refused((file) => {
         file.bots[0].name = 'Not A Name';
@@ -379,7 +480,13 @@ describe('every change', () => {
     expect(
       refused((file) => {
         for (let index = 0; index < MAX_BOTS_PER_KIND; index += 1)
-          file.bots.push({ ...record, key: `k${index}`, name: `qq-${index}`, character: null });
+          file.bots.push({
+            ...record,
+            key: `k${index}`,
+            name: `qq-${index}`,
+            platformId: `9${index}`,
+            character: null,
+          });
       }),
     ).toContain(String(MAX_BOTS_PER_KIND));
     // Nothing of a refused change was written.
@@ -391,14 +498,12 @@ describe('every change', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const one = BotRegistry.open(ACCOUNT, dir);
     const two = BotRegistry.open(ACCOUNT, dir);
-    one.adopt({
+    one.add({
       kind: 'qq',
-      secretName: 'qq-bot:a',
       stored: { platformId: '1020304', scope: 'qq:1020304', lockName: 'qq-1020304' },
     });
-    two.adopt({
+    two.add({
       kind: 'telegram',
-      secretName: 'telegram-bot:a',
       stored: { platformId: '7000000001', scope: '7000000001', lockName: '7000000001' },
     });
     expect(two.list().map((record) => record.kind)).toEqual(['qq', 'telegram']);
@@ -412,8 +517,8 @@ describe('every change', () => {
     expect(forgetRelayStates(ACCOUNT, dir, 'telegram')).toBe(0);
     expect(existsSync(path)).toBe(true);
     const forgotten = BotRegistry.open(ACCOUNT, dir);
-    expect(forgotten.forget('telegram', 'telegram-bot:other')).toBe(false);
-    expect(forgotten.forget('telegram', channelSetup('telegram').secretName(ACCOUNT))).toBe(true);
+    expect(forgotten.remove('nobody')).toBe(false);
+    expect(forgotten.remove(forgotten.list()[0].key)).toBe(true);
     expect(forgotten.list()).toEqual([]);
     writeFileSync(path, JSON.stringify({ version: 1, revision: 1, bots: [{ name: 'x' }] }));
     expect(() => BotRegistry.open(ACCOUNT, dir)).toThrow(UsageError);
@@ -451,7 +556,7 @@ describe('what a stored secret says offline', () => {
     expect(channelSetup('wechat').storedBot('{"ilinkUserId":"scanner@im.wechat"}')).toEqual({
       platformId: '',
       scope: scopes.wechat,
-      lockName: channelSetup('wechat').lockNameOf(WECHAT_SECRET),
+      lockName: channelSetup('wechat').storedBot(WECHAT_SECRET)!.lockName,
     });
   });
 });
@@ -488,11 +593,11 @@ describe('one character per bot', () => {
   it('binds a bot to another character, never to one another bot has', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const a = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1020304') });
-    const b = registry.adopt({ kind: 'qq', secretName: 'qq-bot:b', stored: qqBot('1020305') });
-    const bound = registry.rebind(a.record.key, LIN, 7);
+    const a = registry.add({ kind: 'qq', stored: qqBot('1020304') });
+    const b = registry.add({ kind: 'qq', stored: qqBot('1020305') });
+    const bound = registry.rebind(a.key, LIN, 7);
     expect(bound).toMatchObject({ character: LIN, boundAt: 7, generation: 1 });
-    expect(registry.rebind(a.record.key, HARBOR, 9)).toMatchObject({
+    expect(registry.rebind(a.key, HARBOR, 9)).toMatchObject({
       character: HARBOR,
       boundAt: 9,
       generation: 2,
@@ -501,45 +606,45 @@ describe('one character per bot', () => {
     const revision = registry.data.revision;
     let error: unknown;
     try {
-      registry.rebind(b.record.key, HARBOR);
+      registry.rebind(b.key, HARBOR);
     } catch (caught) {
       error = caught;
     }
     expect(error).toBeInstanceOf(DuplicateCharacter);
-    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: a.record.name });
-    expect((error as Error).message).toContain(`yomi relay --bot ${a.record.name} --character ID`);
+    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: a.name });
+    expect((error as Error).message).toContain(`yomi relay --bot ${a.name} --character ID`);
     expect(BotRegistry.open(ACCOUNT, dir).data.revision).toBe(revision);
-    expect(BotRegistry.open(ACCOUNT, dir).find(b.record.name)!.character).toBeNull();
+    expect(BotRegistry.open(ACCOUNT, dir).find(b.name)!.character).toBeNull();
     // A bot removed meanwhile (another command): refused, not recreated.
     registry.commit((file) => {
-      file.bots = file.bots.filter((record) => record.key !== b.record.key);
+      file.bots = file.bots.filter((record) => record.key !== b.key);
     });
-    expect(() => registry.rebind(b.record.key, LIN)).toThrow(UsageError);
+    expect(() => registry.rebind(b.key, LIN)).toThrow(UsageError);
     expect(registry.list()).toHaveLength(1);
   });
 
   it('names the bot that has the character, also when it comes later in the file', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const a = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1020304') });
-    const b = registry.adopt({ kind: 'qq', secretName: 'qq-bot:b', stored: qqBot('1020305') });
-    registry.rebind(b.record.key, HARBOR);
+    const a = registry.add({ kind: 'qq', stored: qqBot('1020304') });
+    const b = registry.add({ kind: 'qq', stored: qqBot('1020305') });
+    registry.rebind(b.key, HARBOR);
     let error: unknown;
     try {
-      registry.rebind(a.record.key, HARBOR);
+      registry.rebind(a.key, HARBOR);
     } catch (caught) {
       error = caught;
     }
     expect(error).toBeInstanceOf(DuplicateCharacter);
-    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: b.record.name });
-    expect((error as Error).message).toContain(`yomi relay --bot ${b.record.name} --character ID`);
-    expect(registry.find(a.record.name)!.character).toBeNull();
+    expect(error).toMatchObject({ npcId: HARBOR.npcId, holder: b.name });
+    expect((error as Error).message).toContain(`yomi relay --bot ${b.name} --character ID`);
+    expect(registry.find(a.name)!.character).toBeNull();
   });
 
   it('renames a character without binding it again, and remembers whom a character was shown to', () => {
     const dir = mkdtempSync(join(tmpdir(), 'yomi-registry-'));
     const registry = BotRegistry.open(ACCOUNT, dir);
-    const { record } = registry.adopt({ kind: 'qq', secretName: 'qq-bot:a', stored: qqBot('1') });
+    const record = registry.add({ kind: 'qq', stored: qqBot('1') });
     registry.rebind(record.key, LIN, 7);
     registry.bindCharacter(record.key, { ...LIN, name: 'Lin Xia' }, '', 99);
     expect(registry.find(record.name)).toMatchObject({

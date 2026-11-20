@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Context } from '../../commands/context.js';
-import type { RelayCommandOptions } from '../../commands/relay.js';
 import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
 import { warn } from '../../core/ui.js';
 import { PLAIN } from '../render.js';
 import { OutOfContextQueue } from './queue.js';
-import type { ChannelSetup } from './setup.js';
+import type { BotRecord } from '../registry.js';
+import { botCommand, type ChannelSetup, type CredentialRequest } from './setup.js';
 import { TextQuestions } from './text-ask.js';
 import { type RawInbound, TextInbound } from './text-inbound.js';
 import {
@@ -59,8 +59,10 @@ import {
 /**
  * WeChat ClawBot (iLink) as a relay channel (design §10): experimental, off unless
  * `--experimental` is given, personal use only. The owner is whoever scanned the login QR code
- * (`--login`, channels/wechat-login.ts), so the relay's state and lock are keyed by that person,
- * not by the bot, whose id a new login may change.
+ * (`--login`, channels/wechat-login.ts). The relay's state and lock are the bot's registry
+ * record's: a ClawBot added under the registry has its own (`bot:<key>`, `bot-<key>`), whoever
+ * scans it; only a login of before the registry keeps its scanner's (`wx:<sha256(ilink_user_id)
+ * [0:16]>`, `wx-<same>`), as the ClawBot id a new login may change never named them.
  *
  * In: `getupdates` long polling with the cursor saved before a batch is handled; each message
  * through the shared text pipeline (replays dropped, the owner's queue delivered, typed answers to
@@ -117,9 +119,18 @@ export type WechatChannelOptions = {
   deadAfterMs?: number;
   /** The first wait after a failed poll (doubling to 30 s). */
   backoffMs?: number;
+  /**
+   * The bot's state scope and lock (its registry record's); by default the scanner's, as a login
+   * of before the registry has them (`wx:<sha256(ilink_user_id)[0:16]>`, `wx-<same>`).
+   */
+  place?: { scope: string; lockName: string };
+  /** What signs this bot in again, said when WeChat ends its login (the channel's by default). */
+  renewCommand?: string;
 };
 
-type Settings = Required<Omit<WechatChannelOptions, 'apiOrigin' | 'fetch'>>;
+type Settings = Required<
+  Omit<WechatChannelOptions, 'apiOrigin' | 'fetch' | 'place' | 'renewCommand'>
+>;
 
 /** The newest owner context as the state file keeps it. */
 type StoredContext = {
@@ -167,6 +178,8 @@ export class WechatChannel implements RelayChannel, WechatReplyHost {
   readonly caps: ChannelCaps;
   readonly scope: string;
   readonly lockName: string;
+  /** What signs this bot in again (`WechatChannelOptions.renewCommand`). */
+  readonly renewCommand: string;
   private readonly api: WechatApi;
   private readonly settings: Settings;
   private host: ChannelHost | null = null;
@@ -224,8 +237,9 @@ export class WechatChannel implements RelayChannel, WechatReplyHost {
       pairing: 'login',
     };
     const hash = ownerHash(credentials.ilinkUserId);
-    this.scope = `wx:${hash}`;
-    this.lockName = `wx-${hash}`;
+    this.scope = options.place?.scope ?? `wx:${hash}`;
+    this.lockName = options.place?.lockName ?? `wx-${hash}`;
+    this.renewCommand = options.renewCommand ?? `${WECHAT_COMMAND} --login`;
   }
 
   /**
@@ -875,13 +889,14 @@ export class WechatChannel implements RelayChannel, WechatReplyHost {
   }
 
   private sessionEnded(): RelayStopped {
+    const again = this.renewCommand;
     return new RelayStopped(
       'session',
       tr(
-        `微信结束了这次登录：请运行 ${WECHAT_COMMAND} --login 重新扫码登录。`,
-        `WeChat ended this login: run ${WECHAT_COMMAND} --login and scan the QR code again.`,
-        `WeChat terminó este inicio de sesión: ejecuta ${WECHAT_COMMAND} --login y vuelve a escanear el código QR.`,
-        `O WeChat encerrou este login: execute ${WECHAT_COMMAND} --login e escaneie o código QR de novo.`,
+        `微信结束了这次登录：请运行 ${again} 重新扫码登录。`,
+        `WeChat ended this login: run ${again} and scan the QR code again.`,
+        `WeChat terminó este inicio de sesión: ejecuta ${again} y vuelve a escanear el código QR.`,
+        `O WeChat encerrou este login: execute ${again} e escaneie o código QR de novo.`,
       ),
     );
   }
@@ -956,26 +971,33 @@ function failedSend(error: unknown): string {
 
 // -------------------------------------------------------------------------------------------------
 // `yomi relay --channel wechat --experimental`: the login lives in the keychain (`--login`), the
-// owner is its scanner, and the state and the lock are named after that person.
+// owner is its scanner, and the state and the lock are the bot's record's (a login of before the
+// registry: named after its scanner).
 
 const secretName = (account: string) => `wechat-ilink:${account}`;
 
-const unpairedHint = () =>
-  tr(
-    '还没有登录微信：在终端里运行 yomi relay --channel wechat --experimental --login，用手机微信扫码。',
-    'Not signed in to WeChat yet: run yomi relay --channel wechat --experimental --login in a terminal and scan the QR code with WeChat on your phone.',
-    'Todavía no iniciaste sesión en WeChat: ejecuta yomi relay --channel wechat --experimental --login en una terminal y escanea el código QR con WeChat en tu teléfono.',
-    'Você ainda não entrou no WeChat: execute yomi relay --channel wechat --experimental --login em um terminal e escaneie o código QR com o WeChat no seu celular.',
+/** What signs `record` in again, or (none yet) the channel's login. */
+const loginCommand = (record?: BotRecord) =>
+  record ? botCommand(record, '--login') : `${WECHAT_COMMAND} --login`;
+
+const unpairedHint = (record?: BotRecord) => {
+  const command = loginCommand(record);
+  return tr(
+    `还没有登录微信：在终端里运行 ${command}，用手机微信扫码。`,
+    `Not signed in to WeChat yet: run ${command} in a terminal and scan the QR code with WeChat on your phone.`,
+    `Todavía no iniciaste sesión en WeChat: ejecuta ${command} en una terminal y escanea el código QR con WeChat en tu teléfono.`,
+    `Você ainda não entrou no WeChat: execute ${command} em um terminal e escaneie o código QR com o WeChat no seu celular.`,
   );
+};
 
 /** A saved login whose host is not WeChat's: never used, whatever wrote it. */
-function untrustedLogin(): UsageError {
+function untrustedLogin(again: string): UsageError {
   return new UsageError(
     tr(
-      `保存的微信登录指向的不是微信的地址，没有使用：请运行 ${WECHAT_COMMAND} --login 重新登录。`,
-      `The saved WeChat login points at an address that is not WeChat's, so it was not used: run ${WECHAT_COMMAND} --login again.`,
-      `El inicio de sesión de WeChat guardado apunta a una dirección que no es de WeChat, así que no se usó: vuelve a ejecutar ${WECHAT_COMMAND} --login.`,
-      `O login do WeChat salvo aponta para um endereço que não é do WeChat, então não foi usado: execute ${WECHAT_COMMAND} --login de novo.`,
+      `保存的微信登录指向的不是微信的地址，没有使用：请运行 ${again} 重新登录。`,
+      `The saved WeChat login points at an address that is not WeChat's, so it was not used: run ${again} again.`,
+      `El inicio de sesión de WeChat guardado apunta a una dirección que no es de WeChat, así que no se usó: vuelve a ejecutar ${again}.`,
+      `O login do WeChat salvo aponta para um endereço que não é do WeChat, então não foi usado: execute ${again} de novo.`,
     ),
   );
 }
@@ -990,26 +1012,26 @@ export const wechatSetup: ChannelSetup = {
   personalUseOnly: true,
   secretLabel: 'bot_token',
   secretName,
+  credentialsFlag: '--login',
 
-  wantsCredentials: (options: RelayCommandOptions) => options.login,
+  setCredentials: (context: Context, request: CredentialRequest) => wechatLogin(context, request),
 
-  async setCredentials(context: Context, options: RelayCommandOptions) {
-    await wechatLogin(context, options);
-    return null;
-  },
-
-  async open(context: Context) {
-    const { io, store } = context;
-    const credentials = parseCredentials(store.getSecret(secretName(context.account)));
+  async open(context: Context, record: BotRecord) {
+    const credentials = parseCredentials(context.store.getSecret(record.secretName));
     if (!credentials) {
       // Nobody to scan in a service, and the scanner is the owner: --login in a terminal first.
-      warn(io, unpairedHint());
+      warn(context.io, unpairedHint(record));
       return null;
     }
     try {
-      return new WechatChannel(credentials, { apiOrigin: process.env.YOMI_WECHAT_API_ORIGIN });
+      // Its state and lock are its record's: a ClawBot added under the registry has its own.
+      return new WechatChannel(credentials, {
+        apiOrigin: process.env.YOMI_WECHAT_API_ORIGIN,
+        place: { scope: record.scope, lockName: record.lockName },
+        renewCommand: loginCommand(record),
+      });
     } catch (error) {
-      if (error instanceof UntrustedHost) throw untrustedLogin();
+      if (error instanceof UntrustedHost) throw untrustedLogin(loginCommand(record));
       throw error;
     }
   },
@@ -1018,27 +1040,28 @@ export const wechatSetup: ChannelSetup = {
     try {
       return await channel.verify();
     } catch (error) {
-      if (error instanceof WechatError && error.refused)
+      if (error instanceof WechatError && error.refused) {
+        const again =
+          channel instanceof WechatChannel ? channel.renewCommand : `${WECHAT_COMMAND} --login`;
         throw new UsageError(
           tr(
-            `微信不再接受这次登录：请运行 ${WECHAT_COMMAND} --login 重新扫码。`,
-            `WeChat no longer accepts this login: run ${WECHAT_COMMAND} --login and scan again.`,
-            `WeChat ya no acepta este inicio de sesión: ejecuta ${WECHAT_COMMAND} --login y vuelve a escanear.`,
-            `O WeChat não aceita mais este login: execute ${WECHAT_COMMAND} --login e escaneie de novo.`,
+            `微信不再接受这次登录：请运行 ${again} 重新扫码。`,
+            `WeChat no longer accepts this login: run ${again} and scan again.`,
+            `WeChat ya no acepta este inicio de sesión: ejecuta ${again} y vuelve a escanear.`,
+            `O WeChat não aceita mais este login: execute ${again} e escaneie de novo.`,
           ),
         );
+      }
       throw error;
     }
   },
 
-  /** `wx-<sha256(ilink_user_id)[0:16]>`: the lock of `WechatChannel.lockName` (scope `wx:<same>`). */
-  lockNameOf(secret: string) {
-    return wechatSetup.storedBot(secret)?.lockName ?? null;
-  },
+  missingCredentials: unpairedHint,
 
   /**
-   * The scanner names the scope and the lock (a re-login may change ilink_bot_id); a login
-   * without its token still names them, for --forget.
+   * The scanner names the scope and the lock of a login of before the registry (a re-login may
+   * change ilink_bot_id); a login without its token still names them. A ClawBot added under the
+   * registry has a scope and lock of its own (relay/registry.ts).
    */
   storedBot(secret: string) {
     let userId = '';

@@ -490,17 +490,21 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   里提示，relay 继续运行。上限都是可选的：本机的 --max-spend（累计花费，聊天里不能重置；0 表示只用
   免费额度），以及聊天里的 /budget <数量>（Telegram 点按钮确认，QQ 和微信回复确认码）。
   详见 docs/relay.md、docs/relay-qq.md、docs/relay-wechat.md。
-  --set-token           Telegram：设置或更换 bot token（终端里输入，不显示；或配合 --token-stdin）
-  --set-app             QQ：设置 bot 的 AppID 和 AppSecret（AppSecret 不显示；或配合 --token-stdin）
-  --login               微信：用手机微信扫码登录，扫码的人就是主人（只能在终端里）
+  --set-token           Telegram：添加 bot，或给 --bot 名字 重新设置 token（终端里输入，不显示；或配合
+                        --token-stdin）
+  --set-app             QQ：添加 bot，或给 --bot 名字 重新设置 AppID 和 AppSecret（AppSecret 不显示；
+                        或配合 --token-stdin）
+  --login               微信：扫码连接一个 ClawBot（添加 bot，或给 --bot 名字 重新登录），扫码的人就是
+                        主人（只能在终端里）
   --qr-link             微信：和 --login 一起用，同时打印二维码的链接
   --token-stdin         从标准输入读凭证（Telegram：token；QQ：第一行 AppID，第二行 AppSecret），
                         不接受命令行参数和环境变量
   --experimental        使用微信通道时必须加
   --pair                重新配对（Telegram、QQ：会显示新的配对码）
-  --character ID        bot 对话的角色：还没有角色的 bot 运行时绑定它（已经绑定的 bot 忽略）
+  --character ID        这个 bot 对话的角色：添加时给出，或之后用 --bot 名字 --character ID 绑定（运行时只
+                        绑定还没有角色的 bot）
   --bot 名字            只运行这些 bot（可以重复，或用逗号分隔；名字见 --list）；和 --character 一起用：
-                        给这个 bot 换绑角色（relay 停止时）
+                        给这个 bot 换绑角色；和凭证参数一起用：重新设置它的凭证（名字是新的：添加一个）
   --max-spend 数量      可选的本机花费上限：relay 在这台电脑上累计最多花的钻石（默认不设上限；
                         0：只用免费额度）
   --reset-spend         重新计算 relay 的累计花费（有没有上限都适用）
@@ -509,7 +513,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --uninstall-service   停止并删除后台服务
   --service-status      查看后台服务状态
   --list                列出这台电脑上的 bot：通道、角色、主人和状态（可以加 --channel 只看一个通道）
-  --forget              删除本机保存的这个通道的凭证和配对信息（其他通道的不受影响）
+  --forget              删除 bot：--forget --bot 名字；--channel <通道> --forget（这个通道只有一个 bot 时）；
+                        --forget --all 删除全部（包括后台服务）
+  改动 bot 时后台服务在运行，会先停止它，改完后重新启动；终端里有 relay 在运行时要先停止它
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
   --no-drafts           Telegram：不用流式草稿，改为编辑消息
   --confirm-prod        非交互在生产环境运行时明确确认`,
@@ -527,19 +533,22 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --max-spend on this computer (a running total nothing in the chat resets; 0 means free replies only) and
   /budget <amount> in the chat (confirmed with a button in Telegram, a typed code in QQ and WeChat). See
   docs/relay.md, docs/relay-qq.md and docs/relay-wechat.md.
-  --set-token           Telegram: set or replace the bot token (typed in the terminal, hidden; or with --token-stdin)
-  --set-app             QQ: set the bot's AppID and AppSecret (the AppSecret hidden; or both with --token-stdin)
-  --login               WeChat: sign in by scanning a QR code with WeChat on your phone; whoever scans it is the
-                        owner (in a terminal only)
+  --set-token           Telegram: add a bot, or set the token of --bot name again (typed in the terminal,
+                        hidden; or with --token-stdin)
+  --set-app             QQ: add a bot, or set the AppID and AppSecret of --bot name again (the AppSecret
+                        hidden; or both with --token-stdin)
+  --login               WeChat: link a ClawBot by scanning a QR code (add a bot, or sign --bot name in again);
+                        whoever scans it is the owner (in a terminal only)
   --qr-link             WeChat, with --login: also print the QR code's link
   --token-stdin         Read the credentials from standard input (Telegram: the token; QQ: the AppID on line 1,
                         the AppSecret on line 2), never from arguments or environment variables
   --experimental        Required for the WeChat channel
   --pair                Pair again (Telegram, QQ: shows a new pairing code)
-  --character ID        The character the bot chats as: a run binds it to a bot that has none (a bound bot
-                        ignores it)
+  --character ID        The character this bot chats as: given when it is added, or bound later with --bot
+                        name --character ID (a run binds it only to a bot that has none)
   --bot name            Run only these bots (repeat it, or separate names with commas; names in --list);
-                        with --character: bind this bot to another character (while the relay is stopped)
+                        with --character: bind this bot to another character; with a credentials flag: set
+                        its credentials again (a new name: add a bot)
   --max-spend amount    Optional local spending cap: the most gems relay may spend in total on this machine
                         (default: no cap; 0: free replies only)
   --reset-spend         Start the relay's running spending total over (with or without a cap)
@@ -550,8 +559,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --service-status      Show the background service status
   --list                List the bots on this computer: channel, character, owner and status (add --channel
                         to see one channel)
-  --forget              Delete this channel's credentials and pairing saved on this machine (other channels keep
-                        theirs)
+  --forget              Remove bots: --forget --bot name; --channel <channel> --forget (a channel with one
+                        bot); --forget --all for every bot (and the background services)
+  Changing the bots stops a running background service and starts it again after; a relay running in a
+  terminal must be stopped first
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
   --no-drafts           Telegram: edit messages instead of streaming drafts
   --confirm-prod        Confirm explicitly when running non-interactively in production`,
@@ -570,19 +581,22 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   opcionales: --max-spend en este equipo (un total acumulado que nada en el chat reinicia; 0 significa solo
   respuestas gratis) y /budget <cantidad> en el chat (se confirma con un botón en Telegram y con un código
   escrito en QQ y WeChat). Consulta docs/relay.md, docs/relay-qq.md y docs/relay-wechat.md.
-  --set-token           Telegram: configura o reemplaza el token del bot (se escribe en la terminal, oculto; o con --token-stdin)
-  --set-app             QQ: configura el AppID y el AppSecret del bot (el AppSecret oculto; o ambos con --token-stdin)
-  --login               WeChat: inicia sesión escaneando un código QR con WeChat en tu teléfono; quien lo escanea
-                        es el dueño (solo en una terminal)
+  --set-token           Telegram: agrega un bot, o vuelve a configurar el token de --bot nombre (se escribe en la
+                        terminal, oculto; o con --token-stdin)
+  --set-app             QQ: agrega un bot, o vuelve a configurar el AppID y el AppSecret de --bot nombre (el
+                        AppSecret oculto; o ambos con --token-stdin)
+  --login               WeChat: vincula un ClawBot escaneando un código QR (agrega un bot, o vuelve a iniciar la
+                        sesión de --bot nombre); quien lo escanea es el dueño (solo en una terminal)
   --qr-link             WeChat, con --login: imprime también el enlace del código QR
   --token-stdin         Lee las credenciales de la entrada estándar (Telegram: el token; QQ: el AppID en la línea 1,
                         el AppSecret en la línea 2), nunca de argumentos ni de variables de entorno
   --experimental        Obligatorio para el canal de WeChat
   --pair                Vincula de nuevo (Telegram, QQ: muestra un código de vinculación nuevo)
-  --character ID        El personaje con el que chatea el bot: una ejecución se lo asigna a un bot que no
-                        tiene ninguno (un bot que ya tiene personaje lo ignora)
+  --character ID        El personaje con el que chatea este bot: se indica al agregarlo, o se asigna después
+                        con --bot nombre --character ID (una ejecución solo se lo asigna a un bot sin personaje)
   --bot nombre          Ejecuta solo estos bots (repítelo o separa los nombres con comas; los nombres están
-                        en --list); con --character: asigna otro personaje a este bot (con el relay detenido)
+                        en --list); con --character: asigna otro personaje a este bot; con una opción de
+                        credenciales: vuelve a configurar sus credenciales (un nombre nuevo: agrega un bot)
   --max-spend cantidad  Límite de gasto local opcional: el máximo de gemas que relay puede gastar en total en
                         este equipo (por defecto: sin límite; 0: solo respuestas gratis)
   --reset-spend         Reinicia el total acumulado de gasto del relay (con o sin límite)
@@ -593,8 +607,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --service-status      Muestra el estado del servicio en segundo plano
   --list                Muestra los bots de este equipo: canal, personaje, dueño y estado (agrega --channel
                         para ver un solo canal)
-  --forget              Elimina las credenciales y la vinculación de este canal guardadas en este equipo (los otros
-                        canales conservan las suyas)
+  --forget              Elimina bots: --forget --bot nombre; --channel <canal> --forget (un canal con un solo
+                        bot); --forget --all para todos los bots (y los servicios en segundo plano)
+  Cambiar los bots detiene el servicio en segundo plano que esté en ejecución y lo vuelve a iniciar después;
+  un relay en ejecución en una terminal se debe detener primero
   --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
   --no-drafts           Telegram: edita los mensajes en lugar de transmitir borradores
   --confirm-prod        Confirma de forma explícita al ejecutar sin interacción en producción`,
@@ -613,19 +629,22 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --max-spend neste computador (um total acumulado que nada no chat zera; 0 significa só respostas grátis) e
   /budget <quantidade> no chat (confirmado com um botão no Telegram e com um código digitado no QQ e no
   WeChat). Veja docs/relay.md, docs/relay-qq.md e docs/relay-wechat.md.
-  --set-token           Telegram: define ou troca o token do bot (digitado no terminal, oculto; ou com --token-stdin)
-  --set-app             QQ: define o AppID e o AppSecret do bot (o AppSecret oculto; ou ambos com --token-stdin)
-  --login               WeChat: entra escaneando um código QR com o WeChat no celular; quem escaneia é o dono
-                        (só em um terminal)
+  --set-token           Telegram: adiciona um bot, ou define de novo o token de --bot nome (digitado no terminal,
+                        oculto; ou com --token-stdin)
+  --set-app             QQ: adiciona um bot, ou define de novo o AppID e o AppSecret de --bot nome (o AppSecret
+                        oculto; ou ambos com --token-stdin)
+  --login               WeChat: vincula um ClawBot escaneando um código QR (adiciona um bot, ou entra de novo com
+                        --bot nome); quem escaneia é o dono (só em um terminal)
   --qr-link             WeChat, com --login: também imprime o link do código QR
   --token-stdin         Lê as credenciais da entrada padrão (Telegram: o token; QQ: o AppID na linha 1, o
                         AppSecret na linha 2), nunca de argumentos nem de variáveis de ambiente
   --experimental        Obrigatório para o canal do WeChat
   --pair                Pareia novamente (Telegram, QQ: mostra um novo código de pareamento)
-  --character ID        O personagem com que o bot conversa: uma execução o vincula a um bot que não tem
-                        nenhum (um bot já vinculado o ignora)
+  --character ID        O personagem com que este bot conversa: informado ao adicioná-lo, ou vinculado depois
+                        com --bot nome --character ID (uma execução só o vincula a um bot sem personagem)
   --bot nome            Executa só estes bots (repita, ou separe os nomes com vírgulas; os nomes estão em
-                        --list); com --character: vincula este bot a outro personagem (com o relay parado)
+                        --list); com --character: vincula este bot a outro personagem; com uma opção de
+                        credenciais: define de novo as credenciais dele (um nome novo: adiciona um bot)
   --max-spend quantia   Limite de gastos local opcional: o máximo de gemas que o relay pode gastar no total
                         nesta máquina (padrão: sem limite; 0: só respostas grátis)
   --reset-spend         Zera o total acumulado de gastos do relay (com ou sem limite)
@@ -636,8 +655,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   --service-status      Mostra o status do serviço em segundo plano
   --list                Mostra os bots deste computador: canal, personagem, dono e status (adicione --channel
                         para ver um canal só)
-  --forget              Apaga as credenciais e o pareamento deste canal salvos nesta máquina (os outros canais
-                        mantêm os seus)
+  --forget              Remove bots: --forget --bot nome; --channel <canal> --forget (um canal com um bot só);
+                        --forget --all para todos os bots (e os serviços em segundo plano)
+  Mudar os bots interrompe o serviço em segundo plano em execução e o inicia de novo depois; um relay em execução
+  em um terminal precisa ser parado antes
   --reply-timeout s     Quanto tempo esperar por uma resposta, padrão 120; depois disso, lê o histórico de mensagens
   --no-drafts           Telegram: edita as mensagens em vez de transmitir rascunhos
   --confirm-prod        Confirma explicitamente ao executar de forma não interativa em produção`,
@@ -731,6 +752,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
     'reset-spend': { type: 'boolean' },
     list: { type: 'boolean' },
     bot: { type: 'string', multiple: true },
+    all: { type: 'boolean' },
   },
   image: {
     prompt: { type: 'string', short: 'p' },
@@ -901,25 +923,18 @@ const BOT_GOES_WITH = new Set([
   ...Object.keys(GLOBAL ?? {}),
 ]);
 
-/** What a run of chosen bots (`yomi relay --bot a,b`) does not take: one channel's setup. */
-const BOT_RUN_REFUSES = new Set([
-  'set-token',
-  'set-app',
-  'login',
-  'qr-link',
-  'token-stdin',
-  'forget',
-  'install-service',
-  'uninstall-service',
-  'service-status',
-]);
+/** What `--bot` does not take: the background service, one channel's for now. */
+const BOT_RUN_REFUSES = new Set(['install-service', 'uninstall-service', 'service-status']);
+
+/** The flags that set a bot's credentials (with `--bot` and `--character`: a bot added). */
+const CREDENTIALS = ['set-token', 'set-app', 'login'];
 
 /**
  * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
  * kept for good). Both naming different channels or an unknown name is a usage error; neither is
  * null: every channel (`--list`, a run of every registered bot), or the channels of the bots
- * `--bot` names. Setting credentials and the background service still need one named
- * (commands/relay.ts).
+ * `--bot` names (a registered bot's credentials, `--forget --bot`). Adding a bot and the
+ * background service still need one named (commands/relay.ts).
  */
 export function relayChannelKind(values: Values): ChannelKind | null {
   const alias = Boolean(values.telegram);
@@ -1183,7 +1198,8 @@ async function run(argv: string[], io: Io): Promise<number> {
               '--bot precisa do nome de um bot (os nomes estão em yomi relay --list)',
             ),
           );
-        if (values.bot !== undefined && values.character !== undefined) {
+        const credentials = CREDENTIALS.some((key) => values[key] !== undefined);
+        if (values.bot !== undefined && values.character !== undefined && !credentials) {
           const others = Object.keys(values).filter(
             (key) => values[key] !== undefined && !BOT_GOES_WITH.has(key),
           );
@@ -1219,10 +1235,10 @@ async function run(argv: string[], io: Io): Promise<number> {
           if (others.length)
             throw new UsageError(
               tr(
-                `--bot 选择要运行的 bot，不能和 --${others[0]} 一起用（凭证、配对信息和后台服务按通道设置：--channel …）`,
-                `--bot chooses the bots to run and does not go with --${others[0]} (credentials, pairing info and the background service are set per channel: --channel …)`,
-                `--bot elige los bots que se ejecutan y no se usa con --${others[0]} (las credenciales, la vinculación y el servicio en segundo plano se configuran por canal: --channel …)`,
-                `--bot escolhe os bots que são executados e não é usado com --${others[0]} (as credenciais, o pareamento e o serviço em segundo plano são configurados por canal: --channel …)`,
+                `--bot 不能和 --${others[0]} 一起用（后台服务按通道设置：--channel …）`,
+                `--bot does not go with --${others[0]} (the background service is set per channel: --channel …)`,
+                `--bot no se usa con --${others[0]} (el servicio en segundo plano se configura por canal: --channel …)`,
+                `--bot não é usado com --${others[0]} (o serviço em segundo plano é configurado por canal: --channel …)`,
               ),
             );
         }
@@ -1237,6 +1253,7 @@ async function run(argv: string[], io: Io): Promise<number> {
           tokenStdin: Boolean(values['token-stdin']),
           pair: Boolean(values.pair),
           forget: Boolean(values.forget),
+          all: Boolean(values.all),
           characterId: (values.character as string | undefined) ?? '',
           maxSpend: gems(values['max-spend']),
           allowFileStore: Boolean(values['allow-file-store']),

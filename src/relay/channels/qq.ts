@@ -1,5 +1,4 @@
 import type { Context } from '../../commands/context.js';
-import type { RelayCommandOptions } from '../../commands/relay.js';
 import { asciiJson, storeDescription } from '../../core/credentials.js';
 import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
@@ -37,7 +36,8 @@ import {
   QqPresenter,
 } from './qq-presenter.js';
 import { QQ_MARKDOWN, QQ_MARKDOWN_ENABLED } from './qq-render.js';
-import type { ChannelSetup } from './setup.js';
+import type { BotRecord } from '../registry.js';
+import { botCommand, type ChannelSetup, type CredentialRequest } from './setup.js';
 import { TextQuestions } from './text-ask.js';
 import { TextInbound } from './text-inbound.js';
 import {
@@ -123,6 +123,8 @@ export type QqChannelOptions = Partial<typeof QQ_DEFAULTS> & {
   quotes?: boolean;
   gateway?: Partial<QqGatewayTimings>;
   fetch?: typeof fetch;
+  /** What sets the AppSecret again, said when QQ refuses it (the channel's command by default). */
+  renewCommand?: string;
 };
 
 /** The gateway's position in the state file (`gateway`). */
@@ -371,7 +373,8 @@ export class QqChannel implements RelayChannel, QqOutlet {
     try {
       await this.api.tokens.get();
     } catch (error) {
-      if (error instanceof ChannelError && error.reason === 'unauthorized') throw tokenStopped();
+      if (error instanceof ChannelError && error.reason === 'unauthorized')
+        throw tokenStopped(this.options.renewCommand);
       throw error;
     }
     const saved = store.get<string[]>('seen');
@@ -393,6 +396,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
       ready: (info) => this.ready(info),
       session: resumable ? { sessionId: stored.sessionId, seq: stored.seq } : null,
       timings: this.options.gateway,
+      renewCommand: this.options.renewCommand,
     });
     host.signal.addEventListener('abort', () => this.wakeUp(), { once: true });
     this.gatewayDone = this.gateway
@@ -541,7 +545,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
    */
   private refusedToken(error: unknown) {
     if (!(error instanceof ChannelError) || error.reason !== 'unauthorized' || this.fatal) return;
-    this.fatal = tokenStopped();
+    this.fatal = tokenStopped(this.options.renewCommand);
     this.gateway?.close();
     this.wakeUp();
   }
@@ -1191,12 +1195,15 @@ export const qqSetup: ChannelSetup = {
   personalUseOnly: true,
   secretLabel: 'AppSecret',
   secretName,
+  credentialsFlag: '--set-app',
 
-  wantsCredentials: (options: RelayCommandOptions) => options.setApp,
-
-  async setCredentials(context: Context, options: RelayCommandOptions) {
+  async setCredentials(context: Context, request: CredentialRequest) {
     const { io, store } = context;
-    const app = await askApp(context, options.tokenStdin);
+    const app = await askApp(context, request.options.tokenStdin);
+    // The AppID names the bot: another one than asked for is refused before QQ is asked (and
+    // before the probe below uses one of the day's session starts).
+    const stored = qqSetup.storedBot(asciiJson(app))!;
+    request.check(stored);
     const api = apiFor(app);
     await checkApp(api);
     const me = await api.me().catch(() => null);
@@ -1224,7 +1231,15 @@ export const qqSetup: ChannelSetup = {
           'Não foi possível conectar ao gateway do QQ para verificar a permissão de chat privado; o AppID e o AppSecret são salvos mesmo assim.',
         ),
       );
-    store.setSecret(secretName(context.account), asciiJson(app));
+    const record = request.save({
+      secret: asciiJson(app),
+      stored,
+      identity: { id: String(me?.id || app.appId), name: String(me?.username ?? ''), handle: '' },
+    });
+    if (request.atStart) return record;
+    // An added bot pairs by its name: the channel's command asks which once it has several, and
+    // a background service running is stopped for the pairing and started again (said).
+    const next = request.renew ? 'yomi relay --channel qq' : botCommand(record, '--pair');
     say(
       io,
       tr(
@@ -1237,37 +1252,37 @@ export const qqSetup: ChannelSetup = {
     say(
       io,
       tr(
-        '接下来在 QQ 里加这个 bot 为好友，再运行 yomi relay --channel qq，在私聊里完成配对。',
-        'Next, add the bot as a QQ friend, then run yomi relay --channel qq and finish pairing in the private chat.',
-        'A continuación, agrega el bot como amigo en QQ, ejecuta yomi relay --channel qq y completa la vinculación en el chat privado.',
-        'Em seguida, adicione o bot como amigo no QQ, execute yomi relay --channel qq e conclua o pareamento no chat privado.',
+        `接下来在 QQ 里加这个 bot 为好友，再运行 ${next}，在私聊里完成配对。`,
+        `Next, add the bot as a QQ friend, then run ${next} and finish pairing in the private chat.`,
+        `A continuación, agrega el bot como amigo en QQ, ejecuta ${next} y completa la vinculación en el chat privado.`,
+        `Em seguida, adicione o bot como amigo no QQ, execute ${next} e conclua o pareamento no chat privado.`,
       ),
     );
-    return { id: String(me?.id || app.appId), name: String(me?.username ?? ''), handle: '' };
+    return record;
   },
 
-  async open(context: Context, options: RelayCommandOptions) {
-    const { io, store } = context;
-    let app = appOf(store.getSecret(secretName(context.account)) ?? '');
+  async open(context: Context, record: BotRecord) {
+    const app = appOf(context.store.getSecret(record.secretName) ?? '');
     if (!app) {
-      if (!io.interactive && !options.tokenStdin) {
-        // A service restarting would not fix this: say so and end without failing.
-        warn(
-          io,
-          tr(
-            '还没有设置 QQ bot 的 AppID 和 AppSecret：先运行 yomi relay --channel qq --set-app',
-            'No QQ bot AppID and AppSecret set yet: run yomi relay --channel qq --set-app first',
-            'Todavía no hay un AppID y un AppSecret de bot de QQ configurados: ejecuta primero yomi relay --channel qq --set-app',
-            'Ainda não há AppID e AppSecret de bot do QQ configurados: execute primeiro yomi relay --channel qq --set-app',
-          ),
-        );
-        return null;
-      }
-      app = await askApp(context, options.tokenStdin);
-      await checkApp(apiFor(app));
-      store.setSecret(secretName(context.account), asciiJson(app));
+      // A service restarting would not fix this: say so and end without failing.
+      warn(context.io, qqSetup.missingCredentials(record));
+      return null;
     }
-    return new QqChannel({ ...app, apiOrigin: process.env.YOMI_QQ_API_ORIGIN });
+    return new QqChannel({
+      ...app,
+      apiOrigin: process.env.YOMI_QQ_API_ORIGIN,
+      renewCommand: botCommand(record, '--set-app'),
+    });
+  },
+
+  missingCredentials: (record?: BotRecord) => {
+    const command = record ? botCommand(record, '--set-app') : 'yomi relay --channel qq --set-app';
+    return tr(
+      `还没有设置 QQ bot 的 AppID 和 AppSecret：先运行 ${command}`,
+      `No QQ bot AppID and AppSecret set yet: run ${command} first`,
+      `Todavía no hay un AppID y un AppSecret de bot de QQ configurados: ejecuta primero ${command}`,
+      `Ainda não há AppID e AppSecret de bot do QQ configurados: execute primeiro ${command}`,
+    );
   },
 
   async verify(channel) {
@@ -1277,12 +1292,6 @@ export const qqSetup: ChannelSetup = {
       if (error instanceof ChannelError && error.reason === 'unauthorized') throw refusedApp();
       throw error;
     }
-  },
-
-  /** `qq-<AppID>`: the lock of `QqChannel.lockName` (scope `qq:<AppID>`). */
-  lockNameOf(secret: string) {
-    const app = appOf(secret);
-    return app ? `qq-${app.appId}` : null;
   },
 
   /** The AppID names the bot, its scope (`qq:<AppID>`) and its lock (`qq-<AppID>`). */
@@ -1323,13 +1332,15 @@ export const qqSetup: ChannelSetup = {
     say(io);
   },
 
-  unpairedHint: () =>
-    tr(
-      '还没有配对：请在终端里运行一次 yomi relay --channel qq，按提示在 QQ 里给 bot 发送 /pair 配对码。',
-      'Not paired yet: run yomi relay --channel qq once in a terminal and send /pair with the pairing code to the bot in QQ as prompted.',
-      'Todavía no está vinculado: ejecuta yomi relay --channel qq una vez en una terminal y envía /pair con el código de vinculación al bot en QQ según las indicaciones.',
-      'Ainda não pareado: execute yomi relay --channel qq uma vez em um terminal e envie /pair com o código de pareamento para o bot no QQ conforme indicado.',
-    ),
+  unpairedHint: (record?: BotRecord) => {
+    const command = record ? botCommand(record, '--pair') : 'yomi relay --channel qq';
+    return tr(
+      `还没有配对：请在终端里运行一次 ${command}，按提示在 QQ 里给 bot 发送 /pair 配对码。`,
+      `Not paired yet: run ${command} once in a terminal and send /pair with the pairing code to the bot in QQ as prompted.`,
+      `Todavía no está vinculado: ejecuta ${command} una vez en una terminal y envía /pair con el código de vinculación al bot en QQ según las indicaciones.`,
+      `Ainda não pareado: execute ${command} uma vez em um terminal e envie /pair com o código de pareamento para o bot no QQ conforme indicado.`,
+    );
+  },
 
   serviceArgs: () => ({ lead: ['--channel', 'qq'], trail: [] }),
 

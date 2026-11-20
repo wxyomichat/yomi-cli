@@ -1,6 +1,8 @@
 import type { Context } from '../../commands/context.js'; // type-only: no runtime cycle
 import type { RelayCommandOptions } from '../../commands/relay.js';
 import type { PairingCode } from '../pairing.js';
+import type { BotRecord } from '../registry.js';
+import type { RelayState } from '../state.js';
 import type { BotIdentity, ChannelKind, RelayChannel } from './types.js';
 
 /**
@@ -18,11 +20,57 @@ export type StoredBot = {
 };
 
 /**
- * What `yomi relay --channel <kind>` needs from a channel around the relay itself: its
- * credentials (asked, checked, kept in the keychain), how it is named in the terminal, how its
- * owner pairs, its lock and its background service. commands/relay.ts runs the same flow for
- * every channel (flags, --forget, the service, sign-in, production, the lock, pairing, the run)
- * and asks the channel's setup only for these.
+ * `yomi relay --bot NAME <flag>`: a command for one registered bot, which the CLI accepts however
+ * many bots its channel has (the channel's own command asks which one when it has several).
+ */
+export const botCommand = (record: Pick<BotRecord, 'name'>, flag: string) =>
+  `yomi relay --bot ${record.name} ${flag}`;
+
+/** Credentials a setup asked for and checked, handed to the command to keep (`CredentialRequest.save`). */
+export type AcquiredBot = {
+  /** What the keychain keeps. */
+  secret: string;
+  /** Whose they are (`storedBot` of `secret`). */
+  stored: StoredBot;
+  /** The bot as the platform named it, when it was asked. */
+  identity: BotIdentity | null;
+};
+
+/**
+ * What `setCredentials` is asked for (design §1.2), and how it hands the credentials over: it asks
+ * for them, checks them with the platform, and leaves keeping them (keychain, state, registry, all
+ * or nothing) to `save`.
+ */
+export type CredentialRequest = {
+  options: RelayCommandOptions;
+  /** The bot whose credentials are set again (renew); null: a bot is added. */
+  renew: BotRecord | null;
+  /**
+   * The secrets this concerns: the renewed bot's, else every bot's of the channel (WeChat sends
+   * their tokens with a new QR code, so a ClawBot already linked here is not linked twice).
+   */
+  stored: string[];
+  /**
+   * Refuses (a UsageError) credentials that may not be used here, as soon as they name their bot
+   * and before the platform is asked more: another bot than the renewed one, one registered
+   * already.
+   */
+  check(stored: StoredBot): void;
+  /**
+   * Keeps them: the keychain, then the bot's state (`state`: WeChat's owner, under the registry's
+   * lock), then the registry; nothing of it stays when one fails (it throws). Returns the record.
+   */
+  save(bot: AcquiredBot, state?: (state: RelayState, record: BotRecord) => void): BotRecord;
+  /** Asked as a run starts (no bot yet): the lines about what to run next are left out. */
+  atStart: boolean;
+};
+
+/**
+ * What `yomi relay` needs from a channel around the relay itself: its credentials (asked, checked,
+ * handed over to be kept), how it is named in the terminal, how its owner pairs and its background
+ * service. commands/relay.ts runs the same flow for every channel (flags, the bots, --forget, the
+ * service, sign-in, production, the locks, pairing, the run) and asks the channel's setup only for
+ * these; where each bot's secret, state and lock are is its record's (relay/registry.ts).
  *
  * Each channel's file exports its setup next to its `RelayChannel` (`telegramSetup` in
  * channels/telegram.ts, `qqSetup` in channels/qq.ts, `wechatSetup` in channels/wechat.ts) and
@@ -33,6 +81,8 @@ export interface ChannelSetup {
   readonly kind: ChannelKind;
   /** 'yomi relay --telegram' | 'yomi relay --channel qq' | 'yomi relay --channel wechat --experimental' */
   readonly command: string;
+  /** The flag that sets its credentials: '--set-token' | '--set-app' | '--login'. */
+  readonly credentialsFlag: string;
   /** 'Telegram', 'QQ', 微信 / WeChat: in the terminal's language. */
   readonly displayName: string;
   /** Off unless `--experimental` is given (WeChat); the start-up says so. */
@@ -44,39 +94,48 @@ export interface ChannelSetup {
    * ("the bot token", "el token del bot"): 'bot token' | 'AppSecret' | 'bot_token'.
    */
   readonly secretLabel: string;
-  /** The keychain entry: `telegram-bot:<account>` | `qq-bot:<account>` | `wechat-ilink:<account>`. */
+  /**
+   * The channel's keychain entry of before the registry (`telegram-bot:<account>` |
+   * `qq-bot:<account>` | `wechat-ilink:<account>`), which a bot taken over keeps; a bot added later
+   * has `<it>#<key>`.
+   */
   secretName(account: string): string;
   /**
-   * True when the options ask to set credentials (`--set-token` / `--set-app` / `--login`). Asked
-   * first on every run that is not --forget, --uninstall-service or --service-status, before the
-   * keychain check and sign-in: a setup may refuse here (UsageError) what it cannot do at all.
+   * Asks for the credentials (`--set-token` / `--set-app` / `--login`, or as a run starts without
+   * a bot), checks them, hands them to `request.save`, then says what to do next (after an added
+   * bot of a channel that pairs with a code, the command says it: `--bot NAME --pair`). Resolves with the
+   * record kept, else null (nothing was saved: cancelled, or WeChat kept the login it had).
    */
-  wantsCredentials(options: RelayCommandOptions): boolean;
+  setCredentials(context: Context, request: CredentialRequest): Promise<BotRecord | null>;
   /**
-   * Asks for, checks and saves the credentials, then says what to do next. Resolves with the bot
-   * as the platform named it when the check asked it (its name and handle for the registry), else
-   * null.
+   * Builds the channel of `record` from its stored secret, never asking for one: null after a
+   * warning when none is stored (`missingCredentials`; a background service ends without failing,
+   * as a restart would not fix it).
    */
-  setCredentials(context: Context, options: RelayCommandOptions): Promise<BotIdentity | null>;
-  /**
-   * Builds the channel from the stored secret, asking for one first when none is stored and the
-   * channel can (a terminal, or --token-stdin). null after a warning (missing secret, nobody to
-   * ask): a background service ends without failing, as a restart would not fix it.
-   */
-  open(context: Context, options: RelayCommandOptions): Promise<RelayChannel | null>;
+  open(
+    context: Context,
+    record: BotRecord,
+    options: RelayCommandOptions,
+  ): Promise<RelayChannel | null>;
   /**
    * channel.verify() with a refusal of the credentials mapped to a UsageError that says what to
    * do (a background service prints it and ends).
    */
   verify(channel: RelayChannel): Promise<BotIdentity>;
-  /** The channel's `lockName` from a stored secret, offline (for --forget); null when unreadable. */
-  lockNameOf(secret: string): string | null;
+  /**
+   * No credentials stored: what to run (a warning line), for `record` when the bot is registered
+   * (`botCommand`), else the channel's command (it has no bot yet).
+   */
+  missingCredentials(record?: BotRecord): string;
   /** Whose secret it is, offline (the bot registry); null when unreadable. */
   storedBot(secret: string): StoredBot | null;
   /** Shows a new pairing code ('code' pairing): what to send the bot, and where. */
   printPairing?(context: Context, code: PairingCode, identity: BotIdentity): void;
-  /** Why a relay without an owner cannot start here, and what to run (a warning line). */
-  unpairedHint(): string;
+  /**
+   * Why a relay without an owner cannot start here, and what to run (a warning line): `record`'s
+   * own command when it is given (`botCommand`), else the channel's.
+   */
+  unpairedHint(record?: BotRecord): string;
   /**
    * The background service's ExecStart words: `lead` right after 'relay', `trail` after
    * --character (where Telegram's --no-drafts always was).

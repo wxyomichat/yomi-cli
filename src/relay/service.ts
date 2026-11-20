@@ -15,6 +15,8 @@ import type { ChannelKind } from './channels/types.js';
  * The unit holds no secrets: the relay reads its tokens from the keychain when it starts.
  * Each channel has its own names (Telegram's are the ones it always had: `…relay.<env>`,
  * `yomi-relay-<env>.service`; QQ `…relay.qq-<env>`, WeChat `…relay.wechat-<env>`).
+ * While the bots change (added, signed in again, bound, removed), `yomi relay` stops a running
+ * service and starts it again afterwards (`servicePid`, `pauseService`, `resumeService`).
  */
 
 /** Channel names as unit files write them (ASCII). */
@@ -52,6 +54,12 @@ export type ServicePlan = {
   /** Run before `install` and on uninstall; failures are ignored (not loaded yet). */
   stop: string[][];
   status: string[];
+  /** Stops the running service and leaves it installed (`pauseService`). */
+  pause: string[];
+  /** Starts the installed service again (`resumeService`). */
+  resume: string[];
+  /** Asks for the running service's process (`servicePid`). */
+  pid: string[];
 };
 
 function suffix(account: string): string {
@@ -137,6 +145,9 @@ ${environment}
       stop: [['launchctl', 'bootout', `${domain}/${label}`]],
       install: [['launchctl', 'bootstrap', domain, path]],
       status: ['launchctl', 'print', `${domain}/${label}`],
+      pause: ['launchctl', 'bootout', `${domain}/${label}`],
+      resume: ['launchctl', 'bootstrap', domain, path],
+      pid: ['launchctl', 'print', `${domain}/${label}`],
     };
   }
   if (platform === 'linux') {
@@ -173,6 +184,9 @@ WantedBy=default.target
         ['systemctl', '--user', 'enable', '--now', unit],
       ],
       status: ['systemctl', '--user', 'status', '--no-pager', unit],
+      pause: ['systemctl', '--user', 'stop', unit],
+      resume: ['systemctl', '--user', 'start', unit],
+      pid: ['systemctl', '--user', 'show', '--property', 'MainPID', '--value', unit],
     };
   }
   throw new Error(
@@ -231,4 +245,32 @@ export function uninstallService(plan: ServicePlan, run: Runner = runCommand): b
   rmSync(plan.path, { force: true });
   if (plan.platform === 'linux') run('systemctl', ['--user', 'daemon-reload']);
   return existed;
+}
+
+/** The process of the installed service while it runs; 0 when it does not run (or nobody says). */
+export function servicePid(plan: ServicePlan, run: Runner = runCommand): number {
+  if (!existsSync(plan.path)) return 0;
+  const [command, ...args] = plan.pid;
+  const result = run(command, args);
+  if (result.status !== 0) return 0;
+  // launchd: `pid = 1234` in its description; systemd: the bare MainPID (0 when stopped).
+  const found =
+    plan.platform === 'darwin' ? /\bpid = (\d+)/.exec(result.output)?.[1] : result.output;
+  const pid = Number(found ?? 0);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+
+/**
+ * Stops the service while the bots change (`yomi relay` changes them with no relay running), and
+ * leaves it installed for `resumeService`.
+ */
+export function pauseService(plan: ServicePlan, run: Runner = runCommand) {
+  const [command, ...args] = plan.pause;
+  run(command, args);
+}
+
+/** Starts the installed service again after `pauseService`; false when it could not. */
+export function resumeService(plan: ServicePlan, run: Runner = runCommand): boolean {
+  const [command, ...args] = plan.resume;
+  return run(command, args).status === 0;
 }

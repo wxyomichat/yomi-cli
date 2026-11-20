@@ -28,7 +28,8 @@ printf '%s\n%s\n' "$APPID" "$APPSECRET" | yomi relay --channel qq --set-app --to
 - relay 先用它们向 QQ 换一个访问令牌（access token），QQ 不接受时不会保存。
 - 然后连一次 QQ 网关，确认这个机器人有单聊事件的权限；这会用掉 QQ 每天给机器人的一次连接次数。没有权限时只提示，照常保存。
 - AppID 和 AppSecret 存在系统钥匙串里（没有钥匙串时，要加 `--allow-file-store` 才会存进 0600 权限的本地文件）；访问令牌只在内存里，快过期时自动换新。它们都不接受命令行参数和环境变量，也不会出现在日志里。
-- relay 运行时 `--set-app` 会被拒绝：先停止 relay。
+- 终端里有 relay 在运行时 `--set-app` 会被拒绝：先停止 relay；后台服务在运行时，命令会先停止它，保存完再重新启动。
+- 已经有 QQ bot 时，`--set-app` 只重新设置它自己的 AppSecret（AppID 必须相同，否则在连接 QQ 之前就会被拒绝）；要再添加一个 QQ bot，加 `--character <ID>` 或 `--bot <新名字>`。
 
 ## 3. 配对
 
@@ -89,9 +90,13 @@ QQ 的常见问题里写着，机器人输出违规可能被封禁且「暂不�
 
 ## 8. AppSecret 泄露时
 
+只有一个 QQ bot 时：
+
 1. 停止 relay，删除本机保存的凭证和配对：`yomi relay --channel qq --forget`（后台服务也会一起删除；其他通道的凭证不受影响）。
 2. 在 q.qq.com 的机器人管理端重置 AppSecret（QQ 建议定期重置，怀疑泄露时立即重置）。
 3. 用新的 AppSecret 重新 `yomi relay --channel qq --set-app`。
+
+有多个 QQ bot 时，不用先删除：在 q.qq.com 重置这个机器人的 AppSecret，再用新的 AppSecret 运行 `yomi relay --bot <名字> --set-app`（名字见 `yomi relay --list`）。AppID 不变，主人和记录都保留；后台服务在运行时会先停止它，保存完再重新启动。
 
 还在运行的 relay 在 AppSecret 被重置后会提示「QQ 不认这个 AppID/AppSecret」并停止。
 

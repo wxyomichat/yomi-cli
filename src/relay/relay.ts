@@ -233,6 +233,8 @@ export type RelayOptions = {
   pairing: PairingCode | null;
   /** Called when a spent or expired code is replaced (the terminal shows the new one). */
   onPairingCode?: (code: PairingCode) => void;
+  /** Called once an owner paired with the code and was answered (and welcomed). */
+  onPaired?: () => void;
   replyTimeoutMs: number;
   /** Minimum time between two Telegram calls in the chat (when a `TelegramBot` is given). */
   intervalMs: number;
@@ -1020,6 +1022,12 @@ export class Relay {
     const handle = this.identity.handle;
     const bot = handle ? `@${handle}` : this.identity.name || name;
     await this.say(this.bound ? this.texts.pairedBound(bot) : this.texts.paired(bot));
+    await this.greetPaired();
+    this.options.onPaired?.();
+  }
+
+  /** What follows "Paired": the character, and its welcome when one is owed. */
+  private async greetPaired() {
     const character = this.state.data.character;
     if (!character)
       return void (await this.say(

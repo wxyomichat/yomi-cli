@@ -30,22 +30,28 @@ export { characterOwner };
  *   had, with its character, and with its owner as already welcomed (`welcomeBaseline`). Nothing
  *   else is written: the state file keeps the owner, the budget, the charge still to be measured,
  *   the openings shown, the welcomes and the cursor, and nothing of it is resent.
- * - Credentials set later (`--set-token`, `--set-app`, `--login`, or typed at the start) make the
- *   channel's bot the one they belong to (`adopt`): the same bot is kept, another one replaces it.
- * - A run checks the stored credentials against the record: credentials of another bot (written
- *   by something that did not update the registry) are never run as this one.
+ * - A bot added later (`yomi relay --telegram --set-token`, `--set-app`, `--login`, with or without
+ *   `--character`) is a record of its own (`add`): a random key, its secret under
+ *   `<the channel's secret name>#<key>`, the state scope and lock its platform id gives (Telegram's
+ *   bot id, `qq:<AppID>`), and for WeChat, whose ClawBots one person may link several of, a scope
+ *   and lock of its own (`bot:<key>`, `bot-<key>`). A bot already registered is never added twice.
+ * - Credentials set again for a bot (`renew`) must be that bot's: the same Telegram bot id, the
+ *   same QQ AppID; a WeChat login may come with a new ClawBot id, never another registered one.
+ * - A run checks the stored credentials against the record (`sameBot`): credentials of another bot
+ *   (written by something that did not update the registry) are never run as this one.
  * - Each bot talks as the one character of its record, set when it is added or with `yomi relay
  *   --bot NAME --character ID` (`rebind`), never from the chat. One character goes with one bot: a
  *   second bot set to it is refused (`DuplicateCharacter`), or registered without one when it is
- *   taken over or adopted.
+ *   taken over.
  * - `characterOwners` remembers whom each character was last shown to (the owner a bot of it was
  *   last paired, started or welcomed with), so a welcome after the character changed hands shows
  *   its opening, never the earlier owner's latest reply. It outlives the bots: the conversation
  *   stays on the account.
  *
  * Every change is a short read-modify-write under `locks/relay-registry-<hash>.lock` (`commit`),
- * checked again there (names, characters, limits). A registry that cannot be read is an error, never
- * repaired on its own.
+ * checked again there (names, characters, platform ids, limits); what goes with it (a bot's secret
+ * and state) is written there too, right before the registry. A registry that cannot be read is an
+ * error, never repaired on its own.
  */
 
 /** The owner a bot had before the registry, as `RelayState` keeps owners (a hash), and its character then. */
@@ -192,40 +198,81 @@ export class DuplicateCharacter extends UsageError {
   }
 }
 
+/** The bot credentials name is registered already, as `record`. */
+export function alreadyRegistered(record: BotRecord): string {
+  const setup = channelSetup(record.kind);
+  const renew = `${setup.command} --bot ${record.name} ${setup.credentialsFlag}`;
+  const bind = `yomi relay --bot ${record.name} --character ID`;
+  return tr(
+    `这个 bot 已经登记在这台电脑上了，名字是 "${record.name}"。要重新设置它的凭证：${renew}；要给它换角色：${bind}`,
+    `This bot is registered on this computer already, as "${record.name}". To set its credentials again: ${renew}; to give it another character: ${bind}`,
+    `Este bot ya está registrado en este equipo, como "${record.name}". Para volver a configurar sus credenciales: ${renew}; para darle otro personaje: ${bind}`,
+    `Este bot já está registrado neste computador, como "${record.name}". Para configurar as credenciais dele de novo: ${renew}; para dar outro personagem a ele: ${bind}`,
+  );
+}
+
+/**
+ * Whether stored credentials (`StoredBot`, read offline) are the registered bot's: by the scope
+ * they name (the Telegram bot id, the QQ AppID, the WeChat scanner of a login of before the
+ * registry), and for WeChat by its ClawBot id too, which a login signed in again for the bot
+ * (`renew`) may change, scanner and all. A WeChat bot with a scope of its own (`bot:<key>`) is
+ * named by its ClawBot id alone.
+ */
+export function sameBot(record: BotRecord, stored: StoredBot): boolean {
+  if (record.kind === 'wechat' && record.platformId && stored.platformId === record.platformId)
+    return true;
+  if (record.scope.startsWith('bot:')) return !record.platformId;
+  return stored.scope === record.scope;
+}
+
+function tooMany(): UsageError {
+  return new UsageError(
+    tr(
+      `bot 太多了：这台电脑上最多登记 ${MAX_BOTS} 个。`,
+      `Too many bots: at most ${MAX_BOTS} can be registered on this computer.`,
+      `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS} en este equipo.`,
+      `Bots demais: no máximo ${MAX_BOTS} podem ser registrados neste computador.`,
+    ),
+  );
+}
+
+function tooManyOfKind(): UsageError {
+  return new UsageError(
+    tr(
+      `bot 太多了：每个通道最多登记 ${MAX_BOTS_PER_KIND} 个。`,
+      `Too many bots: at most ${MAX_BOTS_PER_KIND} per channel can be registered.`,
+      `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS_PER_KIND} por canal.`,
+      `Bots demais: no máximo ${MAX_BOTS_PER_KIND} por canal podem ser registrados.`,
+    ),
+  );
+}
+
+function badName(name: string): UsageError {
+  return new UsageError(
+    tr(
+      `bot 名字 "${name}" 不能用：要用小写字母、数字、- 或 _，最多 32 个字符，不能和别的 bot 重名。`,
+      `The bot name "${name}" cannot be used: use lowercase letters, digits, - or _, at most 32 characters, unlike any other bot's.`,
+      `El nombre de bot "${name}" no se puede usar: usa letras minúsculas, dígitos, - o _, como máximo 32 caracteres, distinto del de cualquier otro bot.`,
+      `O nome de bot "${name}" não pode ser usado: use letras minúsculas, dígitos, - ou _, no máximo 32 caracteres, diferente do de qualquer outro bot.`,
+    ),
+  );
+}
+
 /** What a registry may not hold (a UsageError to throw): null when it is fine. */
 function problem(file: BotRegistryFile): UsageError | null {
-  const refuse = (message: string) => new UsageError(message);
-  if (file.bots.length > MAX_BOTS)
-    return refuse(
-      tr(
-        `bot 太多了：这台电脑上最多登记 ${MAX_BOTS} 个。`,
-        `Too many bots: at most ${MAX_BOTS} can be registered on this computer.`,
-        `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS} en este equipo.`,
-        `Bots demais: no máximo ${MAX_BOTS} podem ser registrados neste computador.`,
-      ),
-    );
+  if (file.bots.length > MAX_BOTS) return tooMany();
   for (const kind of CHANNEL_KINDS)
     if (file.bots.filter((record) => record.kind === kind).length > MAX_BOTS_PER_KIND)
-      return refuse(
-        tr(
-          `bot 太多了：每个通道最多登记 ${MAX_BOTS_PER_KIND} 个。`,
-          `Too many bots: at most ${MAX_BOTS_PER_KIND} per channel can be registered.`,
-          `Demasiados bots: se pueden registrar como máximo ${MAX_BOTS_PER_KIND} por canal.`,
-          `Bots demais: no máximo ${MAX_BOTS_PER_KIND} por canal podem ser registrados.`,
-        ),
-      );
+      return tooManyOfKind();
   const names = new Set<string>();
   const characters = new Map<string, string>();
+  const platforms = new Map<string, BotRecord>();
   for (const record of file.bots) {
-    if (!NAME.test(record.name) || names.has(record.name))
-      return refuse(
-        tr(
-          `bot 名字 "${record.name}" 不能用：要用小写字母、数字、- 或 _，最多 32 个字符，不能和别的 bot 重名。`,
-          `The bot name "${record.name}" cannot be used: use lowercase letters, digits, - or _, at most 32 characters, unlike any other bot's.`,
-          `El nombre de bot "${record.name}" no se puede usar: usa letras minúsculas, dígitos, - o _, como máximo 32 caracteres, distinto del de cualquier otro bot.`,
-          `O nome de bot "${record.name}" não pode ser usado: use letras minúsculas, dígitos, - ou _, no máximo 32 caracteres, diferente do de qualquer outro bot.`,
-        ),
-      );
+    const platform = record.platformId && `${record.kind}:${record.platformId}`;
+    const twin = platform ? platforms.get(platform) : undefined;
+    if (twin) return new UsageError(alreadyRegistered(twin));
+    if (platform) platforms.set(platform, record);
+    if (!NAME.test(record.name) || names.has(record.name)) return badName(record.name);
     names.add(record.name);
     const npcId = record.character?.npcId;
     if (!npcId) continue;
@@ -233,6 +280,24 @@ function problem(file: BotRegistryFile): UsageError | null {
     if (other !== undefined) return new DuplicateCharacter(npcId, other);
     characters.set(npcId, record.name);
   }
+  return null;
+}
+
+/**
+ * Why a bot of `kind` named `name` ('': its default name) could not be added to `registry` as it
+ * is now, else null: asked before the platform is (a QR code scanned, a gateway session started),
+ * and checked again under the registry's lock when the bot is kept.
+ */
+export function addProblem(
+  registry: BotRegistry,
+  kind: ChannelKind,
+  name: string,
+): UsageError | null {
+  const bots = registry.list();
+  if (name && (!NAME.test(name) || registry.find(name))) return badName(name);
+  if (bots.length >= MAX_BOTS) return tooMany();
+  if (bots.filter((record) => record.kind === kind).length >= MAX_BOTS_PER_KIND)
+    return tooManyOfKind();
   return null;
 }
 
@@ -366,10 +431,15 @@ export class BotRegistry {
   /**
    * Changes the registry: `change` gets the file as it is on disk now (read again under the lock)
    * and returns false when it changed nothing (nothing is written). The result is checked
-   * (names, limits: a UsageError; characters: `DuplicateCharacter`) before it is written with the
-   * next revision.
+   * (names, platform ids, limits: a UsageError; characters: `DuplicateCharacter`), then `effects`
+   * runs (what must be written with the change, still under the lock: a bot's secret and state),
+   * then the file is written with the next revision. Whoever gave `effects` undoes them when this
+   * throws.
    */
-  commit(change: (file: BotRegistryFile) => boolean | void): void {
+  commit(
+    change: (file: BotRegistryFile) => boolean | void,
+    effects?: (file: BotRegistryFile) => void,
+  ): void {
     withFileLockSync(lockPath(this.account, this.dir), () => {
       const file = readRegistry(this.path, this.account);
       if (change(file) === false) {
@@ -378,6 +448,7 @@ export class BotRegistry {
       }
       const refusal = problem(file);
       if (refusal) throw refusal;
+      effects?.(file);
       file.revision += 1;
       writeJsonFile(this.path, file);
       this.data = file;
@@ -385,47 +456,91 @@ export class BotRegistry {
   }
 
   /**
-   * The channel's bot is now the one `bot.stored` names (its credentials were just set): the
-   * registered one is kept when it is that bot (its platform id, label and username brought up to
-   * date), else a record for it replaces the registered one. Its character is the one its state
-   * file has, unless another bot has that character. Returns the record, and what to warn about.
+   * Registers a new bot of `bot.kind` (design §1.2), as the record `effects` gets before the
+   * registry is written, under its lock: its secret goes to `<the channel's secret name>#<key>`,
+   * its state and lock are its platform id's (Telegram, QQ) or its own (WeChat: `bot:<key>`,
+   * `bot-<key>`), its name is `name` or one made from the bot (`defaultName`). Refused, with
+   * nothing written: a bot of the same platform id (`alreadyRegistered`), a name or character
+   * another bot has, too many bots. Returns the record.
    */
-  adopt(bot: NewBot, now = Date.now()): { record: BotRecord; warnings: string[] } {
-    let record: BotRecord | undefined;
-    const warnings: string[] = [];
-    this.commit((file) => {
-      warnings.length = 0;
-      const current = file.bots.find(
-        (item) => item.kind === bot.kind && item.secretName === bot.secretName,
-      );
-      if (current && current.scope === bot.stored.scope) {
-        record = current;
-        return refresh(current, bot);
-      }
-      const others = file.bots.filter((item) => item !== current);
-      const fresh = recordOf(
-        bot,
-        existingState(this.account, bot.stored.scope, bot.kind, this.dir),
-        new Set(others.map((item) => item.name)),
-        now,
-        false,
-      );
-      const holder = fresh.character && others.find((item) => sameNpc(item, fresh));
-      if (holder && fresh.character) {
-        warnings.push(sharedCharacter(fresh, holder, fresh.character));
-        fresh.character = null;
-        fresh.boundAt = 0;
-      }
-      if (fresh.character && fresh.welcomeBaseline)
-        file.characterOwners[fresh.character.npcId] ??=
-          `${bot.kind}:${fresh.welcomeBaseline.owner}`;
-      // In the place of the one it replaces.
-      file.bots = current
-        ? file.bots.map((item) => (item === current ? fresh : item))
-        : [...file.bots, fresh];
-      record = fresh;
-    });
-    return { record: record!, warnings };
+  add(
+    bot: Omit<NewBot, 'secretName'> & {
+      name?: string;
+      character?: RelayCharacter | null;
+      experimentalAcceptedAt?: number;
+    },
+    effects?: (record: BotRecord) => void,
+    now = Date.now(),
+  ): BotRecord {
+    let added: BotRecord | undefined;
+    this.commit(
+      (file) => {
+        const twin = file.bots.find((record) => samePlatform(record, bot.kind, bot.stored));
+        if (twin) throw new UsageError(alreadyRegistered(twin));
+        const character = bot.character ?? null;
+        const holder =
+          character && file.bots.find((record) => record.character?.npcId === character.npcId);
+        if (holder && character) throw new DuplicateCharacter(character.npcId, holder.name);
+        const key = randomBytes(6).toString('hex');
+        const own = bot.kind === 'wechat';
+        const record = recordOf(
+          {
+            ...bot,
+            secretName: `${channelSetup(bot.kind).secretName(this.account)}#${key}`,
+            stored: {
+              platformId: bot.stored.platformId,
+              scope: own ? `bot:${key}` : bot.stored.scope,
+              lockName: own ? `bot-${key}` : bot.stored.lockName,
+            },
+          },
+          null,
+          new Set(file.bots.map((item) => item.name)),
+          now,
+          false,
+        );
+        record.key = key;
+        if (bot.name) record.name = bot.name;
+        record.character = character;
+        record.boundAt = character ? now : 0;
+        if (bot.experimentalAcceptedAt) record.experimentalAcceptedAt = bot.experimentalAcceptedAt;
+        file.bots = [...file.bots, record];
+        added = record;
+      },
+      () => effects?.(added!),
+    );
+    return added!;
+  }
+
+  /**
+   * New credentials for the bot `key` (design §1.2, renew), as `effects` writes them before the
+   * registry, under its lock: they must be its own (`sameBot`; a WeChat login may name a new
+   * ClawBot id, never another registered bot's). Its platform id, label and username follow them
+   * and its `generation` moves on. Refused: credentials of another bot, a bot that is gone.
+   * Returns the record.
+   */
+  renew(
+    key: string,
+    bot: Omit<NewBot, 'kind' | 'secretName'>,
+    effects?: (record: BotRecord) => void,
+  ): BotRecord {
+    let renewed: BotRecord | undefined;
+    this.commit(
+      (file) => {
+        const record = file.bots.find((item) => item.key === key);
+        if (!record) throw new UsageError(gone());
+        const twin = file.bots.find(
+          (item) => item.key !== key && samePlatform(item, record.kind, bot.stored),
+        );
+        if (twin) throw new UsageError(alreadyRegistered(twin));
+        if (record.kind !== 'wechat' && !sameBot(record, bot.stored))
+          throw new UsageError(anotherBot(record));
+        refresh(record, { ...bot, kind: record.kind, secretName: record.secretName });
+        record.generation += 1;
+        renewed = record;
+      },
+      () => effects?.(renewed!),
+    );
+    return renewed!;
   }
 
   /** Brings the bot's platform id, label and username up to date with what the platform said. */
@@ -523,13 +638,11 @@ export class BotRegistry {
     });
   }
 
-  /** Takes the channel's bot of `secretName` away (`--forget`); true when there was one. */
-  forget(kind: ChannelKind, secretName: string): boolean {
+  /** Takes the bot `key` away (`--forget`); true when it was there. */
+  remove(key: string): boolean {
     let removed = false;
     this.commit((file) => {
-      const kept = file.bots.filter(
-        (record) => !(record.kind === kind && record.secretName === secretName),
-      );
+      const kept = file.bots.filter((record) => record.key !== key);
       removed = kept.length < file.bots.length;
       if (!removed) return false;
       file.bots = kept;
@@ -547,6 +660,23 @@ function gone(): string {
     'Este bot acabou de ser removido ou substituído: veja os bots atuais com yomi relay --list.',
   );
 }
+
+/** Credentials set again for `record` that are another bot's (design §1.2, renew). */
+export function anotherBot(record: BotRecord): string {
+  const setup = channelSetup(record.kind);
+  const add = `${setup.command} ${setup.credentialsFlag} --character ID`;
+  const forget = `yomi relay --forget --bot ${record.name}`;
+  return tr(
+    `这些凭证属于另一个 bot，不是 ${record.name}，没有保存。要把它作为新的 bot 加上：${add}；要先删掉 ${record.name}：${forget}`,
+    `These credentials belong to another bot than ${record.name}, so they were not saved. To add it as a bot of its own: ${add}; to remove ${record.name} first: ${forget}`,
+    `Estas credenciales son de otro bot, no de ${record.name}, así que no se guardaron. Para agregarlo como un bot propio: ${add}; para eliminar primero ${record.name}: ${forget}`,
+    `Estas credenciais são de outro bot, não de ${record.name}, então não foram salvas. Para adicioná-lo como um bot próprio: ${add}; para remover ${record.name} primeiro: ${forget}`,
+  );
+}
+
+/** `record` is the bot of `kind` whose platform id `stored` names. */
+const samePlatform = (record: BotRecord, kind: ChannelKind, stored: StoredBot) =>
+  record.kind === kind && stored.platformId !== '' && record.platformId === stored.platformId;
 
 const sameNpc = (record: BotRecord, other: BotRecord) =>
   Boolean(record.character && record.character.npcId === other.character?.npcId);
@@ -607,6 +737,9 @@ export function migrateRegistry(input: MigrationInput): {
       if (registry.bySecret(kind, secretName)) return [];
       const secret = store.getSecret(secretName);
       const stored = secret ? setup.storedBot(secret) : null;
+      // A bot registered since (added under its own secret) is not taken over a second time.
+      if (stored && registry.list(kind).some((record) => samePlatform(record, kind, stored)))
+        return [];
       return stored ? [{ kind, secretName, stored }] : [];
     });
   const found = waiting();
