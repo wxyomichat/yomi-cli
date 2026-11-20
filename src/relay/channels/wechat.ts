@@ -1084,8 +1084,6 @@ export const wechatSetup: ChannelSetup = {
 
   unpairedHint,
 
-  serviceArgs: () => ({ lead: ['--channel', 'wechat', '--experimental'], trail: [] }),
-
   forgetHint: () =>
     tr(
       '要让这次登录彻底失效，还要在手机微信里解除 ClawBot 的绑定。',

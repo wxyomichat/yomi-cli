@@ -542,7 +542,7 @@ describe('the policy per channel', () => {
   });
 });
 
-describe('the background service per channel', () => {
+describe('the background service units', () => {
   const base = {
     account: 'test',
     node: '/opt/node/bin/node',
@@ -586,6 +586,43 @@ describe('the background service per channel', () => {
     expect(
       servicePlan({ ...base, platform: 'linux', home: '/home/me', uid: 1000 }).content,
     ).toContain('Description=Yomi CLI Telegram relay (test)\n');
+  });
+
+  it('names the one unit of every bot apart from the per-channel units of before it', () => {
+    const mac = servicePlan({
+      ...base,
+      channel: 'hub',
+      platform: 'darwin',
+      home: '/Users/me',
+      uid: 501,
+    });
+    expect(mac.label).toBe('io.yomichat.yomi-cli.relay.hub-test');
+    expect(mac.path).toBe(
+      '/Users/me/Library/LaunchAgents/io.yomichat.yomi-cli.relay.hub-test.plist',
+    );
+    expect(mac.log).toBe('/Users/me/.config/yomi-cli/logs/relay-hub-test.log');
+    expect(mac.content).toContain(
+      '<string>/Users/me/.config/yomi-cli/logs/relay-hub-test.log</string>',
+    );
+    const linux = servicePlan({
+      ...base,
+      account: 'prod',
+      channel: 'hub',
+      platform: 'linux',
+      home: '/home/me',
+      uid: 1000,
+    });
+    expect(linux.label).toBe('yomi-relay-hub-prod.service');
+    expect(linux.content).toContain('Description=Yomi CLI relay (prod)\n');
+    expect(linux.content).toContain(
+      'StandardOutput=append:/Users/me/.config/yomi-cli/logs/relay-hub-prod.log\n',
+    );
+    // None of them is another's.
+    const labels = (['hub', 'telegram', 'qq', 'wechat'] as const).map(
+      (channel) =>
+        servicePlan({ ...base, channel, platform: 'darwin', home: '/Users/me', uid: 501 }).label,
+    );
+    expect(new Set(labels).size).toBe(4);
   });
 });
 

@@ -67,10 +67,11 @@ export type CredentialRequest = {
 
 /**
  * What `yomi relay` needs from a channel around the relay itself: its credentials (asked, checked,
- * handed over to be kept), how it is named in the terminal, how its owner pairs and its background
- * service. commands/relay.ts runs the same flow for every channel (flags, the bots, --forget, the
- * service, sign-in, production, the locks, pairing, the run) and asks the channel's setup only for
- * these; where each bot's secret, state and lock are is its record's (relay/registry.ts).
+ * handed over to be kept), how it is named in the terminal and how its owner pairs (the background
+ * service runs every bot, whatever its channel). commands/relay.ts runs the same flow for every
+ * channel (flags, the bots, --forget, the service, sign-in, production, the locks, pairing, the
+ * run) and asks the channel's setup only for these; where each bot's secret, state and lock are is
+ * its record's (relay/registry.ts).
  *
  * Each channel's file exports its setup next to its `RelayChannel` (`telegramSetup` in
  * channels/telegram.ts, `qqSetup` in channels/qq.ts, `wechatSetup` in channels/wechat.ts) and
@@ -136,11 +137,6 @@ export interface ChannelSetup {
    * own command when it is given (`botCommand`), else the channel's.
    */
   unpairedHint(record?: BotRecord): string;
-  /**
-   * The background service's ExecStart words: `lead` right after 'relay', `trail` after
-   * --character (where Telegram's --no-drafts always was).
-   */
-  serviceArgs(options: RelayCommandOptions): { lead: string[]; trail: string[] };
   /** Printed after --forget: how to make the deleted secret useless where it was issued. */
   forgetHint(): string;
   /** How the terminal names the bot in "Relay running: <label> ⇄ Yomi …" (Telegram `@username`). */

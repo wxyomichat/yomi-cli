@@ -126,18 +126,23 @@ afterAll(async () => {
 
 describe('choosing the channel', () => {
   it('knows three, takes --telegram as --channel telegram, and needs one only to set one up', async () => {
-    // Without a channel a run takes every registered bot: there is none yet.
-    const none = await run(['relay', '--allow-file-store']);
+    // Without a channel a run takes every registered bot: there is none yet. In a terminal that
+    // is an error; with nobody at it (a background service whose last bot went) it is said, and
+    // the run ends without failing.
+    const none = await run(['relay', '--allow-file-store'], { interactive: true });
     expect(none.code).toBe(1);
     expect(none.err).toContain('这台电脑上还没有 bot：用 yomi relay --telegram --set-token');
-    // A new bot's credentials and the service are one channel's: it must be named.
-    for (const flag of ['--set-token', '--install-service', '--service-status']) {
-      const unnamed = await run(['relay', flag, '--allow-file-store']);
-      expect(unnamed.code, flag).toBe(1);
-      expect(unnamed.err, flag).toContain(
-        '选择一个通道：--channel telegram|qq|wechat（或 --telegram）',
-      );
-    }
+    const unattended = await run(['relay', '--allow-file-store']);
+    expect(unattended.code).toBe(0);
+    expect(unattended.err).toContain('这台电脑上还没有 bot：用 yomi relay --telegram --set-token');
+    // A new bot's credentials are one channel's: it must be named.
+    const unnamed = await run(['relay', '--set-token', '--allow-file-store']);
+    expect(unnamed.code).toBe(1);
+    expect(unnamed.err).toContain('选择一个通道：--channel telegram|qq|wechat（或 --telegram）');
+    // The background service is every bot's: it needs no channel, and has nothing to run yet.
+    const service = await run(['relay', '--install-service', '--allow-file-store']);
+    expect(service.code).toBe(1);
+    expect(service.err).toContain('这台电脑上还没有 bot，后台服务没有可运行的');
     // --forget says what it takes away.
     const forget = await run(['relay', '--forget', '--allow-file-store']);
     expect(forget.code).toBe(1);
@@ -316,36 +321,30 @@ describe("each channel's names", () => {
     ]);
   });
 
-  it("give each channel its service, with Telegram's arguments as they always were", () => {
-    const telegram = channelSetup('telegram');
+  it('give the one background service a run of every bot, with no channel, bot or character', () => {
     // No cap chosen: none written, so the service runs uncapped like the foreground relay.
-    expect(relayServiceArgs(prod, telegram, options)).toEqual([
+    expect(relayServiceArgs(prod, options)).toEqual(['relay', '--env', 'prod', '--confirm-prod']);
+    expect(relayServiceArgs(prod, { ...options, maxSpend: 0 })).toEqual([
       'relay',
-      '--telegram',
-      '--env',
-      'prod',
-      '--confirm-prod',
-    ]);
-    expect(relayServiceArgs(prod, telegram, { ...options, maxSpend: 0 })).toEqual([
-      'relay',
-      '--telegram',
       '--env',
       'prod',
       '--max-spend',
       '0',
       '--confirm-prod',
     ]);
-    expect(
-      relayServiceArgs(test, telegram, {
-        ...options,
-        allowFileStore: true,
-        maxSpend: 20,
-        characterId: '7300000000000009001',
-        drafts: false,
-      }),
-    ).toEqual([
+    // The channel, the bots, the character and --experimental are the registry's, never the unit's.
+    const args = relayServiceArgs(test, {
+      ...options,
+      channel: 'wechat',
+      bots: ['lin'],
+      experimental: true,
+      allowFileStore: true,
+      maxSpend: 20,
+      characterId: '7300000000000009001',
+      drafts: false,
+    });
+    expect(args).toEqual([
       'relay',
-      '--telegram',
       '--env',
       'test',
       '--lane',
@@ -353,39 +352,25 @@ describe("each channel's names", () => {
       '--allow-file-store',
       '--max-spend',
       '20',
-      '--character',
-      '7300000000000009001',
       '--no-drafts',
     ]);
-    expect(relayServiceArgs(prod, channelSetup('qq'), { ...options, channel: 'qq' })).toEqual([
-      'relay',
-      '--channel',
-      'qq',
-      '--env',
-      'prod',
-      '--confirm-prod',
-    ]);
-    const args = relayServiceArgs(prod, channelSetup('wechat'), {
-      ...options,
-      channel: 'wechat',
-      experimental: true,
-    });
-    expect(args.slice(0, 4)).toEqual(['relay', '--channel', 'wechat', '--experimental']);
     const plan = servicePlan({
       account: 'prod',
-      channel: 'wechat',
+      channel: 'hub',
       node: '/usr/bin/node',
       script: '/opt/yomi/dist/cli.js',
-      args,
+      args: relayServiceArgs(prod, options),
       environment: {},
       logDir: '/home/me/.config/yomi-cli/logs',
       platform: 'linux',
       home: '/home/me',
       uid: 1000,
     });
-    expect(plan.label).toBe('yomi-relay-wechat-prod.service');
+    expect(plan.label).toBe('yomi-relay-hub-prod.service');
+    expect(plan.log).toBe('/home/me/.config/yomi-cli/logs/relay-hub-prod.log');
+    expect(plan.content).toContain('Description=Yomi CLI relay (prod)\n');
     expect(plan.content).toContain(
-      'ExecStart="/usr/bin/node" "/opt/yomi/dist/cli.js" "relay" "--channel" "wechat" "--experimental" "--env" "prod"',
+      'ExecStart="/usr/bin/node" "/opt/yomi/dist/cli.js" "relay" "--env" "prod" "--confirm-prod"\n',
     );
   });
 
@@ -484,7 +469,7 @@ describe('--forget', () => {
       const refused = await run(['relay', '--channel', 'qq', '--forget']);
       expect(refused.code).toBe(1);
       expect(refused.err).toContain(
-        `relay 正在运行（进程 ${process.pid}）：先停止它（Ctrl+C，或 --uninstall-service），再 --forget。`,
+        `relay 正在运行（进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --forget。`,
       );
       expect(states()).toEqual(['telegram', 'qq', 'wechat']);
       // Another channel's relay is no reason to keep this one's.

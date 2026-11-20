@@ -526,11 +526,6 @@ export const telegramSetup: ChannelSetup = {
     );
   },
 
-  serviceArgs: (options: RelayCommandOptions) => ({
-    lead: ['--telegram'],
-    trail: options.drafts ? [] : ['--no-drafts'],
-  }),
-
   forgetHint: () =>
     tr(
       '如果 token 可能泄露，请在 @BotFather 里用 /revoke 让它失效。',

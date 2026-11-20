@@ -361,10 +361,6 @@ describe('the saved login', () => {
     });
     expect([own.scope, own.lockName]).toEqual(['bot:0123456789ab', 'bot-0123456789ab']);
     expect(channel.caps).toMatchObject({ maxText: 2000, quotes: false, pairing: 'login' });
-    expect(wechatSetup.serviceArgs({} as never)).toEqual({
-      lead: ['--channel', 'wechat', '--experimental'],
-      trail: [],
-    });
   });
 
   it("is never used with a host that is not WeChat's: nothing is sent", () => {

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -13,9 +13,8 @@ import { acquireProcessLock, type LockNote } from '../src/core/lock.js';
 import { sha256 } from '../src/core/state.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { type MockTelegram, startMockTelegram } from '../src/mock/telegram.js';
-import { type ChannelKind, channelSetup } from '../src/relay/channels/index.js';
+import { channelSetup } from '../src/relay/channels/index.js';
 import { BotRegistry } from '../src/relay/registry.js';
-import { servicePlan } from '../src/relay/service.js';
 import { RelayState, relayStatePath } from '../src/relay/state.js';
 import { TelegramBot } from '../src/relay/telegram.js';
 import { registerFake } from './helpers/fakeBots.js';
@@ -27,8 +26,8 @@ import { memoryIo } from './helpers/io.js';
  * §5.2, decision §12.2): every relay holds the environment's lock (`relay-env-<sha256(account)
  * [0:16]>.lock`) besides its bot's; a second relay is refused with the channel, bot and process
  * of the one that runs; setting credentials (`--set-token`, `--set-app`, `--login`) is refused
- * while a relay runs in a terminal (and holds the lock itself); `--install-service` is refused
- * beside another channel's installed service; the lock of a process that is gone is taken over.
+ * while a relay runs in a terminal (and holds the lock itself); the lock of a process that is gone
+ * is taken over. The one background service of every bot is test/relay-service-cli.test.ts's.
  * QQ and WeChat run as scripted channels (`fakeSetup`), Telegram against the mock Bot API.
  */
 
@@ -115,14 +114,6 @@ function paired(kind: 'qq' | 'wechat') {
   });
 }
 
-/** No owner: a relay of this scope cannot install a service (it stops at "not paired yet"). */
-function unpaired(scope: string, kind: ChannelKind) {
-  const { account } = context();
-  const state = new RelayState(relayStatePath(account, scope), scope, account, kind);
-  state.resetOwner();
-  expect(new RelayState(state.path, scope, account, kind).data.owner).toBeNull();
-}
-
 /** A pid that is certainly not running: a child that already exited. */
 async function deadPid(): Promise<number> {
   const child = spawn(process.execPath, ['-e', '0']);
@@ -202,7 +193,7 @@ describe('one relay per Yomi account and environment', () => {
       const qq = await run(['relay', '--channel', 'qq', '--allow-file-store']);
       expect(qq.code).toBe(1);
       expect(qq.err).toContain(
-        `这个 Yomi 账号（${where}）已经有另一个 relay 在运行：Telegram bot @lin_env_bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service）。`,
+        `这个 Yomi 账号（${where}）已经有另一个 relay 在运行：Telegram bot @lin_env_bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --uninstall-service）。`,
       );
       expect(qq.out).not.toContain('relay 运行中');
       const wechat = await run([
@@ -257,7 +248,7 @@ describe('one relay per Yomi account and environment', () => {
           ] as const,
       );
       expect(english.err).toContain(
-        `Another relay is already running for this Yomi account (${whereEnglish}): Telegram bot @lin_env_bot, process ${process.pid}. Only one relay per Yomi account and environment can run at a time: stop it first (Ctrl+C, or yomi relay --telegram --uninstall-service).`,
+        `Another relay is already running for this Yomi account (${whereEnglish}): Telegram bot @lin_env_bot, process ${process.pid}. Only one relay per Yomi account and environment can run at a time: stop it first (Ctrl+C, or yomi relay --uninstall-service).`,
       );
     } finally {
       await running.stop();
@@ -276,7 +267,7 @@ describe('one relay per Yomi account and environment', () => {
       const setApp = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
       expect(setApp.code).toBe(1);
       expect(setApp.err).toContain(
-        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --set-app。`,
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --set-app。`,
       );
       const login = await run([
         'relay',
@@ -288,13 +279,13 @@ describe('one relay per Yomi account and environment', () => {
       ]);
       expect(login.code).toBe(1);
       expect(login.err).toContain(
-        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --login。`,
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --login。`,
       );
       const english = await inEnglish(() =>
         run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']),
       );
       expect(english.err).toContain(
-        `Relay is running (Telegram bot @lin_env_bot, process ${process.pid}): stop it first (Ctrl+C, or yomi relay --telegram --uninstall-service), then --set-app.`,
+        `Relay is running (Telegram bot @lin_env_bot, process ${process.pid}): stop it first (Ctrl+C, or yomi relay --uninstall-service), then --set-app.`,
       );
       // --set-token too, once past the keychain check (before it, the keychain is the refusal).
       const keychain = await run(['relay', '--telegram', '--set-token', '--token-stdin']);
@@ -306,14 +297,14 @@ describe('one relay per Yomi account and environment', () => {
       );
       expect(token.code).toBe(1);
       expect(token.err).toContain(
-        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --set-token。`,
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --set-token。`,
       );
       // The real QQ setup (no fake) is refused the same way, before it asks for anything.
       fake.on = false;
       const real = await run(['relay', '--channel', 'qq', '--set-app', '--allow-file-store']);
       expect(real.code).toBe(1);
       expect(real.err).toContain(
-        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --set-app。`,
+        `relay 正在运行（Telegram bot @lin_env_bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --set-app。`,
       );
       fake.on = true;
     } finally {
@@ -362,7 +353,7 @@ describe('one relay per Yomi account and environment', () => {
       const telegram = await run(['relay', '--telegram', '--allow-file-store']);
       expect(telegram.code).toBe(1);
       expect(telegram.err).toContain(
-        `已经有另一个 relay 在运行：QQ bot Lin bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --channel qq --uninstall-service）。`,
+        `已经有另一个 relay 在运行：QQ bot Lin bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --uninstall-service）。`,
       );
     } finally {
       qq.release();
@@ -380,7 +371,7 @@ describe('one relay per Yomi account and environment', () => {
       const telegram = await run(['relay', '--telegram', '--allow-file-store']);
       expect(telegram.code).toBe(1);
       expect(telegram.err).toContain(
-        `已经有另一个 relay 在运行：QQ bot Lin bot、微信 bot wx-bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 --uninstall-service）。`,
+        `已经有另一个 relay 在运行：QQ bot Lin bot、微信 bot wx-bot，进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --uninstall-service）。`,
       );
       const english = await inEnglish(() => run(['relay', '--telegram', '--allow-file-store']));
       expect(english.err).toContain(`: QQ bot Lin bot, WeChat bot wx-bot, process ${process.pid}.`);
@@ -422,7 +413,7 @@ describe('one relay per Yomi account and environment', () => {
     try {
       const refused = await run(['relay', '--telegram', '--allow-file-store']);
       expect(refused.err).toContain(
-        `已经有另一个 relay 在运行：进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 --uninstall-service）。`,
+        `已经有另一个 relay 在运行：进程 ${process.pid}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 yomi relay --uninstall-service）。`,
       );
     } finally {
       if ('release' in plain) plain.release();
@@ -457,77 +448,5 @@ describe('one relay per Yomi account and environment', () => {
     expect(qq.code).toBe(0);
     expect(qq.out).toContain('relay 运行中：Lin bot ⇄ Yomi');
     expect(existsSync(path)).toBe(false);
-  });
-});
-
-describe('--install-service beside another channel', () => {
-  const home = mkdtempSync(join(tmpdir(), 'yomi-relay-home-'));
-  /** Where a channel's service of this environment is installed, under the test's HOME. */
-  const servicePath = (channel: ChannelKind) =>
-    servicePlan({
-      account: context().account,
-      channel,
-      node: process.execPath,
-      script: 'cli.js',
-      args: [],
-      environment: {},
-      logDir: join(home, 'logs'),
-    }).path;
-  const install = (channel: ChannelKind) => {
-    const path = servicePath(channel);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, '# installed\n');
-    return path;
-  };
-
-  beforeAll(() => {
-    // Never the real ~/Library/LaunchAgents or ~/.config/systemd/user.
-    setEnv({ HOME: home });
-    expect(servicePath('telegram').startsWith(home)).toBe(true);
-    // Unpaired: if a refusal were missed, the install would stop at "not paired yet".
-    unpaired(String(tg.botId), 'telegram');
-    unpaired('fake:qq', 'qq');
-    unpaired('fake:wechat', 'wechat');
-    const { store, account } = context();
-    store.setSecret(`telegram-bot:${account}`, tg.token);
-  });
-
-  afterAll(() => {
-    rmSync(home, { recursive: true, force: true });
-  });
-
-  it("is refused while another channel's service of this environment is installed, saying how to remove it", async () => {
-    const qqService = install('qq');
-    const telegram = await run(['relay', '--telegram', '--install-service', '--allow-file-store']);
-    expect(telegram.code).toBe(1);
-    expect(telegram.err).toContain(
-      `这个环境已经安装了 QQ 的 relay 后台服务（${qqService}）。同一个账号和环境同时只能运行一个 relay：先用 yomi relay --channel qq --uninstall-service 删除它，再安装这个。`,
-    );
-    const english = await inEnglish(() =>
-      run(['relay', '--telegram', '--install-service', '--allow-file-store']),
-    );
-    expect(english.err).toContain(
-      `A QQ relay service is already installed for this environment (${qqService}). Only one relay per Yomi account and environment can run at a time: remove it first with yomi relay --channel qq --uninstall-service, then install this one.`,
-    );
-    rmSync(qqService);
-
-    const telegramService = install('telegram');
-    for (const args of [
-      ['--channel', 'qq'],
-      ['--channel', 'wechat', '--experimental'],
-    ]) {
-      const refused = await run(['relay', ...args, '--install-service', '--allow-file-store']);
-      expect(refused.code, args.join(' ')).toBe(1);
-      expect(refused.err, args.join(' ')).toContain(
-        `这个环境已经安装了 Telegram 的 relay 后台服务（${telegramService}）。同一个账号和环境同时只能运行一个 relay：先用 yomi relay --telegram --uninstall-service 删除它，再安装这个。`,
-      );
-    }
-    expect(fake.opened).toEqual([]);
-
-    // A channel's own service is no reason: it goes on (here to "not paired yet").
-    const again = await run(['relay', '--telegram', '--install-service', '--allow-file-store']);
-    expect(again.code).toBe(1);
-    expect(again.err).toContain('还没有配对：先在终端里运行一次 yomi relay --telegram 完成配对');
-    expect(readFileSync(telegramService, 'utf8')).toBe('# installed\n');
   });
 });

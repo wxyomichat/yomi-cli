@@ -24,7 +24,7 @@ import {
   alreadyRegistered,
   anotherBot,
   type BotRecord,
-  type BotRegistry,
+  BotRegistry,
   DuplicateCharacter,
   migrateRegistry,
   sameBot,
@@ -33,14 +33,16 @@ import { type HubBot, type HubStatusFile, hubStatusPath, RelayHub } from '../rel
 import { botRecords, LedgerFileStore, ledgerPath } from '../relay/hub/ledger.js';
 import { Relay, RelayStopped } from '../relay/relay.js';
 import {
+  installedArgs,
   installService,
   pauseService,
   resumeService,
-  runCommand,
   servicePid,
   type ServicePlan,
   servicePlan,
+  type ServiceUnit,
   uninstallService,
+  writeServiceUnit,
 } from '../relay/service.js';
 import {
   forgetRelayStates,
@@ -64,7 +66,9 @@ import { confirmProduction } from './declaration.js';
  * this one process (`RelayHub`): each opened and checked as a relay alone always was, each under
  * its own lock and all of them under the environment's (whose note names every bot), one sign-in,
  * one long connection, one ledger and one `--max-spend` for all, each bot supervised on its own.
- * The background service is still one channel's at a time.
+ * The background service is one such run of every bot: one unit per Yomi account and environment
+ * (`--install-service`, which takes away the per-channel units of before it), `--service-status`
+ * says how it and each bot are, `--uninstall-service` removes it and those of before.
  *
  * The bots are the records of the bot registry (relay/registry.ts), taken over from the stored
  * credentials of before it before anything else (design §1.1, §1.2, §1.3):
@@ -225,29 +229,26 @@ function wechatNoPairing(): string {
 }
 
 /**
- * The background service's arguments after the script: `relay`, the channel's own words, then
- * the same options in the same places for every channel (Telegram's ExecStart is the one it
- * always had: `relay --telegram --env … [--no-drafts] [--confirm-prod]`).
+ * The background service's arguments after the script (design §1.5): a run of every registered
+ * bot, `relay --env E [--lane L] [--allow-file-store] [--max-spend N] [--no-drafts]
+ * [--confirm-prod]`. No channel, bot or character: those are the registry's, and a WeChat bot's
+ * consent to the experimental channel is its record's.
  */
-export function relayServiceArgs(
-  env: Environment,
-  setup: ChannelSetup,
-  options: RelayCommandOptions,
-): string[] {
-  const { lead, trail } = setup.serviceArgs(options);
-  const args = ['relay', ...lead, '--env', env.name];
+export function relayServiceArgs(env: Environment, options: RelayCommandOptions): string[] {
+  const args = ['relay', '--env', env.name];
   if (env.lane) args.push('--lane', env.lane);
   if (options.allowFileStore) args.push('--allow-file-store');
   // Only a cap the owner chose: without one the service runs uncapped, as the foreground relay.
   if (options.maxSpend !== null) args.push('--max-spend', String(options.maxSpend));
-  if (options.characterId) args.push('--character', options.characterId);
-  args.push(...trail);
+  // For the Telegram bots among them.
+  if (!options.drafts) args.push('--no-drafts');
   // Confirmed when the service was installed; a service has nobody to ask.
   if (isProduction(env)) args.push('--confirm-prod');
   return args;
 }
 
-function planFor(context: Context, setup: ChannelSetup, options: RelayCommandOptions): ServicePlan {
+/** A unit of this account and environment: the hub's (`args`), or a channel's of before it. */
+function planFor(context: Context, unit: ServiceUnit, args: string[]): ServicePlan {
   const script = realpathSync(process.argv[1] ?? '');
   // The resolved directory, so the service finds the same pairing, lock and file store even when
   // XDG_CONFIG_HOME or HOME differ under launchd/systemd.
@@ -258,13 +259,92 @@ function planFor(context: Context, setup: ChannelSetup, options: RelayCommandOpt
   }
   return servicePlan({
     account: context.account,
-    channel: setup.kind,
+    channel: unit,
     node: process.execPath,
     script,
-    args: relayServiceArgs(context.env, setup, options),
+    args,
     environment,
     logDir: join(configDir(), 'logs'),
   });
+}
+
+/** The options of a plain run of every bot: the background service's when none are given. */
+const PLAIN_OPTIONS: RelayCommandOptions = {
+  channel: null,
+  bots: [],
+  experimental: false,
+  setToken: false,
+  setApp: false,
+  login: false,
+  qrLink: false,
+  tokenStdin: false,
+  pair: false,
+  forget: false,
+  all: false,
+  characterId: '',
+  maxSpend: null,
+  allowFileStore: false,
+  installService: false,
+  uninstallService: false,
+  serviceStatus: false,
+  replyTimeoutMs: 120_000,
+  drafts: true,
+  confirmProd: false,
+  resetSpend: false,
+};
+
+/** The background service that runs every bot, with `options`' arguments. */
+const hubPlan = (context: Context, options: RelayCommandOptions = PLAIN_OPTIONS) =>
+  planFor(context, 'hub', relayServiceArgs(context.env, options));
+
+/** A channel's own unit of before the hub: only where it is and what it is called matter. */
+const legacyPlan = (context: Context, kind: ChannelKind) => planFor(context, kind, []);
+
+/**
+ * The units of this account and environment installed now: the hub's first, then the channels'
+ * of before it. None where no service can be installed (another system, no CLI entry to name).
+ */
+function installedPlans(context: Context): ServicePlan[] {
+  try {
+    return [hubPlan(context), ...CHANNEL_KINDS.map((kind) => legacyPlan(context, kind))].filter(
+      (plan) => existsSync(plan.path),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Whether `kind`'s own unit of before the hub is installed (design §4.3: its bot is preferred). */
+function legacyInstalled(context: Context, kind: ChannelKind): boolean {
+  try {
+    return existsSync(legacyPlan(context, kind).path);
+  } catch {
+    return false;
+  }
+}
+
+/** How a background service is stopped and removed, whichever unit it is. */
+const UNINSTALL = 'yomi relay --uninstall-service';
+
+/**
+ * The command that installs the background service again (started with it) keeping what `plan`,
+ * an installed unit (the hub's, or one of before it), runs with: its `--max-spend` above all, as
+ * a bare --install-service would run with no cap and start the running total over, and its
+ * `--no-drafts` and `--allow-file-store`.
+ */
+function reinstallCommand(plan: ServicePlan): string {
+  const args = installedArgs(plan);
+  const kept: string[] = [];
+  if (args.includes('--allow-file-store')) kept.push('--allow-file-store');
+  const cap = args.indexOf('--max-spend');
+  if (cap >= 0 && /^\d+$/.test(args[cap + 1] ?? '')) kept.push('--max-spend', args[cap + 1]);
+  if (args.includes('--no-drafts')) kept.push('--no-drafts');
+  return ['yomi relay', ...kept, '--install-service'].join(' ');
+}
+
+/** Which channel's unit of before the hub `plan` is; null for the hub's. */
+function legacyKind(context: Context, plan: ServicePlan): ChannelKind | null {
+  return CHANNEL_KINDS.find((kind) => legacyPlan(context, kind).path === plan.path) ?? null;
 }
 
 /**
@@ -350,35 +430,29 @@ function holderDetails(holder: Holder): string {
   return parts.join(tr('，', ', ', ', ', ', '));
 }
 
-/** How to stop a holder's background service: its channel's command when it is known. */
-const uninstallCommand = (holder: Holder) =>
-  holder.setup ? `${holder.setup.command} --uninstall-service` : '--uninstall-service';
-
 /**
  * Refuses `flag` while a relay runs: this channel's (--forget, its own lock, known by pid only),
  * or any relay of this environment (--set-app, --login), named with its channel and bot.
  */
 function runningRefusal(holder: Holder, flag: string): string {
   const details = holderDetails(holder);
-  const stop = uninstallCommand(holder);
   return tr(
-    `relay 正在运行${details ? `（${details}）` : ''}：先停止它（Ctrl+C，或 ${stop}），再 ${flag}。`,
-    `Relay is running${details ? ` (${details})` : ''}: stop it first (Ctrl+C, or ${stop}), then ${flag}.`,
-    `El relay está en ejecución${details ? ` (${details})` : ''}: detenlo primero (Ctrl+C o ${stop}) y luego usa ${flag}.`,
-    `O relay está em execução${details ? ` (${details})` : ''}: pare-o primeiro (Ctrl+C ou ${stop}) e depois use ${flag}.`,
+    `relay 正在运行${details ? `（${details}）` : ''}：先停止它（Ctrl+C，或 ${UNINSTALL}），再 ${flag}。`,
+    `Relay is running${details ? ` (${details})` : ''}: stop it first (Ctrl+C, or ${UNINSTALL}), then ${flag}.`,
+    `El relay está en ejecución${details ? ` (${details})` : ''}: detenlo primero (Ctrl+C o ${UNINSTALL}) y luego usa ${flag}.`,
+    `O relay está em execução${details ? ` (${details})` : ''}: pare-o primeiro (Ctrl+C ou ${UNINSTALL}) e depois use ${flag}.`,
   );
 }
 
 /** A relay start refused: another relay of this Yomi account and environment runs. */
 function anotherRelayRunning(holder: Holder, env: Environment): string {
   const details = holderDetails(holder);
-  const stop = uninstallCommand(holder);
   const where = describeEnvironment(env);
   return tr(
-    `这个 Yomi 账号（${where}）已经有另一个 relay 在运行${details ? `：${details}` : ''}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 ${stop}）。`,
-    `Another relay is already running for this Yomi account (${where})${details ? `: ${details}` : ''}. Only one relay per Yomi account and environment can run at a time: stop it first (Ctrl+C, or ${stop}).`,
-    `Ya hay otro relay en ejecución para esta cuenta de Yomi (${where})${details ? `: ${details}` : ''}. Solo puede ejecutarse un relay a la vez por cuenta de Yomi y entorno: detenlo primero (Ctrl+C o ${stop}).`,
-    `Já existe outro relay em execução para esta conta do Yomi (${where})${details ? `: ${details}` : ''}. Só é possível executar um relay por vez por conta do Yomi e ambiente: pare-o primeiro (Ctrl+C ou ${stop}).`,
+    `这个 Yomi 账号（${where}）已经有另一个 relay 在运行${details ? `：${details}` : ''}。同一个账号和环境同时只能运行一个 relay：先停止它（Ctrl+C，或 ${UNINSTALL}）。`,
+    `Another relay is already running for this Yomi account (${where})${details ? `: ${details}` : ''}. Only one relay per Yomi account and environment can run at a time: stop it first (Ctrl+C, or ${UNINSTALL}).`,
+    `Ya hay otro relay en ejecución para esta cuenta de Yomi (${where})${details ? `: ${details}` : ''}. Solo puede ejecutarse un relay a la vez por cuenta de Yomi y entorno: detenlo primero (Ctrl+C o ${UNINSTALL}).`,
+    `Já existe outro relay em execução para esta conta do Yomi (${where})${details ? `: ${details}` : ''}. Só é possível executar um relay por vez por conta do Yomi e ambiente: pare-o primeiro (Ctrl+C ou ${UNINSTALL}).`,
   );
 }
 
@@ -470,32 +544,6 @@ function lockEnvironment(
   return lock;
 }
 
-/**
- * `--install-service` beside another channel's installed service of this environment: only one
- * of them could run (the other would fail on the environment's lock and restart every 30 s).
- */
-function otherServiceRefusal(
-  context: Context,
-  setup: ChannelSetup,
-  options: RelayCommandOptions,
-): string | null {
-  for (const kind of CHANNEL_KINDS) {
-    if (kind === setup.kind) continue;
-    const other = channelSetup(kind);
-    const plan = planFor(context, other, { ...options, channel: kind });
-    if (!existsSync(plan.path)) continue;
-    const name = other.displayName;
-    const remove = `${other.command} --uninstall-service`;
-    return tr(
-      `这个环境已经安装了${inChinese(name)}的 relay 后台服务（${plan.path}）。同一个账号和环境同时只能运行一个 relay：先用 ${remove} 删除它，再安装这个。`,
-      `A ${name} relay service is already installed for this environment (${plan.path}). Only one relay per Yomi account and environment can run at a time: remove it first with ${remove}, then install this one.`,
-      `Ya hay un servicio de relay de ${name} instalado para este entorno (${plan.path}). Solo puede ejecutarse un relay a la vez por cuenta de Yomi y entorno: elimínalo primero con ${remove} y luego instala este.`,
-      `Já existe um serviço de relay do ${name} instalado para este ambiente (${plan.path}). Só é possível executar um relay por vez por conta do Yomi e ambiente: remova-o primeiro com ${remove} e depois instale este.`,
-    );
-  }
-  return null;
-}
-
 /** This environment's lock (`lockEnvironment`). */
 const environmentLock = (context: Context) =>
   lockPath(`env-${sha256(context.account).slice(0, 16)}`);
@@ -508,22 +556,16 @@ const SERVICE_STOP_MS = 30_000;
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A background service stopped while the bots change, to start again after. */
-type StoppedService = { setup: ChannelSetup; plan: ServicePlan };
-
-/** This environment's background service that runs as `pid`, if one does. */
-function serviceRunningAs(context: Context, pid: number): StoppedService | null {
-  for (const kind of CHANNEL_KINDS) {
-    if (!serviceInstalled(context, kind)) continue;
-    const setup = channelSetup(kind);
-    const plan = planFor(context, setup, plainOptions(kind));
-    if (servicePid(plan) === pid) return { setup, plan };
-  }
-  return null;
+/**
+ * This environment's background service that runs as `pid`, if one does: the hub's, or a unit of
+ * before it still installed.
+ */
+function serviceRunningAs(context: Context, pid: number): ServicePlan | null {
+  return installedPlans(context).find((plan) => servicePid(plan) === pid) ?? null;
 }
 
 /** The background service that holds the environment's lock now, if one does. */
-function serviceHolding(context: Context): StoppedService | null {
+function serviceHolding(context: Context): ServicePlan | null {
   const holder = lockHolder(environmentLock(context));
   return holder ? serviceRunningAs(context, holder.pid) : null;
 }
@@ -540,7 +582,7 @@ const ENDING_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
  * the usual way. `dispose` when it is over.
  */
 function serviceGuard(context: Context) {
-  let service: StoppedService | null = null;
+  let service: ServicePlan | null = null;
   let done = false;
   const restart = () => {
     if (!service || done) return;
@@ -558,7 +600,7 @@ function serviceGuard(context: Context) {
     return { signal, handler };
   });
   return {
-    stopped(stopped: StoppedService | null) {
+    stopped(stopped: ServicePlan | null) {
       service = stopped;
     },
     /** The change removed the service: nothing to start again. */
@@ -581,7 +623,7 @@ type ServiceGuard = ReturnType<typeof serviceGuard>;
  */
 async function withServiceStopped<T>(
   context: Context,
-  body: (stopped: StoppedService | null, guard: ServiceGuard) => Promise<T>,
+  body: (stopped: ServicePlan | null, guard: ServiceGuard) => Promise<T>,
 ): Promise<T> {
   const guard = serviceGuard(context);
   try {
@@ -601,7 +643,7 @@ async function withServiceStopped<T>(
 async function stopRunningService(
   context: Context,
   guard: ServiceGuard,
-): Promise<StoppedService | null> {
+): Promise<ServicePlan | null> {
   const { io } = context;
   const holder = lockHolder(environmentLock(context));
   const service = holder ? serviceRunningAs(context, holder.pid) : null;
@@ -609,36 +651,44 @@ async function stopRunningService(
   say(
     io,
     tr(
-      `正在停止后台服务（${service.plan.label}），改完后会重新启动它。`,
-      `Stopping the background service (${service.plan.label}) for this change; it starts again afterwards.`,
-      `Deteniendo el servicio en segundo plano (${service.plan.label}) para este cambio; vuelve a iniciarse después.`,
-      `Parando o serviço em segundo plano (${service.plan.label}) para esta mudança; ele inicia de novo depois.`,
+      `正在停止后台服务（${service.label}），改完后会重新启动它。`,
+      `Stopping the background service (${service.label}) for this change; it starts again afterwards.`,
+      `Deteniendo el servicio en segundo plano (${service.label}) para este cambio; vuelve a iniciarse después.`,
+      `Parando o serviço em segundo plano (${service.label}) para esta mudança; ele inicia de novo depois.`,
     ),
   );
   guard.stopped(service);
-  pauseService(service.plan);
-  const deadline = Date.now() + SERVICE_STOP_MS;
-  while (lockHolder(environmentLock(context))?.pid === holder.pid) {
-    if (Date.now() > deadline) {
-      guard.restart();
-      throw new UsageError(
-        tr(
-          `后台服务（${service.plan.label}）${SERVICE_STOP_MS / 1000} 秒内没有停下来，所以没有改动：稍后再试。`,
-          `The background service (${service.plan.label}) did not stop within ${SERVICE_STOP_MS / 1000} s, so nothing changed: try again later.`,
-          `El servicio en segundo plano (${service.plan.label}) no se detuvo en ${SERVICE_STOP_MS / 1000} s, así que no se cambió nada: vuelve a intentarlo más tarde.`,
-          `O serviço em segundo plano (${service.plan.label}) não parou em ${SERVICE_STOP_MS / 1000} s, então nada mudou: tente de novo mais tarde.`,
-        ),
-      );
-    }
-    await pause(200);
+  pauseService(service);
+  if (!(await environmentLetGo(context, holder.pid))) {
+    guard.restart();
+    throw new UsageError(
+      tr(
+        `后台服务（${service.label}）${SERVICE_STOP_MS / 1000} 秒内没有停下来，所以没有改动：稍后再试。`,
+        `The background service (${service.label}) did not stop within ${SERVICE_STOP_MS / 1000} s, so nothing changed: try again later.`,
+        `El servicio en segundo plano (${service.label}) no se detuvo en ${SERVICE_STOP_MS / 1000} s, así que no se cambió nada: vuelve a intentarlo más tarde.`,
+        `O serviço em segundo plano (${service.label}) não parou em ${SERVICE_STOP_MS / 1000} s, então nada mudou: tente de novo mais tarde.`,
+      ),
+    );
   }
   return service;
 }
 
+/**
+ * Waits until the process `pid` (a background service being stopped) let go of the environment's
+ * lock; false when it still holds it after `SERVICE_STOP_MS`.
+ */
+async function environmentLetGo(context: Context, pid: number): Promise<boolean> {
+  const deadline = Date.now() + SERVICE_STOP_MS;
+  while (lockHolder(environmentLock(context))?.pid === pid) {
+    if (Date.now() > deadline) return false;
+    await pause(200);
+  }
+  return true;
+}
+
 /** Starts a background service stopped for a change again, saying so (or how to, if it failed). */
-function startServiceAgain(context: Context, service: StoppedService) {
+function startServiceAgain(context: Context, plan: ServicePlan) {
   const { io } = context;
-  const { plan, setup } = service;
   if (resumeService(plan))
     say(
       io,
@@ -649,16 +699,18 @@ function startServiceAgain(context: Context, service: StoppedService) {
         `O serviço em segundo plano foi iniciado de novo (${plan.label}).`,
       ),
     );
-  else
+  else {
+    const command = reinstallCommand(plan);
     warn(
       io,
       tr(
-        `没能重新启动后台服务（${plan.label}）：运行 ${setup.command} --install-service 重新安装它。`,
-        `Couldn't start the background service again (${plan.label}): install it again with ${setup.command} --install-service.`,
-        `No se pudo volver a iniciar el servicio en segundo plano (${plan.label}): vuelve a instalarlo con ${setup.command} --install-service.`,
-        `Não foi possível iniciar de novo o serviço em segundo plano (${plan.label}): instale-o de novo com ${setup.command} --install-service.`,
+        `没能重新启动后台服务（${plan.label}）：运行 ${command} 重新安装它。`,
+        `Couldn't start the background service again (${plan.label}): install it again with ${command}.`,
+        `No se pudo volver a iniciar el servicio en segundo plano (${plan.label}): vuelve a instalarlo con ${command}.`,
+        `Não foi possível iniciar de novo o serviço em segundo plano (${plan.label}): instale-o de novo com ${command}.`,
       ),
     );
+  }
 }
 
 /** The note the setup and environment locks get while `flag` changes the bots. */
@@ -680,33 +732,124 @@ async function withSetupLock<T>(
   }
 }
 
+/** What a change to the bots tells of the background service stopped for it. */
+type ServiceAfter = {
+  /** It removed `plan`: when that is the service stopped, it is not started again. */
+  removed: (plan: ServicePlan) => void;
+  /** It took the last bot away: the service stopped is not started again (said). */
+  emptied: () => void;
+};
+
 /**
  * Runs a change to the bots (`flag`, of a bot of `kind` when it is one bot's) with no other change
  * and no relay of this environment running: under the setup lock, then the environment's lock. A
  * background service holding it is stopped first and started again after, said both times (the
  * other bots are offline meanwhile); a relay running in a terminal refuses the change, named.
- * `change` keeps a service from starting again when it removed it (`removed`).
+ * `change` keeps a service from starting again when nothing is left for it (`ServiceAfter`).
+ * With no service stopped, one installed but not running is said, with how to start it; a unit
+ * of before the hub started again is said to run its own channel's bots only (`legacyRestarted`).
  */
 async function whileStopped<T>(
   context: Context,
   flag: string,
   kind: ChannelKind | undefined,
-  change: (removed: (plan: ServicePlan) => void) => Promise<T>,
+  change: (service: ServiceAfter) => Promise<T>,
 ): Promise<T> {
   const note = changeNote(flag, kind);
-  return withSetupLock(context, note, () =>
+  let restarted: ServicePlan | null = null;
+  const result = await withSetupLock(context, note, () =>
     withServiceStopped(context, async (stopped, guard) => {
       const held = lockEnvironment(context, note, (holder) =>
         holder.flag ? credentialsRunning(holder, flag) : runningRefusal(holder, flag),
       );
       try {
-        return await change((plan) => {
-          if (stopped && plan.path === stopped.plan.path) guard.keep();
+        restarted = stopped;
+        const result = await change({
+          removed: (plan) => {
+            if (stopped && plan.path === stopped.path) {
+              guard.keep();
+              restarted = null;
+            }
+          },
+          emptied: () => {
+            if (!stopped) return;
+            guard.keep();
+            restarted = null;
+            say(context.io, paint(context.io, 'dim', serviceLeftStopped(stopped)));
+          },
         });
+        if (!stopped) idleServiceHint(context);
+        return result;
       } finally {
         held.release();
       }
     }),
+  );
+  legacyRestarted(context, restarted);
+  return result;
+}
+
+/** The last bot was taken away while the background service was stopped for it. */
+function serviceLeftStopped(plan: ServicePlan): string {
+  const command = reinstallCommand(plan);
+  return tr(
+    `没有 bot 了，所以没有重新启动后台服务（${plan.label}）。添加 bot 之后，用 ${command} 启动它。`,
+    `No bots are left, so the background service (${plan.label}) was not started again. Once you add a bot, start it with ${command}.`,
+    `No quedan bots, así que no se volvió a iniciar el servicio en segundo plano (${plan.label}). Cuando agregues un bot, inícialo con ${command}.`,
+    `Não restam bots, então o serviço em segundo plano (${plan.label}) não foi iniciado de novo. Depois de adicionar um bot, inicie-o com ${command}.`,
+  );
+}
+
+/**
+ * After a change that stopped a background service and started it again: when that is a unit of
+ * before the hub (design §4.3), it runs only its own channel's bots, as it was installed, whatever
+ * the change was for; said, with the command that replaces it with one for every bot.
+ */
+function legacyRestarted(context: Context, plan: ServicePlan | null) {
+  const kind = plan ? legacyKind(context, plan) : null;
+  if (!plan || !kind || !existsSync(plan.path)) return;
+  const { io } = context;
+  const name = channelSetup(kind).displayName;
+  const command = reinstallCommand(plan);
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      tr(
+        `这个后台服务（${plan.label}）是旧版的，只运行${inChinese(name)}的 bot：用 ${command} 换成一个运行所有 bot 的服务。`,
+        `This background service (${plan.label}) is an older one that runs only ${name} bots: replace it with one for every bot with ${command}.`,
+        `Este servicio en segundo plano (${plan.label}) es uno antiguo que solo ejecuta los bots de ${name}: reemplázalo por uno para todos los bots con ${command}.`,
+        `Este serviço em segundo plano (${plan.label}) é um antigo que só executa os bots do ${name}: substitua-o por um para todos os bots com ${command}.`,
+      ),
+    ),
+  );
+}
+
+/**
+ * After a change with no background service running: one that is installed (it ended, with no
+ * bot that could run, or was stopped by hand) does not pick the change up by itself; said, with
+ * how to start it, while there are bots for it to run.
+ */
+function idleServiceHint(context: Context) {
+  const { io } = context;
+  const installed = installedPlans(context);
+  if (!installed.length || installed.some((plan) => servicePid(plan))) return;
+  if (!BotRegistry.open(context.account).list().length) return;
+  // The hub's when it is installed (`installedPlans` puts it first).
+  const command = reinstallCommand(installed[0]);
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      tr(
+        `后台服务已安装，但没有在运行，所以它不会运行这些 bot：用 ${command} 重新启动它。`,
+        `The background service is installed but not running, so it does not run these bots: start it again with ${command}.`,
+        `El servicio en segundo plano está instalado, pero no está en ejecución, así que no ejecuta estos bots: vuelve a iniciarlo con ${command}.`,
+        `O serviço em segundo plano está instalado, mas não está em execução, então ele não executa estes bots: inicie-o de novo com ${command}.`,
+      ),
+    ),
   );
 }
 
@@ -758,10 +901,8 @@ function forgotten(context: Context, setup: ChannelSetup, removed: boolean, stat
   );
 }
 
-/** Uninstalls `kind`'s own background service when it is installed (said); its plan, else null. */
-function removeChannelService(context: Context, kind: ChannelKind): ServicePlan | null {
-  const plan = planFor(context, channelSetup(kind), plainOptions(kind));
-  if (!existsSync(plan.path)) return null;
+/** Uninstalls `plan` (said). */
+function removeService(context: Context, plan: ServicePlan) {
   uninstallService(plan);
   say(
     context.io,
@@ -772,15 +913,23 @@ function removeChannelService(context: Context, kind: ChannelKind): ServicePlan 
       `O serviço em segundo plano foi parado e removido (${plan.path})`,
     ),
   );
+}
+
+/** Uninstalls `kind`'s own unit of before the hub when it is installed (said); its plan, else null. */
+function removeLegacyService(context: Context, kind: ChannelKind): ServicePlan | null {
+  if (!legacyInstalled(context, kind)) return null;
+  const plan = legacyPlan(context, kind);
+  removeService(context, plan);
   return plan;
 }
 
 /**
  * Takes one bot away (design §1.3): its secret, state, local records and record. `channelWide`
- * (`--channel K --forget`, K's one bot): K's own background service and what K left of before the
- * registry (state files no bot has, the channel's old secret) go too, as `--forget` always took
- * the channel's. A secret of before the registry naming this bot goes with it, or the next run
- * would take it over again.
+ * (`--channel K --forget`, K's one bot): K's own background service of before the hub and what K
+ * left of before the registry (state files no bot has, the channel's old secret) go too, as
+ * `--forget` always took the channel's. A secret of before the registry naming this bot goes with
+ * it, or the next run would take it over again. The last bot taken away leaves a background
+ * service stopped for it stopped: it would have nothing to run.
  */
 async function removeBot(
   context: Context,
@@ -790,12 +939,12 @@ async function removeBot(
 ) {
   const { io, store } = context;
   const setup = channelSetup(record.kind);
-  await whileStopped(context, '--forget', record.kind, async (removedService) => {
+  await whileStopped(context, '--forget', record.kind, async (service) => {
     const lock = botLocked(record, '--forget');
     try {
       if (channelWide) {
-        const plan = removeChannelService(context, record.kind);
-        if (plan) removedService(plan);
+        const plan = removeLegacyService(context, record.kind);
+        if (plan) service.removed(plan);
       }
       let removed = store.deleteSecret(record.secretName);
       const legacyName = setup.secretName(context.account);
@@ -819,6 +968,7 @@ async function removeBot(
         );
       forgotten(context, setup, removed, states);
       say(io, paint(io, 'dim', setup.forgetHint()));
+      if (!registry.list().length) service.emptied();
     } finally {
       lock.release();
     }
@@ -827,14 +977,14 @@ async function removeBot(
 
 /**
  * `--channel K --forget` for a channel without a bot: what it left of before the registry (its
- * secret, unreadable or another account's state files, its background service), as `--forget`
- * always did.
+ * secret, unreadable or another account's state files, its background service of before the
+ * hub), as `--forget` always did.
  */
 async function forgetLeftovers(context: Context, setup: ChannelSetup) {
   const { io, store } = context;
-  await whileStopped(context, '--forget', setup.kind, async (removedService) => {
-    const plan = removeChannelService(context, setup.kind);
-    if (plan) removedService(plan);
+  await whileStopped(context, '--forget', setup.kind, async (service) => {
+    const plan = removeLegacyService(context, setup.kind);
+    if (plan) service.removed(plan);
     const states = forgetRelayStates(context.account, undefined, setup.kind);
     const removed = store.deleteSecret(setup.secretName(context.account));
     forgotten(context, setup, removed, states);
@@ -843,10 +993,10 @@ async function forgetLeftovers(context: Context, setup: ChannelSetup) {
 }
 
 /**
- * `--forget --all` (design §1.3): every background service of this environment first (nothing is
- * left to start them again), then, with no relay running (one in a terminal refuses it), every
- * bot, the channels' secrets of before the registry, every state file, the shared ledger and the
- * registry itself.
+ * `--forget --all` (design §1.3): every background service of this environment first (the hub's
+ * and those of before it: nothing is left to start them again), then, with no relay running (one
+ * in a terminal refuses it), every bot, the channels' secrets of before the registry, every state
+ * file, the shared ledger and the registry itself.
  */
 async function forgetAll(context: Context) {
   const { io, store, account } = context;
@@ -854,13 +1004,9 @@ async function forgetAll(context: Context) {
   await withSetupLock(context, changeNote(flag), async () => {
     const holder = lockHolder(environmentLock(context));
     const service = holder ? serviceRunningAs(context, holder.pid) : null;
-    for (const kind of CHANNEL_KINDS) removeChannelService(context, kind);
+    for (const plan of installedPlans(context)) removeService(context, plan);
     // The service that ran lets go of the environment's lock as it ends.
-    const deadline = Date.now() + SERVICE_STOP_MS;
-    while (service && lockHolder(environmentLock(context))?.pid === holder?.pid) {
-      if (Date.now() > deadline) break;
-      await pause(200);
-    }
+    if (holder && service) await environmentLetGo(context, holder.pid);
     const held = lockEnvironment(context, changeNote(flag), (holder) =>
       holder.flag ? credentialsRunning(holder, flag) : runningRefusal(holder, flag),
     );
@@ -970,41 +1116,6 @@ async function relayForget(context: Context, options: RelayCommandOptions) {
   return forgetLeftovers(context, channelSetup(kind));
 }
 
-/** The options of a plain run of `kind`: for what does not depend on them (its service's file). */
-const plainOptions = (kind: ChannelKind): RelayCommandOptions => ({
-  channel: kind,
-  bots: [],
-  experimental: kind === 'wechat',
-  setToken: false,
-  setApp: false,
-  login: false,
-  qrLink: false,
-  tokenStdin: false,
-  pair: false,
-  forget: false,
-  all: false,
-  characterId: '',
-  maxSpend: null,
-  allowFileStore: false,
-  installService: false,
-  uninstallService: false,
-  serviceStatus: false,
-  replyTimeoutMs: 120_000,
-  drafts: true,
-  confirmProd: false,
-  resetSpend: false,
-});
-
-/** Whether `kind`'s own background service is installed for this environment. */
-function serviceInstalled(context: Context, kind: ChannelKind): string | null {
-  try {
-    const plan = planFor(context, channelSetup(kind), plainOptions(kind));
-    return existsSync(plan.path) ? plan.path : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * This environment's bot registry, after taking over the bots the channels' credentials stored
  * before it (design §4.3); what the takeover found to warn about is said once, then.
@@ -1013,7 +1124,7 @@ function openRegistry(context: Context): BotRegistry {
   const { registry, warnings } = migrateRegistry({
     account: context.account,
     store: context.store,
-    installed: (kind) => serviceInstalled(context, kind) !== null,
+    installed: (kind) => legacyInstalled(context, kind),
   });
   for (const line of warnings) warn(context.io, line);
   return registry;
@@ -1150,7 +1261,7 @@ function hubStatus(context: Context): HubStatusFile['bots'] | null {
 
 /**
  * What `--list` says of a bot's state: what the running relay says of it when it stopped or is
- * starting again, else (offline) its lock, its credentials, its owner.
+ * starting again, else (offline) its lock, then `offlineStatus`.
  */
 function botStatus(
   context: Context,
@@ -1181,59 +1292,104 @@ function botStatus(
       `en ejecución (proceso ${holder.pid})`,
       `em execução (processo ${holder.pid})`,
     );
+  return offlineStatus(context, record, state).text;
+}
+
+/**
+ * What a bot that does not run needs, read on this computer alone (its credentials, its owner,
+ * its character), and whether a run with nobody at the terminal (a background service) would
+ * start it (`runs`): a bot without a character runs, answering only how to bind one.
+ */
+function offlineStatus(
+  context: Context,
+  record: BotRecord,
+  state: RelayState | null,
+): { text: string; runs: boolean } {
   const secret = context.store.getSecret(record.secretName);
   const stored = secret ? channelSetup(record.kind).storedBot(secret) : null;
   const renew = renewCommand(record);
-  const login = () =>
-    tr(
+  const login = () => ({
+    text: tr(
       `需要登录：${renew}`,
       `needs login: ${renew}`,
       `necesita iniciar sesión: ${renew}`,
       `precisa entrar: ${renew}`,
-    );
+    ),
+    runs: false,
+  });
   if (!stored && record.kind === 'wechat') return login();
   if (!stored)
-    return tr(
-      `需要凭证：${renew}`,
-      `needs credentials: ${renew}`,
-      `necesita credenciales: ${renew}`,
-      `precisa de credenciais: ${renew}`,
-    );
-  if (!sameBot(record, stored))
-    return tr(
-      '凭证属于另一个 bot',
-      'credentials belong to another bot',
-      'las credenciales son de otro bot',
-      'as credenciais são de outro bot',
-    );
+    return {
+      text: tr(
+        `需要凭证：${renew}`,
+        `needs credentials: ${renew}`,
+        `necesita credenciales: ${renew}`,
+        `precisa de credenciais: ${renew}`,
+      ),
+      runs: false,
+    };
+  if (!sameBot(record, stored)) {
+    const forget = `yomi relay --forget --bot ${record.name}`;
+    return {
+      text: tr(
+        `凭证属于另一个 bot：要重新设置它自己的凭证，运行 ${renew}；要删掉它，运行 ${forget}`,
+        `credentials belong to another bot: set its own with ${renew}, or remove it with ${forget}`,
+        `las credenciales son de otro bot: configura las suyas con ${renew}, o elimínalo con ${forget}`,
+        `as credenciais são de outro bot: configure as dele com ${renew}, ou remova-o com ${forget}`,
+      ),
+      runs: false,
+    };
+  }
   if (!state?.data.owner && record.kind === 'wechat') return login();
   if (!state?.data.owner) {
     const pair = `yomi relay --bot ${record.name} --pair`;
-    return tr(
-      `需要配对：${pair}`,
-      `needs pairing: ${pair}`,
-      `necesita vinculación: ${pair}`,
-      `precisa de pareamento: ${pair}`,
-    );
+    return {
+      text: tr(
+        `需要配对：${pair}`,
+        `needs pairing: ${pair}`,
+        `necesita vinculación: ${pair}`,
+        `precisa de pareamento: ${pair}`,
+      ),
+      runs: false,
+    };
   }
   if (!record.character)
-    return tr(
-      `需要绑定角色：${bindCommand(record.name)}`,
-      `needs a character: ${bindCommand(record.name)}`,
-      `necesita un personaje: ${bindCommand(record.name)}`,
-      `precisa de um personagem: ${bindCommand(record.name)}`,
-    );
-  return tr('没有运行', 'not running', 'no está en ejecución', 'não está em execução');
+    return {
+      text: tr(
+        `需要绑定角色：${bindCommand(record.name)}`,
+        `needs a character: ${bindCommand(record.name)}`,
+        `necesita un personaje: ${bindCommand(record.name)}`,
+        `precisa de um personagem: ${bindCommand(record.name)}`,
+      ),
+      runs: true,
+    };
+  return {
+    text: tr('没有运行', 'not running', 'no está en ejecución', 'não está em execução'),
+    runs: true,
+  };
+}
+
+/** A registered bot's state file, when it has one (read only). */
+function stateOf(context: Context, record: BotRecord): RelayState | null {
+  const path = relayStatePath(context.account, record.scope);
+  return existsSync(path) ? new RelayState(path, record.scope, context.account, record.kind) : null;
 }
 
 /**
  * `yomi relay --list [--channel K]`: the registered bots, each with its channel, character, owner
- * and state, and the background services installed. Changes no bot (it takes over stored
- * credentials first, as every `yomi relay` does) and asks no server.
+ * and state, and the background service. Changes no bot (it takes over stored credentials first,
+ * as every `yomi relay` does) and asks no server.
  */
 export async function relayList(context: Context, kind: ChannelKind | null) {
   const { io } = context;
   const registry = openRegistry(context);
+  listBots(context, registry, kind);
+  for (const line of serviceLines(context, false)) say(io, paint(io, 'dim', line));
+}
+
+/** Says the bots of `kind` (all of them when null), as `--list` and `--service-status` show them. */
+function listBots(context: Context, registry: BotRegistry, kind: ChannelKind | null) {
+  const { io } = context;
   const bots = registry.list(kind ?? undefined);
   if (!bots.length && kind) {
     // Only this channel has none: the others' bots are listed without --channel.
@@ -1268,10 +1424,7 @@ export async function relayList(context: Context, kind: ChannelKind | null) {
   const hub = hubStatus(context);
   for (const record of bots) {
     const setup = channelSetup(record.kind);
-    const path = relayStatePath(context.account, record.scope);
-    const state = existsSync(path)
-      ? new RelayState(path, record.scope, context.account, record.kind)
-      : null;
+    const state = stateOf(context, record);
     const owner = state?.data.owner;
     const named = record.character;
     const character = named
@@ -1312,28 +1465,142 @@ export async function relayList(context: Context, kind: ChannelKind | null) {
       tr(`  状态：${status}`, `  Status: ${status}`, `  Estado: ${status}`, `  Status: ${status}`),
     );
   }
-  const installed = CHANNEL_KINDS.filter(
-    (item) => (!kind || item === kind) && serviceInstalled(context, item) !== null,
-  ).map((item) => channelSetup(item).displayName);
-  say(
-    io,
-    paint(
-      io,
-      'dim',
-      installed.length
+}
+
+/**
+ * What is installed of the background service (design §1.3, §1.5): the hub's unit, running (its
+ * process) or not, and the per-channel units of before it still installed. `detailed`
+ * (`--service-status`): the unit's file and its log too.
+ */
+function serviceLines(context: Context, detailed: boolean): string[] {
+  const installed = installedPlans(context);
+  if (!installed.length) return [noServiceInstalled()];
+  const hub = hubPlan(context);
+  const lines: string[] = [];
+  if (installed.some((plan) => plan.path === hub.path)) {
+    const pid = servicePid(hub);
+    const command = reinstallCommand(hub);
+    lines.push(
+      pid
         ? tr(
-            `已安装的后台服务：${installed.join('、')}`,
-            `Background services installed: ${installed.join(', ')}`,
-            `Servicios en segundo plano instalados: ${installed.join(', ')}`,
-            `Serviços em segundo plano instalados: ${installed.join(', ')}`,
+            `后台服务：运行中（进程 ${pid}），运行所有 bot（${hub.label}）`,
+            `Background service: running (process ${pid}), for every bot (${hub.label})`,
+            `Servicio en segundo plano: en ejecución (proceso ${pid}), para todos los bots (${hub.label})`,
+            `Serviço em segundo plano: em execução (processo ${pid}), para todos os bots (${hub.label})`,
           )
         : tr(
-            '没有安装后台服务。',
-            'No background service is installed.',
-            'No hay ningún servicio en segundo plano instalado.',
-            'Nenhum serviço em segundo plano está instalado.',
+            `后台服务：已安装，没有在运行（${hub.label}）：用 ${command} 重新启动它`,
+            `Background service: installed, not running (${hub.label}): start it again with ${command}`,
+            `Servicio en segundo plano: instalado, no está en ejecución (${hub.label}): vuelve a iniciarlo con ${command}`,
+            `Serviço em segundo plano: instalado, não está em execução (${hub.label}): inicie-o de novo com ${command}`,
           ),
-    ),
+    );
+    if (detailed)
+      lines.push(
+        tr(
+          `  单元文件：${hub.path}`,
+          `  Unit file: ${hub.path}`,
+          `  Archivo de la unidad: ${hub.path}`,
+          `  Arquivo da unidade: ${hub.path}`,
+        ),
+        tr(
+          `  日志：${hub.log}`,
+          `  Log: ${hub.log}`,
+          `  Registro: ${hub.log}`,
+          `  Log: ${hub.log}`,
+        ),
+      );
+  }
+  const legacy = legacyLine(context, installed);
+  if (legacy) {
+    lines.push(legacy);
+    if (detailed)
+      for (const kind of CHANNEL_KINDS.filter((kind) => legacyInstalled(context, kind))) {
+        const plan = legacyPlan(context, kind);
+        const pid = servicePid(plan);
+        const name = channelSetup(kind).displayName;
+        const state = pid
+          ? tr(
+              `运行中（进程 ${pid}）`,
+              `running (process ${pid})`,
+              `en ejecución (proceso ${pid})`,
+              `em execução (processo ${pid})`,
+            )
+          : tr('没有运行', 'not running', 'no está en ejecución', 'não está em execução');
+        lines.push(
+          tr(
+            `  ${name}：${state}（${plan.path}）`,
+            `  ${name}: ${state} (${plan.path})`,
+            `  ${name}: ${state} (${plan.path})`,
+            `  ${name}: ${state} (${plan.path})`,
+          ),
+        );
+      }
+  }
+  return lines;
+}
+
+/**
+ * The units of before the hub still installed among `installed` (design §4.3), said with the
+ * command that replaces them with one for every bot (keeping the cap the service runs with:
+ * `reinstallCommand`); null when there are none. --uninstall-service, which removes every unit,
+ * is offered only while the hub's is not installed: beside it, it would take the hub away too.
+ */
+function legacyLine(context: Context, installed: ServicePlan[]): string | null {
+  const legacy = installed.filter((plan) => legacyKind(context, plan));
+  if (!legacy.length) return null;
+  const names = legacy.map((plan) => channelSetup(legacyKind(context, plan)!).displayName);
+  const hub = installed.find((plan) => !legacyKind(context, plan));
+  const command = reinstallCommand(hub ?? legacy[0]);
+  if (hub)
+    return tr(
+      `还装着旧版按通道分开的后台服务（${names.join('、')}）：${command} 会换成一个运行所有 bot 的服务`,
+      `Older per-channel background services are still installed (${names.join(', ')}): ${command} replaces them with one for every bot`,
+      `Todavía hay servicios en segundo plano antiguos, uno por canal (${names.join(', ')}): ${command} los reemplaza por uno para todos los bots`,
+      `Ainda há serviços em segundo plano antigos, um por canal (${names.join(', ')}): ${command} os substitui por um para todos os bots`,
+    );
+  return tr(
+    `还装着旧版按通道分开的后台服务（${names.join('、')}）：${command} 会换成一个运行所有 bot 的服务（${UNINSTALL} 删除它们）`,
+    `Older per-channel background services are still installed (${names.join(', ')}): ${command} replaces them with one for every bot (${UNINSTALL} removes them)`,
+    `Todavía hay servicios en segundo plano antiguos, uno por canal (${names.join(', ')}): ${command} los reemplaza por uno para todos los bots (${UNINSTALL} los elimina)`,
+    `Ainda há serviços em segundo plano antigos, um por canal (${names.join(', ')}): ${command} os substitui por um para todos os bots (${UNINSTALL} os remove)`,
+  );
+}
+
+/**
+ * `yomi relay --service-status`: the background service (its unit, running or not, its log, and
+ * the units of before it still installed), then every bot as `--list` shows it.
+ */
+async function relayServiceStatus(context: Context) {
+  const { io } = context;
+  const registry = openRegistry(context);
+  for (const line of serviceLines(context, true)) say(io, line);
+  say(io);
+  listBots(context, registry, null);
+}
+
+/**
+ * `yomi relay --uninstall-service`: stops and removes the background service, and the
+ * per-channel units of before it, each said. The bots stay.
+ */
+async function relayUninstall(context: Context) {
+  const { io } = context;
+  // First, so a bot of before the registry whose unit is installed is the one taken over.
+  openRegistry(context);
+  await withSetupLock(context, changeNote('--uninstall-service'), async () => {
+    const installed = installedPlans(context);
+    for (const plan of installed) removeService(context, plan);
+    if (!installed.length) say(io, noServiceInstalled());
+  });
+}
+
+/** Neither the background service nor a unit of before it is installed. */
+function noServiceInstalled(): string {
+  return tr(
+    '没有安装后台服务。',
+    'No background service is installed.',
+    'No hay ningún servicio en segundo plano instalado.',
+    'Nenhum serviço em segundo plano está instalado.',
   );
 }
 
@@ -1444,17 +1711,10 @@ export async function relayRebind(
   });
 }
 
-/** Flags about one channel's credentials or service: they need the channel named. */
+/** Flags about one channel's credentials: they need the channel named (or a bot's). */
 function needsChannel(options: RelayCommandOptions): boolean {
   return (
-    options.setToken ||
-    options.setApp ||
-    options.login ||
-    options.qrLink ||
-    options.tokenStdin ||
-    options.installService ||
-    options.uninstallService ||
-    options.serviceStatus
+    options.setToken || options.setApp || options.login || options.qrLink || options.tokenStdin
   );
 }
 
@@ -1534,55 +1794,15 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     return relayCredentials(context, options);
   const problem = channelFlagProblem(options);
   if (problem) throw new UsageError(problem);
-  const kind = options.channel;
-  if (kind && options.uninstallService) {
-    const plan = planFor(context, channelSetup(kind), options);
-    const removed = uninstallService(plan);
-    say(
-      io,
-      removed
-        ? tr(
-            `已停止并删除后台服务（${plan.path}）`,
-            `Stopped and removed the background service (${plan.path})`,
-            `Se detuvo y se eliminó el servicio en segundo plano (${plan.path})`,
-            `O serviço em segundo plano foi parado e removido (${plan.path})`,
-          )
-        : tr(
-            '没有安装后台服务。',
-            'No background service is installed.',
-            'No hay ningún servicio en segundo plano instalado.',
-            'Nenhum serviço em segundo plano está instalado.',
-          ),
-    );
-    return;
-  }
-  if (kind && options.serviceStatus) {
-    const plan = planFor(context, channelSetup(kind), options);
-    if (!existsSync(plan.path))
-      return void say(
-        io,
-        tr(
-          '没有安装后台服务。',
-          'No background service is installed.',
-          'No hay ningún servicio en segundo plano instalado.',
-          'Nenhum serviço em segundo plano está instalado.',
-        ),
-      );
-    const [command, ...args] = plan.status;
-    const result = runCommand(command, args);
-    say(
-      io,
-      result.output ||
-        tr(
-          `${plan.label}：没有运行`,
-          `${plan.label}: not running`,
-          `${plan.label}: no está en ejecución`,
-          `${plan.label}: não está em execução`,
-        ),
-    );
-    return;
-  }
+  // The one background service runs every bot: a channel named takes nothing away from it.
+  if (options.uninstallService) return relayUninstall(context);
+  if (options.serviceStatus) return relayServiceStatus(context);
+  if (options.installService) return installRelayService(context, options);
   const registry = openRegistry(context);
+  // Nobody at the terminal (a background service whose last bot was taken away): nothing to run
+  // is no failure, or the service would be started again and again.
+  if (!options.channel && !options.bots.length && !registry.list().length && !io.interactive)
+    return void warn(io, noBotsYet());
   let selected = selectBots(registry, options);
   const setup = selected[0].setup;
   // The channel is the bots' own when none is named: --pair needs one that pairs with a code.
@@ -1590,10 +1810,6 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     throw new UsageError(wechatNoPairing());
   if (store.kind === 'file' && !options.allowFileStore)
     throw new UsageError(fileStoreRefusal(setup));
-  if (options.installService) {
-    const refusal = otherServiceRefusal(context, setup, options);
-    if (refusal) throw new UsageError(refusal);
-  }
 
   const credential = requireSignIn(context);
   const names = [...new Set(selected.map((item) => item.setup.displayName))];
@@ -1639,23 +1855,25 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     selected = [{ setup, record }];
   }
   const records = selected.map((item) => ({ setup: item.setup, record: item.record! }));
-  if (options.installService) return installRelayService(context, registry, records, options);
   // --pair with the background service running: it is stopped while the owner pairs here, and
   // started again once they did (or this run ended). The run spends under the service's cap.
   if (options.pair && serviceHolding(context)) {
     const cap = pairingCap(context, options);
-    return withSetupLock(context, changeNote('--pair'), () =>
-      withServiceStopped(context, (stopped) =>
-        relayRun(
+    let restarted: ServicePlan | null = null;
+    await withSetupLock(context, changeNote('--pair'), () =>
+      withServiceStopped(context, (stopped) => {
+        restarted = stopped;
+        return relayRun(
           context,
           registry,
           records,
           stopped ? { ...options, maxSpend: cap, resetSpend: false } : options,
           credential,
           Boolean(stopped),
-        ),
-      ),
+        );
+      }),
     );
+    return legacyRestarted(context, restarted);
   }
   return relayRun(context, registry, records, options, credential, false);
 }
@@ -2022,56 +2240,133 @@ async function openBot(
   }
 }
 
+/** `--install-service --channel K --character X` with no bot of K: what adds one bound to X. */
+function noBotToBind(setup: ChannelSetup, input: string): string {
+  const add = `${setup.command} ${setup.credentialsFlag} --character ${input}`;
+  return tr(
+    `这台电脑上还没有${inChinese(setup.displayName)}的 bot，--character ${input} 没有可以绑定的 bot，所以没有安装后台服务。添加一个绑定这个角色的 bot：${add}`,
+    `There is no ${setup.displayName} bot on this computer, so --character ${input} has no bot to bind and the background service was not installed. To add one bound to this character: ${add}`,
+    `No hay ningún bot de ${setup.displayName} en este equipo, así que --character ${input} no tiene ningún bot que vincular y no se instaló el servicio en segundo plano. Para agregar uno vinculado a este personaje: ${add}`,
+    `Não há nenhum bot do ${setup.displayName} neste computador, então --character ${input} não tem nenhum bot para vincular e o serviço em segundo plano não foi instalado. Para adicionar um vinculado a este personagem: ${add}`,
+  );
+}
+
+/** `--install-service --character` among several bots: which one it is for is not said. */
+function characterForSeveral(input: string): string {
+  return tr(
+    `这里有多个 bot：--character ${input} 不知道给哪一个，已忽略。给一个 bot 绑定角色：yomi relay --bot 名字 --character ID`,
+    `There are several bots here, so --character ${input} is for none of them and is ignored. To bind a bot to a character: yomi relay --bot NAME --character ID`,
+    `Aquí hay varios bots, así que --character ${input} no es para ninguno y se ignora. Para vincular un bot a un personaje: yomi relay --bot NOMBRE --character ID`,
+    `Há vários bots aqui, então --character ${input} não é para nenhum deles e foi ignorado. Para vincular um bot a um personagem: yomi relay --bot NOME --character ID`,
+  );
+}
+
+/** `--install-service` with no bot registered: nothing for a service to run. */
+function nothingToServe(): string {
+  return tr(
+    '这台电脑上还没有 bot，后台服务没有可运行的：先添加一个（yomi relay --telegram --set-token、yomi relay --channel qq --set-app 或 yomi relay --channel wechat --experimental --login，加上 --character ID），再安装后台服务。',
+    'There are no bots on this computer yet, so a background service would have nothing to run: add one first (yomi relay --telegram --set-token, yomi relay --channel qq --set-app or yomi relay --channel wechat --experimental --login, with --character ID), then install the service.',
+    'Todavía no hay bots en este equipo, así que un servicio en segundo plano no tendría nada que ejecutar: agrega uno primero (yomi relay --telegram --set-token, yomi relay --channel qq --set-app o yomi relay --channel wechat --experimental --login, con --character ID) y luego instala el servicio.',
+    'Ainda não há bots neste computador, então um serviço em segundo plano não teria nada para executar: adicione um primeiro (yomi relay --telegram --set-token, yomi relay --channel qq --set-app ou yomi relay --channel wechat --experimental --login, com --character ID) e depois instale o serviço.',
+  );
+}
+
 /**
- * `--install-service` for the channel's bots (one background service per channel for now), each
- * opened and checked first: credentials of another bot and a bot nobody paired with are refused.
+ * `--install-service`'s `--character` (design §1.4, as at a run's start): the bot it binds, the
+ * one of the channel named (or of the computer) when that one has no character yet; null after a
+ * warning when it is for no bot (several, or one bound to another character, which stays). A
+ * character another bot has, or a channel named that has no bot, is refused before anything is
+ * installed.
  */
-async function installRelayService(
+function characterToBind(
   context: Context,
   registry: BotRegistry,
-  selected: { setup: ChannelSetup; record: BotRecord }[],
   options: RelayCommandOptions,
-) {
-  const { io } = context;
-  const setup = selected[0].setup;
-  const opened: OpenedBot[] = [];
-  for (const item of selected) {
-    const bot = await openBot(context, item.setup, item.record, options, false);
-    if (!bot) return;
-    opened.push(bot);
+): BotRecord | null {
+  const input = options.characterId;
+  const npcId = characterIdOf(input);
+  if (!npcId) throw new UsageError(characterBad(input, ''));
+  const records = registry.list(options.channel ?? undefined);
+  // None only of a channel named: a computer without bots was refused before.
+  if (!records.length && options.channel)
+    throw new UsageError(noBotToBind(channelSetup(options.channel), input));
+  if (records.length !== 1) {
+    warn(context.io, characterForSeveral(input));
+    return null;
   }
-  for (const { channel, record, otherBot, state } of opened) {
-    if (otherBot) throw new UsageError(otherBotCredentials(setup, record));
-    if (!state.data.owner)
-      throw new UsageError(
-        channel.caps.pairing === 'login'
-          ? setup.unpairedHint(record)
-          : tr(
-              `还没有配对：先在终端里运行一次 ${setup.command} 完成配对，再安装后台服务。`,
-              `Not paired yet: run ${setup.command} once in a terminal to pair, then install the background service.`,
-              `Todavía no está vinculado: ejecuta ${setup.command} una vez en una terminal para vincularlo y luego instala el servicio en segundo plano.`,
-              `Ainda não pareado: execute ${setup.command} uma vez em um terminal para parear e depois instale o serviço em segundo plano.`,
-            ),
+  const [record] = records;
+  if (record.character) {
+    if (record.character.npcId !== npcId)
+      warn(context.io, characterIgnored(record, record.character, input));
+    return null;
+  }
+  const holder = registry.byCharacter(npcId);
+  if (holder) throw new DuplicateCharacter(npcId, holder.name);
+  return record;
+}
+
+/**
+ * `yomi relay --install-service` (design §1.5): one background service for every registered bot
+ * of this Yomi account and environment, with the run's own arguments only (`relayServiceArgs`).
+ * Each bot is checked on this computer first: one that could not run in it (no credentials or
+ * another bot's, nobody paired, a WeChat bot nobody signed in) is said with what to run, and so
+ * is one without a character; with none that could run, nothing is installed. `--character`
+ * binds the bot it is for now (`characterToBind`). Then, under the setup lock and with no relay
+ * running in a terminal: the hub's unit is written, the per-channel units of before it are
+ * removed (said), a service that still holds the environment's lock is waited for (one that does
+ * not let go leaves the hub's unit written, not loaded: said), and the hub's unit is loaded (a
+ * running one is started again: the arguments typed now apply, the cap too).
+ */
+async function installRelayService(context: Context, options: RelayCommandOptions) {
+  const { io, store } = context;
+  const registry = openRegistry(context);
+  const bots = registry.list();
+  if (!bots.length) throw new UsageError(nothingToServe());
+  if (store.kind === 'file' && !options.allowFileStore)
+    throw new UsageError(fileStoreRefusal(channelSetup(options.channel ?? bots[0].kind)));
+  requireSignIn(context);
+  const unbound = options.characterId ? characterToBind(context, registry, options) : null;
+  const checked = bots.map((record) => ({
+    record,
+    ...offlineStatus(context, record, stateOf(context, record)),
+  }));
+  for (const { record, text, runs } of checked)
+    if (!runs)
+      warn(
+        io,
+        tr(
+          `bot ${record.name} 还不能在后台服务里运行：${text}`,
+          `The bot ${record.name} cannot run in the background service yet: ${text}`,
+          `El bot ${record.name} todavía no puede ejecutarse en el servicio en segundo plano: ${text}`,
+          `O bot ${record.name} ainda não pode ser executado no serviço em segundo plano: ${text}`,
+        ),
       );
-  }
-  // --character binds a bot without one at the service's start; it never changes a bound one.
-  let serviceOptions = options;
-  const record = opened[0].record;
-  if (opened.length > 1) {
-    if (options.characterId) warn(io, characterForWhich(options.characterId));
-    serviceOptions = { ...options, characterId: '' };
-    for (const bot of opened) if (!bot.record.character) warn(io, needsCharacter(bot.record));
-  } else if (record.character) {
-    if (options.characterId && characterIdOf(options.characterId) !== record.character.npcId)
-      warn(io, characterIgnored(record, record.character, options.characterId));
-    // Left out, so the service's log never repeats that warning.
-    serviceOptions = { ...options, characterId: '' };
-  } else if (options.characterId) {
-    const holder = registry.byCharacter(characterIdOf(options.characterId));
-    if (holder && holder.key !== record.key)
-      throw new DuplicateCharacter(holder.character!.npcId, holder.name);
-  } else warn(io, needsCharacter(record));
-  const plan = planFor(context, setup, serviceOptions);
+  if (!checked.some((item) => item.runs))
+    throw new UsageError(
+      tr(
+        '这些 bot 都还不能在后台服务里运行（见上面），所以没有安装后台服务。',
+        'None of these bots can run in a background service yet (see above), so it was not installed.',
+        'Ninguno de estos bots puede ejecutarse todavía en un servicio en segundo plano (ver arriba), así que no se instaló.',
+        'Nenhum destes bots pode ser executado ainda em um serviço em segundo plano (veja acima), então ele não foi instalado.',
+      ),
+    );
+  const names = [...new Set(bots.map((record) => channelSetup(record.kind).displayName))];
+  const name = names.join(tr('、', ', ', ', ', ', '));
+  if (
+    !(await confirmProduction(
+      context,
+      tr(
+        `把${inChinese(name)}私聊转给角色（会使用真实账号的免费额度和钻石）`,
+        `forward ${name} private chats to a character (uses the real account's free messages and gems)`,
+        `reenviar los chats privados de ${name} a un personaje (usa los mensajes gratis y las gemas de la cuenta real)`,
+        `encaminhar os chats privados do ${name} para um personagem (usa as mensagens grátis e as gemas da conta real)`,
+      ),
+      options.confirmProd,
+    ))
+  )
+    return;
+  const character = unbound ? await characterFor(context, options.characterId) : null;
+  const plan = hubPlan(context, options);
   if (/[\\/](_npx|\.npm|tmp|temp)[\\/]/i.test(plan.content))
     warn(
       io,
@@ -2082,8 +2377,50 @@ async function installRelayService(
         'Este yomi parece estar sendo executado de um diretório temporário (npx ou um cache), então o serviço em segundo plano pode parar de funcionar quando o cache for limpo: instale o yomi globalmente antes de instalar o serviço.',
       ),
     );
-  ensurePrivateDir(join(configDir(), 'logs'));
-  installService(plan);
+  const flag = '--install-service';
+  await withSetupLock(context, changeNote(flag), async () => {
+    const holder = lockHolder(environmentLock(context));
+    const running = holder ? serviceRunningAs(context, holder.pid) : null;
+    if (holder && !running) {
+      const held = holderOf({ heldBy: holder.pid, note: holder.note });
+      throw new UsageError(held.flag ? credentialsRunning(held, flag) : runningRefusal(held, flag));
+    }
+    if (unbound && character) {
+      const bound = registry.rebind(unbound.key, character);
+      say(
+        io,
+        tr(
+          `已把 bot ${bound.name} 绑定到${nameAndId(character)}。`,
+          `Bound the bot ${bound.name} to ${nameAndId(character)}.`,
+          `Se vinculó el bot ${bound.name} a ${nameAndId(character)}.`,
+          `O bot ${bound.name} foi vinculado a ${nameAndId(character)}.`,
+        ),
+      );
+    }
+    for (const { record } of checked) {
+      const current = registry.find(record.name);
+      if (current && !current.character) warn(io, needsCharacter(current));
+    }
+    ensurePrivateDir(join(configDir(), 'logs'));
+    // The new unit first: should anything fail after, the units of before are not all that is left.
+    writeServiceUnit(plan);
+    for (const kind of CHANNEL_KINDS) removeLegacyService(context, kind);
+    // The service running lets go of the environment's lock as it ends (one of before, removed
+    // above, or the hub's own, stopped here and loaded again below).
+    if (holder && running) {
+      if (running.path === plan.path) pauseService(plan);
+      if (!(await environmentLetGo(context, holder.pid)))
+        throw new UsageError(
+          tr(
+            `后台服务（${running.label}）${SERVICE_STOP_MS / 1000} 秒内没有停下来，所以新的后台服务写好了但没有启动：稍后再运行一次这个命令。`,
+            `The background service (${running.label}) did not stop within ${SERVICE_STOP_MS / 1000} s, so the new one was written but not started: run this command again later.`,
+            `El servicio en segundo plano (${running.label}) no se detuvo en ${SERVICE_STOP_MS / 1000} s, así que el nuevo quedó escrito pero no se inició: vuelve a ejecutar este comando más tarde.`,
+            `O serviço em segundo plano (${running.label}) não parou em ${SERVICE_STOP_MS / 1000} s, então o novo foi escrito mas não iniciado: execute este comando de novo mais tarde.`,
+          ),
+        );
+    }
+    installService(plan);
+  });
   say(
     io,
     tr(
@@ -2093,6 +2430,16 @@ async function installRelayService(
       `Serviço em segundo plano instalado e iniciado: ${plan.path}`,
     ),
   );
+  const all = registry.list().map((record) => record.name);
+  say(
+    io,
+    tr(
+      `它在一个进程里运行这台电脑上的全部 bot（${all.length} 个）：${all.join('、')}。`,
+      `It runs every bot on this computer in one process (${all.length}): ${all.join(', ')}.`,
+      `Ejecuta todos los bots de este equipo en un solo proceso (${all.length}): ${all.join(', ')}.`,
+      `Ele executa todos os bots deste computador em um só processo (${all.length}): ${all.join(', ')}.`,
+    ),
+  );
   say(io, capLine(options.maxSpend, true));
   say(
     io,
@@ -2100,10 +2447,10 @@ async function installRelayService(
       io,
       'dim',
       tr(
-        `日志：${join(configDir(), 'logs')}；停止并删除：${setup.command} --uninstall-service`,
-        `Logs: ${join(configDir(), 'logs')}; to stop and remove: ${setup.command} --uninstall-service`,
-        `Registros: ${join(configDir(), 'logs')}; para detenerlo y eliminarlo: ${setup.command} --uninstall-service`,
-        `Logs: ${join(configDir(), 'logs')}; para parar e remover: ${setup.command} --uninstall-service`,
+        `日志：${plan.log}；停止并删除：${UNINSTALL}`,
+        `Log: ${plan.log}; to stop and remove: ${UNINSTALL}`,
+        `Registro: ${plan.log}; para detenerlo y eliminarlo: ${UNINSTALL}`,
+        `Log: ${plan.log}; para parar e remover: ${UNINSTALL}`,
       ),
     ),
   );
@@ -2160,9 +2507,10 @@ type ReadyBot = OpenedBot & { pairing: PairingCode | null };
  * Runs the selected bots in this one process (`RelayHub`, design §1.4, §2): each opened and
  * checked as a single relay always was, each under its own lock and all under the environment's,
  * then supervised side by side so one that stops leaves the others running. The terminal says
- * each bot's start and stop; the end is "Relay stopped." when it was stopped (Ctrl+C), and
- * nothing more when every bot stopped on its own (each said why). `untilPaired`: the run ends once
- * an owner paired (the background service stopped for it starts again).
+ * each bot's start (and the units of before the hub still installed: `legacyLine`) and stop; the
+ * end is "Relay stopped." when it was stopped (Ctrl+C), and nothing more when every bot stopped on
+ * its own (each said why). `untilPaired`: the run ends once an owner paired (the background
+ * service stopped for it starts again).
  */
 async function relayRun(
   context: Context,
@@ -2274,6 +2622,9 @@ async function relayRun(
           ),
       ),
     );
+    // Units of before the hub (design §4.3): each runs its own channel's bots until replaced.
+    const legacy = legacyLine(context, installedPlans(context));
+    if (legacy) say(io, paint(io, 'dim', legacy));
     if (untilPaired)
       say(
         io,

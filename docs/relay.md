@@ -8,7 +8,7 @@
 | QQ                    | `--channel qq`                          | 仅限个人使用           | [docs/relay-qq.md](relay-qq.md)         |
 | 微信 ClawBot（iLink） | `--channel wechat --experimental`       | 实验功能，仅限个人使用 | [docs/relay-wechat.md](relay-wechat.md) |
 
-下文的运行方式、聊天里的命令、钱、隐私和后台服务对所有通道相同；各通道自己的部分（怎样拿到 bot、怎样配对、能不能流式显示、离线时的消息）在各自的文档里。
+下文的运行方式、多个 bot、聊天里的命令、钱、隐私和后台服务对所有通道相同；各通道自己的部分（怎样拿到 bot、怎样配对、能不能流式显示、离线时的消息）在各自的文档里。
 
 服务端通过 `relay/get_policy` 声明它已经支持的能力（只用免费额度、花费上限、合规提示注入等），请求里带着通道名。没有声明的能力，relay 不会假定服务端支持：只用免费额度时一条也不发，设了上限（预算或 `--max-spend`）时要能读到价格才发，AI 提示由 relay 自己显示；不设上限（默认）时，这些都不影响转发。在生产环境，QQ 和微信只在服务端明确为这个通道返回了策略时才转发；否则每条消息都只会收到「服务端已关闭」的答复，不转发、不扣费，服务端开放后自动恢复。测试环境和自定义地址只提示一句，照常运行。
 
@@ -29,9 +29,36 @@ yomi relay --channel telegram --character 7300000000000009001
 - 凭证不接受命令行参数和环境变量（会出现在 `ps`、shell 历史、子进程里）：在终端里输入（不显示），或用 `--token-stdin` 从标准输入读。没有系统钥匙串（Linux 没有 Secret Service 时）relay 默认拒绝启动，确认接受明文 0600 文件时才加 `--allow-file-store`。
 - QQ 和微信启动时会提示「仅限个人使用」；微信还会提示它是实验功能，不加 `--experimental` 不启动。
 
-同一个 Yomi 账号和环境，本机同时只能运行一个 relay，不论通道（两个 Telegram bot 也一样）：几个 relay 会共用 Yomi 长连接的设备 ID，互相取走对方的离线消息，按余额差额核对的花费会算进对方花的钻石，`--max-spend` 本机上限也会被每个 relay 各花一遍。所以第二个 relay 会被拒绝，并说明正在运行的是哪个通道、哪个 bot、哪个进程；已经装了另一个通道的后台服务时，要先用那个通道的 `--uninstall-service` 删除它，才能装新的。
+同一个 Yomi 账号和环境，本机同时只能运行一个 relay 进程，不论通道：几个进程会共用 Yomi 长连接的设备 ID，互相取走对方的离线消息，按余额差额核对的花费会算进对方花的钻石，`--max-spend` 本机上限也会被每个进程各花一遍。所以多个 bot 在同一个进程里运行（见[多个 bot](#多个-bot)），第二个进程会被拒绝，并说明正在运行的是哪些 bot、哪个进程。
 
-改动 bot（添加、重新设置凭证、换绑角色、删除）时不能有 relay 在运行，同一时间也只能有一个改动：后台服务正在运行时，命令会先停止它，改完（包括微信扫码）再重新启动它，并在终端里说明，这期间其他 bot 也会离线；终端里有 relay 在运行时，命令会被拒绝，先停止它（Ctrl+C）。后台服务运行时用 `--pair` 配对，会先停止服务，在这个终端里显示配对码，配对完成（或按 Ctrl+C）后重新启动服务；这次配对按后台服务的花费上限运行，不会重新计算累计花费（`--pair` 加了不同的 `--max-spend` 或 `--reset-spend` 会被拒绝，要改上限就重新 `--install-service`）。后台服务停止期间按 Ctrl+C 或关掉终端，命令也会先重新启动服务再退出。新添加的 Telegram、QQ bot 用 `yomi relay --bot <名字> --pair` 配对；后台服务在运行时，`yomi relay --channel <通道>` 遇到这个通道还没有 bot，只添加 bot，不在终端里运行。
+## 多个 bot
+
+一台电脑上可以登记多个 bot（最多 20 个，每个通道最多 10 个），Telegram、QQ 和微信可以混用。每个 bot 固定和一个角色聊天，一个角色只能绑一个 bot。
+
+| 要做的事                         | 命令                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| 添加 Telegram bot                | `yomi relay --telegram --set-token --character <ID> [--bot <名字>]`                  |
+| 添加 QQ bot                      | `yomi relay --channel qq --set-app --character <ID> [--bot <名字>]`                  |
+| 添加微信 ClawBot（每个扫一次码） | `yomi relay --channel wechat --experimental --login --character <ID> [--bot <名字>]` |
+| 配对（Telegram、QQ）             | `yomi relay --bot <名字> --pair`                                                     |
+| 重新设置凭证、重新登录           | `yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）              |
+| 列出 bot、角色、主人和状态       | `yomi relay --list`（加 `--channel <通道>` 只看一个通道）                            |
+| 换绑角色                         | `yomi relay --bot <名字> --character <ID>`                                           |
+| 删除一个 bot / 全部              | `yomi relay --forget --bot <名字>` / `yomi relay --forget --all`                     |
+| 运行全部 / 一个通道 / 几个 bot   | `yomi relay` / `yomi relay --channel <通道>` / `yomi relay --bot a,b`                |
+| 一个后台服务运行全部 bot         | `yomi relay --install-service`（见[一直运行（后台服务）](#一直运行后台服务)）        |
+
+- **添加和重新设置 bot**：`--set-token`（QQ `--set-app`，微信 `--login`）加上 `--character <ID>` 会添加一个新的 bot，固定和这个角色聊天（名字默认取 Telegram 用户名、`qq-<AppID 后 4 位>` 或 `wechat-<序号>`，也可以用 `--bot <新名字>` 指定）；加上 `--bot <已有的名字>` 只重新设置这个 bot 的凭证，而且必须是同一个 bot（同一个 Telegram bot、同一个 AppID；微信是同一个 ClawBot，或这个 bot 换人扫码）。两个都不加时：这个通道还没有 bot 就添加一个（之后再绑定角色），正好有一个就重新设置它，有多个时会要求用 `--bot` 指定。同一个 bot、同一个角色都不能登记两次；新 bot 的凭证在钥匙串里用自己的名字保存，保存失败时什么都不会留下。新添加的 Telegram、QQ bot 用 `yomi relay --bot <名字> --pair` 配对。
+- **`--list`** 列出每个 bot 的名字、通道、平台上的名字、角色、主人（Telegram 显示名字，其他只显示用户 ID 的头尾）和状态（运行中、已停止和原因、需要凭证、需要配对、需要登录、需要绑定角色、凭证属于另一个 bot），最后一行说明后台服务是否已安装、是否在运行，以及是否还装着旧版按通道分开的服务。它不做任何改动，也不联网。
+- **换绑和删除**：`--bot <名字> --character <ID>` 只改这个 bot 的角色，主人、预算、记录和收消息的进度都保留，主人发下一条消息时先收到新角色的介绍。`--forget --bot <名字>` 删除这个 bot 的凭证、状态和记录；`--channel <通道> --forget` 删除这个通道唯一的 bot（有多个时会被拒绝）；`--forget --all` 删除全部 bot、后台服务和花费记录。
+- **一个进程运行多个 bot**：不带 `--channel` 运行 `yomi relay`，会在一个进程里运行这台电脑上登记的所有 bot（`--channel <通道>` 只运行这个通道的，`--bot a,b` 只运行这几个；`--bot` 后面没有名字会被拒绝）。每一次 `yomi relay` 都这样运行，只运行一个通道或一个 bot 时也一样，所以这条说的共用花费记录，和「钱」里关于图片和差额的规则，对它们同样适用。它们共用一次 Yomi 登录、一条长连接和一份花费记录 `~/.config/yomi-cli/relay/ledger-<哈希>.json`（第一次运行时由各 bot 的记录合并而来）：`--max-spend` 是这个进程里所有 bot 共用的上限，`/budget` 仍然归各个 bot 的主人。不设上限时 bot 之间互不等待：另一个 bot 正在按余额核对花费时，这条消息按服务端报的扣费计入，没有报就按报价估计（日志里会注明）；设了上限时，按余额核对的发送轮流进行。一个 bot 出问题（被别的程序占用、凭证失效、反复意外停止）只停它自己，其他 bot 继续运行；意外停止的会稍后自动重新启动。运行中各 bot 的状态写在 `relay/hub-<哈希>.status.json`，`--list` 会显示。
+- **改动 bot 时**（添加、重新设置凭证、重新登录、换绑角色、删除、配对）不能有 relay 在运行，同一时间也只能有一个改动：
+  - 后台服务正在运行时，命令会先停止它，在这个终端里完成改动（包括微信扫码，以及 Telegram、QQ 的配对），再重新启动它，并在终端里说明。运行中的服务不会自己发现改动（没有热加载），所以这期间**所有 bot 都离线**，通常一分钟左右。按 Ctrl+C 或关掉终端，命令也会先重新启动服务再退出。
+  - 后台服务运行时用 `--pair` 配对：停止服务，在终端里显示配对码，配对完成（或按 Ctrl+C）后重新启动服务。这次配对按后台服务的花费上限运行，不会重新计算累计花费（`--pair` 加了不同的 `--max-spend` 或 `--reset-spend` 会被拒绝，要改上限就重新 `--install-service`）。
+  - 后台服务运行时，`yomi relay --channel <通道>` 遇到这个通道还没有 bot，只添加 bot，不在终端里运行。
+  - 删掉最后一个 bot 时，服务停着不再启动（它没有可运行的 bot）；添加 bot 之后用 `--install-service` 启动它。服务已安装但没有在运行时（例如启动时没有能运行的 bot 而结束了），改动之后终端会提示用 `--install-service` 重新启动它。这些提示给出的命令带着服务原来的 `--max-spend`（以及 `--no-drafts`、`--allow-file-store`），例如 `yomi relay --max-spend 50 --install-service`：照着运行，上限和累计花费都保留；不带 `--max-spend` 重新安装会去掉上限，累计花费从头算。
+  - 停下又启动的是旧版按通道分开的服务时，它仍然只运行那个通道的 bot，新加的其他通道的 bot 不会在后台运行：终端会提示用 `--install-service` 换成运行所有 bot 的服务。
+  - 终端里有 relay 在运行时，命令会被拒绝，先停止它（Ctrl+C）。
 
 ## 聊天里的命令
 
@@ -71,30 +98,32 @@ yomi relay --channel telegram --character 7300000000000009001
 - 只转发本 relay 自己发起的回复：你在 App 或网页上和同一角色聊天，不会出现在聊天平台里。
 - 对话会经过聊天平台（Telegram、QQ、微信）的服务器，由它按自己的隐私政策处理；在 Yomi 里删除会话不会删掉聊天平台里的消息。
 - **现在**：relay 在会话开始和之后每 3 小时显示一条 AI 提示（含「陪伴类聊天机器人可能不适合部分未成年人」）。服务端注入合规提示后，改为只转发服务端的提示。
-- 本机只保存 relay 需要的最少信息（`~/.config/yomi-cli/relay/*.json`，0600，每个 bot 一份）：你在这个平台上的用户 ID（Telegram 还有名字）、当前角色、预算、聊天消息与 Yomi 消息 ID 的对应（用于举报，最多 500 条）、发过介绍的主人（用户 ID 的哈希，不存原值，和当时的角色，最多 20 个），以及通道自己需要的少量状态（例如还没送达的提醒）。凭证不在这些文件里，只在系统钥匙串（或 `--allow-file-store` 时单独的 0600 文件）里。`yomi relay --forget --bot <名字>` 删除一个 bot 的凭证和这些信息；`yomi relay --channel <通道> --forget` 删除这个通道唯一的 bot（以及这个通道的后台服务），有多个时会被拒绝；`yomi relay --forget --all` 删除全部 bot、后台服务和花费记录。
+- 本机只保存 relay 需要的最少信息（`~/.config/yomi-cli/relay/*.json`，0600，每个 bot 一份）：你在这个平台上的用户 ID（Telegram 还有名字）、当前角色、预算、聊天消息与 Yomi 消息 ID 的对应（用于举报，最多 500 条）、发过介绍的主人（用户 ID 的哈希，不存原值，和当时的角色，最多 20 个），以及通道自己需要的少量状态（例如还没送达的提醒）。凭证不在这些文件里，只在系统钥匙串（或 `--allow-file-store` 时单独的 0600 文件）里。`yomi relay --forget --bot <名字>` 删除一个 bot 的凭证和这些信息；`yomi relay --channel <通道> --forget` 删除这个通道唯一的 bot（以及这个通道旧版的后台服务），有多个时会被拒绝；`yomi relay --forget --all` 删除全部 bot、后台服务和花费记录。
 - 本机的 bot 登记在 `~/.config/yomi-cli/relay/bots-<哈希>.json`（0600，每个 Yomi 账号和环境一份）：每个 bot 的名字、通道、平台上的 bot ID、当前角色，以及它的凭证、状态文件和锁文件的名字；不含凭证，主人只存用户 ID 的哈希。升级后第一次运行 `yomi relay` 时，已经设置好的 bot 会自动登记，主人、预算、待核对的花费和收消息的进度都保留，不会重发介绍。`yomi relay --list`（可以加 `--channel`）列出这些 bot 和各自的状态，不做任何改动。钥匙串里的凭证如果被换成了另一个 bot 的（例如旧版本的 `--set-token`），relay 不会把它当成登记的 bot 启动：用 `yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）重新设置它自己的凭证，或者用 `--forget --bot <名字>` 删掉它。
-- **添加和重新设置 bot**：`--set-token`（QQ `--set-app`，微信 `--login`）加上 `--character <ID>` 会添加一个新的 bot，固定和这个角色聊天（名字默认取 Telegram 用户名、`qq-<AppID 后 4 位>` 或 `wechat-<序号>`，也可以用 `--bot <新名字>` 指定）；加上 `--bot <已有的名字>` 只重新设置这个 bot 的凭证，而且必须是同一个 bot（同一个 Telegram bot、同一个 AppID；微信是同一个 ClawBot，或这个 bot 换人扫码）。两个都不加时：这个通道还没有 bot 就添加一个（之后再绑定角色），正好有一个就重新设置它，有多个时会要求用 `--bot` 指定。同一个 bot、同一个角色都不能登记两次；新 bot 的凭证在钥匙串里用自己的名字保存，保存失败时什么都不会留下。
-- **一个进程运行多个 bot**：不带 `--channel` 运行 `yomi relay`，会在一个进程里运行这台电脑上登记的所有 bot（`--channel <通道>` 只运行这个通道的，`--bot a,b` 只运行这几个；`--bot` 后面没有名字会被拒绝）。每一次 `yomi relay` 都这样运行，只运行一个通道或一个 bot 时也一样，所以这条说的共用花费记录，和「钱」里关于图片和差额的规则，对它们同样适用。它们共用一次 Yomi 登录、一条长连接和一份花费记录 `~/.config/yomi-cli/relay/ledger-<哈希>.json`（第一次运行时由各 bot 的记录合并而来）：`--max-spend` 是这个进程里所有 bot 共用的上限，`/budget` 仍然归各个 bot 的主人。不设上限时 bot 之间互不等待：另一个 bot 正在按余额核对花费时，这条消息按服务端报的扣费计入，没有报就按报价估计（日志里会注明）；设了上限时，按余额核对的发送轮流进行。一个 bot 出问题（被别的程序占用、凭证失效、反复意外停止）只停它自己，其他 bot 继续运行；意外停止的会稍后自动重新启动。运行中各 bot 的状态写在 `relay/hub-<哈希>.status.json`，`--list` 会显示。
 
 ## 一直运行（后台服务）
 
-先在终端里完成配对（微信：先登录），再：
+一个 Yomi 账号和环境只装一个后台服务，它在一个进程里运行这台电脑上登记的全部 bot。先在终端里完成配对（微信：先登录），再：
 
 ```sh
-yomi relay --channel telegram --install-service                    # macOS: launchd LaunchAgent；Linux: systemd --user；不设上限
-yomi relay --channel telegram --max-spend 200 --install-service    # 或者：本机累计最多花 200 钻石
-yomi relay --channel telegram --service-status
-yomi relay --channel telegram --uninstall-service
+yomi relay --install-service                    # macOS: launchd LaunchAgent；Linux: systemd --user；不设上限
+yomi relay --max-spend 200 --install-service    # 或者：所有 bot 合计最多花 200 钻石
+yomi relay --service-status                     # 服务是否在运行，以及每个 bot 的状态
+yomi relay --uninstall-service                  # 停止并删除服务，bot 保留
 ```
 
-- 安装时会说明这个服务的花费上限（没有、0 或多少）：后台服务没有人看着，装之前想清楚。
-- `--install-service` 带的 `--character` 只给还没有角色的 bot 绑定角色（服务启动时绑定；这个角色已经绑在别的 bot 上时，安装会被拒绝）。已经绑定角色的 bot 不会写进服务的命令行：角色不同时安装时会提示，要换角色用 `yomi relay --bot <名字> --character <ID>`。
-- 旧版本装的服务在命令行里写着 `--max-spend 0`（当时不加这个参数就是 0），所以它们仍然只用免费额度，聊天里会提示。要按 Yomi 的正常规则扣费，用不带 `--max-spend` 的命令重新 `--install-service`（会先停掉并替换旧的服务）。
-
-- 每个通道有自己的服务：Telegram 是 `io.yomichat.yomi-cli.relay.<环境>`（Linux `yomi-relay-<环境>.service`，和以前一样），QQ 是 `….relay.qq-<环境>`（`yomi-relay-qq-<环境>.service`），微信是 `….relay.wechat-<环境>`（`yomi-relay-wechat-<环境>.service`）。
+- 服务的名字是 `io.yomichat.yomi-cli.relay.hub-<环境>`（Linux `yomi-relay-hub-<环境>.service`），日志在 `~/.config/yomi-cli/logs/relay-hub-<环境>.log`。服务的命令行只有 `relay --env …` 和安装时给的 `--max-spend`、`--no-drafts`、`--allow-file-store`：不带通道、bot 和角色，这些以 bot 的登记为准；微信 bot 的实验功能同意记在它的登记里，命令行里不再带 `--experimental`。安装时带了 `--channel`（或 `--telegram`）也一样运行全部 bot；`--bot` 不能和 `--install-service`、`--uninstall-service`、`--service-status` 一起用。
+- 安装时会说明这个服务的花费上限（没有、0 或多少），这是所有 bot 共用的上限：后台服务没有人看着，装之前想清楚。
+- 安装前逐个检查 bot（只看本机，不联网）：还没有凭证、凭证属于另一个 bot、还没配对（微信：还没登录）的 bot 会被指出，并给出要运行的命令，它们在服务里不运行；还没有角色的 bot 会运行，但只回复「在电脑上绑定角色」。一个能运行的 bot 都没有时不安装，这台电脑上还没有 bot 时也不安装。之后补上配对或登录时，命令会停止服务、在终端里完成，再重新启动服务（见[多个 bot](#多个-bot)）。
+- 旧版本每个通道装一个服务（Telegram `io.yomichat.yomi-cli.relay.<环境>`，QQ `….relay.qq-<环境>`，微信 `….relay.wechat-<环境>`；Linux 是 `yomi-relay-<环境>.service`、`yomi-relay-qq-<环境>.service`、`yomi-relay-wechat-<环境>.service`）。`--install-service` 先写好新的服务，再停止并删除这些旧服务（终端里列出删了哪些），然后启动新的；启动失败时如实报告。没换之前，`--list`、`--service-status` 和 relay 启动时都会提示还装着旧服务，它仍按原来的参数只运行那个通道的 bot。新的服务已经装好时，提示里不再建议 `--uninstall-service`：它会把新的服务一起删掉。
+- 重新 `--install-service` 会重启服务，这次给的 `--max-spend` 等参数随之生效（没给 `--max-spend` 就是不设上限）。终端里有 relay 在运行时会被拒绝，先停止它。正在运行的旧服务 30 秒内没有停下来时，新的服务写好了但不启动，稍后再运行一次。
+- `--install-service` 带的 `--character` 只给还没有角色的 bot 绑定（指定的通道里、或这台电脑上只有这一个 bot 时），安装时立即绑定；这个角色已经绑在别的 bot 上，或者指定的通道里还没有 bot 时，安装会被拒绝（后者会给出添加这个通道的 bot 并绑定这个角色的命令）。已经绑定角色的 bot 不变（会提示），要换角色用 `yomi relay --bot <名字> --character <ID>`。
+- `--service-status` 显示服务是否在运行（进程号）、服务文件和日志的位置、还装着的旧服务，以及和 `--list` 相同的每个 bot 的状态。
+- **服务运行时改动 bot**（添加、重新设置凭证、换绑、删除、配对）：命令先停止服务，在终端里完成改动，再重新启动服务，这期间所有 bot 都离线，通常一分钟左右；服务不会自己发现改动。细节见[多个 bot](#多个-bot)。
+- 旧版本装的服务在命令行里写着 `--max-spend 0`（当时不加这个参数就是 0），所以它们仍然只用免费额度，聊天里会提示。要按 Yomi 的正常规则扣费，用不带 `--max-spend` 的命令重新 `--install-service`（会停掉并删除旧的服务，换成新的）。
 - 服务里没有任何凭证：启动时从钥匙串读。macOS 的登录钥匙串在你登录后才可用，所以服务只在你登录期间工作；Linux 需要桌面会话里的 Secret Service（无人值守时 `loginctl enable-linger` 并解锁 keyring，或明确使用 `--allow-file-store`）。
-- 日志在 `~/.config/yomi-cli/logs/`，只记录状态（连接、转发了一条、花费），不记录消息内容和凭证。
-- 遇到「另一个程序在用这个 bot 收消息」「凭证失效」「电脑上登录的账号变了」这类重启也解决不了的情况，relay 会说明原因并正常退出，服务不会反复重启。
+- 日志只记录状态（连接、转发了一条、花费），不记录消息内容和凭证；有多个 bot 时每行前面写着 bot 的名字。
+- 遇到「另一个程序在用这个 bot 收消息」「凭证失效」这类重启也解决不了的情况，只有这个 bot 停下，日志里说明原因，其他 bot 继续运行；全部 bot 都停下了，或电脑上登录的 Yomi 账号变了，relay 正常退出，服务不会反复重启。删掉最后一个 bot 后服务启动时也是这样：说明没有 bot，正常退出。
 - 同一个 bot 同时只能运行一个 relay（本机锁文件；Telegram 还有它自己的 409）。
 
 ## 断线与恢复

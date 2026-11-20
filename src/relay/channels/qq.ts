@@ -1342,8 +1342,6 @@ export const qqSetup: ChannelSetup = {
     );
   },
 
-  serviceArgs: () => ({ lead: ['--channel', 'qq'], trail: [] }),
-
   forgetHint: () =>
     tr(
       '如果 AppSecret 可能泄露，请在 QQ 开放平台（q.qq.com）的机器人设置里重置它。',

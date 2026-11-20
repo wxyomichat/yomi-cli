@@ -509,12 +509,13 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         0：只用免费额度）
   --reset-spend         重新计算 relay 的累计花费（有没有上限都适用）
   --allow-file-store    没有系统钥匙串时，允许把凭证和会话存成 0600 文件
-  --install-service     安装为后台服务（macOS launchd / Linux systemd --user），需先配对（微信：先登录）
-  --uninstall-service   停止并删除后台服务
-  --service-status      查看后台服务状态
+  --install-service     安装一个后台服务，在一个进程里运行全部 bot（macOS launchd / Linux systemd --user），
+                        替换旧版按通道分开的服务；还没配对（微信：还没登录）的 bot 会被指出，不能运行
+  --uninstall-service   停止并删除后台服务（包括旧版按通道分开的服务），bot 保留
+  --service-status      查看后台服务和每个 bot 的状态
   --list                列出这台电脑上的 bot：通道、角色、主人和状态（可以加 --channel 只看一个通道）
   --forget              删除 bot：--forget --bot 名字；--channel <通道> --forget（这个通道只有一个 bot 时）；
-                        --forget --all 删除全部（包括后台服务）
+                        --forget --all 删除全部（包括后台服务和花费记录）
   改动 bot 时后台服务在运行，会先停止它，改完后重新启动；终端里有 relay 在运行时要先停止它
   --reply-timeout 秒    等一条回复的时间，默认 120，超时后读消息记录
   --no-drafts           Telegram：不用流式草稿，改为编辑消息
@@ -553,14 +554,16 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         (default: no cap; 0: free replies only)
   --reset-spend         Start the relay's running spending total over (with or without a cap)
   --allow-file-store    Without a system keychain, allow keeping the credentials and session in a 0600 file
-  --install-service     Install as a background service (macOS launchd / Linux systemd --user); pair first
-                        (WeChat: sign in first)
-  --uninstall-service   Stop and remove the background service
-  --service-status      Show the background service status
+  --install-service     Install one background service that runs every bot in one process (macOS launchd /
+                        Linux systemd --user), replacing the older per-channel services; a bot not paired yet
+                        (WeChat: not signed in) is named and does not run
+  --uninstall-service   Stop and remove the background service (and the older per-channel ones); the bots
+                        stay
+  --service-status      Show the background service and each bot's status
   --list                List the bots on this computer: channel, character, owner and status (add --channel
                         to see one channel)
   --forget              Remove bots: --forget --bot name; --channel <channel> --forget (a channel with one
-                        bot); --forget --all for every bot (and the background services)
+                        bot); --forget --all for every bot (and the background service and spending records)
   Changing the bots stops a running background service and starts it again after; a relay running in a
   terminal must be stopped first
   --reply-timeout s     How long to wait for a reply, default 120; after that, read the message history
@@ -601,14 +604,17 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         este equipo (por defecto: sin límite; 0: solo respuestas gratis)
   --reset-spend         Reinicia el total acumulado de gasto del relay (con o sin límite)
   --allow-file-store    Sin llavero del sistema, permite guardar las credenciales y la sesión en un archivo 0600
-  --install-service     Instala como servicio en segundo plano (macOS launchd / Linux systemd --user); vincula
-                        primero (WeChat: inicia sesión primero)
-  --uninstall-service   Detiene y elimina el servicio en segundo plano
-  --service-status      Muestra el estado del servicio en segundo plano
+  --install-service     Instala un servicio en segundo plano que ejecuta todos los bots en un solo proceso
+                        (macOS launchd / Linux systemd --user) y reemplaza los servicios antiguos, uno por canal;
+                        un bot todavía sin vincular (WeChat: sin iniciar sesión) se indica y no se ejecuta
+  --uninstall-service   Detiene y elimina el servicio en segundo plano (y los antiguos, uno por canal); los
+                        bots se conservan
+  --service-status      Muestra el estado del servicio en segundo plano y de cada bot
   --list                Muestra los bots de este equipo: canal, personaje, dueño y estado (agrega --channel
                         para ver un solo canal)
   --forget              Elimina bots: --forget --bot nombre; --channel <canal> --forget (un canal con un solo
-                        bot); --forget --all para todos los bots (y los servicios en segundo plano)
+                        bot); --forget --all para todos los bots (y el servicio en segundo plano y los registros
+                        de gasto)
   Cambiar los bots detiene el servicio en segundo plano que esté en ejecución y lo vuelve a iniciar después;
   un relay en ejecución en una terminal se debe detener primero
   --reply-timeout s     Cuánto esperar una respuesta, por defecto 120; después, lee el historial de mensajes
@@ -649,14 +655,16 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
                         nesta máquina (padrão: sem limite; 0: só respostas grátis)
   --reset-spend         Zera o total acumulado de gastos do relay (com ou sem limite)
   --allow-file-store    Sem Keychain do sistema, permite guardar as credenciais e a sessão em um arquivo 0600
-  --install-service     Instala como serviço em segundo plano (macOS launchd / Linux systemd --user); pareie
-                        antes (WeChat: entre antes)
-  --uninstall-service   Para e remove o serviço em segundo plano
-  --service-status      Mostra o status do serviço em segundo plano
+  --install-service     Instala um serviço em segundo plano que executa todos os bots em um só processo (macOS
+                        launchd / Linux systemd --user) e substitui os serviços antigos, um por canal; um bot
+                        ainda não pareado (WeChat: sem login) é indicado e não é executado
+  --uninstall-service   Para e remove o serviço em segundo plano (e os antigos, um por canal); os bots
+                        continuam
+  --service-status      Mostra o status do serviço em segundo plano e de cada bot
   --list                Mostra os bots deste computador: canal, personagem, dono e status (adicione --channel
                         para ver um canal só)
   --forget              Remove bots: --forget --bot nome; --channel <canal> --forget (um canal com um bot só);
-                        --forget --all para todos os bots (e os serviços em segundo plano)
+                        --forget --all para todos os bots (e o serviço em segundo plano e os registros de gastos)
   Mudar os bots interrompe o serviço em segundo plano em execução e o inicia de novo depois; um relay em execução
   em um terminal precisa ser parado antes
   --reply-timeout s     Quanto tempo esperar por uma resposta, padrão 120; depois disso, lê o histórico de mensagens
@@ -923,7 +931,7 @@ const BOT_GOES_WITH = new Set([
   ...Object.keys(GLOBAL ?? {}),
 ]);
 
-/** What `--bot` does not take: the background service, one channel's for now. */
+/** What `--bot` does not take: the background service, which runs every bot. */
 const BOT_RUN_REFUSES = new Set(['install-service', 'uninstall-service', 'service-status']);
 
 /** The flags that set a bot's credentials (with `--bot` and `--character`: a bot added). */
@@ -933,8 +941,8 @@ const CREDENTIALS = ['set-token', 'set-app', 'login'];
  * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
  * kept for good). Both naming different channels or an unknown name is a usage error; neither is
  * null: every channel (`--list`, a run of every registered bot), or the channels of the bots
- * `--bot` names (a registered bot's credentials, `--forget --bot`). Adding a bot and the
- * background service still need one named (commands/relay.ts).
+ * `--bot` names (a registered bot's credentials, `--forget --bot`). Adding a bot needs one named;
+ * the background service runs every bot, whichever is named (commands/relay.ts).
  */
 export function relayChannelKind(values: Values): ChannelKind | null {
   const alias = Boolean(values.telegram);
@@ -1235,10 +1243,10 @@ async function run(argv: string[], io: Io): Promise<number> {
           if (others.length)
             throw new UsageError(
               tr(
-                `--bot 不能和 --${others[0]} 一起用（后台服务按通道设置：--channel …）`,
-                `--bot does not go with --${others[0]} (the background service is set per channel: --channel …)`,
-                `--bot no se usa con --${others[0]} (el servicio en segundo plano se configura por canal: --channel …)`,
-                `--bot não é usado com --${others[0]} (o serviço em segundo plano é configurado por canal: --channel …)`,
+                `--bot 不能和 --${others[0]} 一起用：后台服务运行这台电脑上的全部 bot（yomi relay --${others[0]}）`,
+                `--bot does not go with --${others[0]}: the background service runs every bot on this computer (yomi relay --${others[0]})`,
+                `--bot no se usa con --${others[0]}: el servicio en segundo plano ejecuta todos los bots de este equipo (yomi relay --${others[0]})`,
+                `--bot não é usado com --${others[0]}: o serviço em segundo plano executa todos os bots deste computador (yomi relay --${others[0]})`,
               ),
             );
         }

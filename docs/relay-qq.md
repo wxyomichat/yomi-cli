@@ -29,7 +29,7 @@ printf '%s\n%s\n' "$APPID" "$APPSECRET" | yomi relay --channel qq --set-app --to
 - 然后连一次 QQ 网关，确认这个机器人有单聊事件的权限；这会用掉 QQ 每天给机器人的一次连接次数。没有权限时只提示，照常保存。
 - AppID 和 AppSecret 存在系统钥匙串里（没有钥匙串时，要加 `--allow-file-store` 才会存进 0600 权限的本地文件）；访问令牌只在内存里，快过期时自动换新。它们都不接受命令行参数和环境变量，也不会出现在日志里。
 - 终端里有 relay 在运行时 `--set-app` 会被拒绝：先停止 relay；后台服务在运行时，命令会先停止它，保存完再重新启动。
-- 已经有 QQ bot 时，`--set-app` 只重新设置它自己的 AppSecret（AppID 必须相同，否则在连接 QQ 之前就会被拒绝）；要再添加一个 QQ bot，加 `--character <ID>` 或 `--bot <新名字>`。
+- 已经有 QQ bot 时，`--set-app` 只重新设置它自己的 AppSecret（AppID 必须相同，否则在连接 QQ 之前就会被拒绝）；要再添加一个 QQ bot，加 `--character <ID>` 或 `--bot <新名字>`，再用 `yomi relay --bot <名字> --pair` 配对（多个 bot 的命令见 [docs/relay.md](relay.md#多个-bot)）。
 
 ## 3. 配对
 
@@ -47,7 +47,7 @@ yomi relay --channel qq --character 7300000000000009001
 
 可选：在 q.qq.com 控制台里给机器人配置指令菜单（`/help`、`/price`、`/budget`、`/image`、`/report`、`/stop`），方便在手机上点选；不配置也可以直接打字。
 
-后台服务：`yomi relay --channel qq --install-service`（macOS 是 `io.yomichat.yomi-cli.relay.qq-<环境>`，Linux 是 `yomi-relay-qq-<环境>.service`）。同一个 Yomi 账号和环境，本机同时只能运行一个 relay。
+后台服务：`yomi relay --install-service` 装一个服务，在一个进程里运行这台电脑上的全部 bot（QQ 的和其他通道的），名字和细节见 [docs/relay.md](relay.md#一直运行后台服务)。旧版本装的 QQ 服务（macOS 是 `io.yomichat.yomi-cli.relay.qq-<环境>`，Linux 是 `yomi-relay-qq-<环境>.service`）会在 `--install-service` 时停止并删除。服务运行时配对一个 QQ bot（`yomi relay --bot <名字> --pair`），命令会先停止服务，在终端里显示配对码，配对完成后再重新启动服务，这期间所有 bot 都离线。同一个 Yomi 账号和环境，本机同时只能运行一个 relay 进程。
 
 ## 4. 能力与限制
 
@@ -92,7 +92,7 @@ QQ 的常见问题里写着，机器人输出违规可能被封禁且「暂不�
 
 只有一个 QQ bot 时：
 
-1. 停止 relay，删除本机保存的凭证和配对：`yomi relay --channel qq --forget`（后台服务也会一起删除；其他通道的凭证不受影响）。
+1. 停止 relay，删除本机保存的凭证和配对：`yomi relay --channel qq --forget`（QQ 旧版的后台服务也会一起删除；其他通道的 bot 和凭证不受影响，所有 bot 共用的后台服务在运行时会先停止，删除后再重新启动，删掉的是最后一个 bot 时不再启动）。
 2. 在 q.qq.com 的机器人管理端重置 AppSecret（QQ 建议定期重置，怀疑泄露时立即重置）。
 3. 用新的 AppSecret 重新 `yomi relay --channel qq --set-app`。
 

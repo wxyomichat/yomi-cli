@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -8,33 +8,41 @@ import { tr } from '../core/i18n.js';
 import type { ChannelKind } from './channels/types.js';
 
 /**
- * `yomi relay … --install-service`: keep the relay running for this user, as a launchd
+ * `yomi relay --install-service`: keep the relay running for this user, as a launchd
  * LaunchAgent (macOS, `gui/<uid>` domain, so it can read the login keychain while the user is
  * logged in) or a systemd user unit (Linux; Secret Service needs the user's session bus, so the
  * relay stops cleanly when the keyring is locked instead of falling back to a file).
  * The unit holds no secrets: the relay reads its tokens from the keychain when it starts.
- * Each channel has its own names (Telegram's are the ones it always had: `…relay.<env>`,
- * `yomi-relay-<env>.service`; QQ `…relay.qq-<env>`, WeChat `…relay.wechat-<env>`).
+ * One unit per Yomi account and environment runs every bot (`hub`: `…relay.hub-<env>`,
+ * `yomi-relay-hub-<env>.service`). The units of before it, one per channel (Telegram's
+ * `…relay.<env>`, `yomi-relay-<env>.service`; QQ `…relay.qq-<env>`, WeChat `…relay.wechat-<env>`),
+ * are still named here, so that `yomi relay` finds them running and removes them.
  * While the bots change (added, signed in again, bound, removed), `yomi relay` stops a running
- * service and starts it again afterwards (`servicePid`, `pauseService`, `resumeService`).
+ * service and starts it again afterwards (`servicePid`, `pauseService`, `resumeService`); what an
+ * installed unit runs with is read back from it (`installedArgs`), so that the command that installs
+ * it again can keep its spending cap.
  */
 
-/** Channel names as unit files write them (ASCII). */
-const SERVICE_NAMES: Record<ChannelKind, string> = {
-  telegram: 'Telegram',
-  qq: 'QQ',
-  wechat: 'WeChat',
+/** Which relay a unit runs: every bot (`hub`), or one channel's (a unit of before the hub). */
+export type ServiceUnit = ChannelKind | 'hub';
+
+/** Relay names as unit files write them (ASCII); the hub's is none. */
+const SERVICE_NAMES: Record<ServiceUnit, string> = {
+  hub: '',
+  telegram: 'Telegram ',
+  qq: 'QQ ',
+  wechat: 'WeChat ',
 };
 
 export type ServiceOptions = {
-  /** `test`, `prod` or `<env>@<origin>` (accountKey): one service per environment and channel. */
+  /** `test`, `prod` or `<env>@<origin>` (accountKey): one service per environment. */
   account: string;
-  /** Which relay this is; Telegram when absent. */
-  channel?: ChannelKind;
+  /** Which unit: the hub's, or a channel's of before it (Telegram's when absent). */
+  channel?: ServiceUnit;
   /** Absolute paths: the Node binary and the CLI entry. */
   node: string;
   script: string;
-  /** Arguments after the script: `relay --telegram --env prod …`, `relay --channel qq …`. */
+  /** Arguments after the script: `relay --env prod …`. */
   args: string[];
   /** Plain settings the relay needs (never tokens): YOMI_CONFIG_DIR, YOMI_LANG, LANG. */
   environment: Record<string, string>;
@@ -49,11 +57,12 @@ export type ServicePlan = {
   label: string;
   path: string;
   content: string;
+  /** Where the relay's output goes (`logs/relay-<name>.log`). */
+  log: string;
   /** Commands run in order; a failing one in `install` stops the install. */
   install: string[][];
   /** Run before `install` and on uninstall; failures are ignored (not loaded yet). */
   stop: string[][];
-  status: string[];
   /** Stops the running service and leaves it installed (`pauseService`). */
   pause: string[];
   /** Starts the installed service again (`resumeService`). */
@@ -142,9 +151,9 @@ ${environment}
       label,
       path,
       content,
+      log,
       stop: [['launchctl', 'bootout', `${domain}/${label}`]],
       install: [['launchctl', 'bootstrap', domain, path]],
-      status: ['launchctl', 'print', `${domain}/${label}`],
       pause: ['launchctl', 'bootout', `${domain}/${label}`],
       resume: ['launchctl', 'bootstrap', domain, path],
       pid: ['launchctl', 'print', `${domain}/${label}`],
@@ -157,7 +166,7 @@ ${environment}
       .map(([key, value]) => `Environment=${systemdWord(`${key}=${value}`, false)}`)
       .join('\n');
     const content = `[Unit]
-Description=Yomi CLI ${SERVICE_NAMES[channel]} relay (${options.account})
+Description=Yomi CLI ${SERVICE_NAMES[channel]}relay (${options.account})
 Wants=network-online.target
 After=network-online.target
 
@@ -178,12 +187,12 @@ WantedBy=default.target
       label: unit,
       path,
       content,
+      log,
       stop: [['systemctl', '--user', 'disable', '--now', unit]],
       install: [
         ['systemctl', '--user', 'daemon-reload'],
         ['systemctl', '--user', 'enable', '--now', unit],
       ],
-      status: ['systemctl', '--user', 'status', '--no-pager', unit],
       pause: ['systemctl', '--user', 'stop', unit],
       resume: ['systemctl', '--user', 'start', unit],
       pid: ['systemctl', '--user', 'show', '--property', 'MainPID', '--value', unit],
@@ -212,18 +221,50 @@ export const runCommand: Runner = (command, args) => {
 /**
  * Writes the unit (0644, through a temporary file) without touching the directory's own mode:
  * `~/Library/LaunchAgents` and `~/.config/systemd/user` belong to the system's conventions.
+ * Loading it is `installService`'s.
  */
-function writeUnit(path: string, content: string) {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(temporary, content, { mode: 0o644 });
-  renameSync(temporary, path);
+export function writeServiceUnit(plan: ServicePlan) {
+  mkdirSync(dirname(plan.path), { recursive: true });
+  const temporary = `${plan.path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(temporary, plan.content, { mode: 0o644 });
+  renameSync(temporary, plan.path);
+}
+
+/**
+ * The command line of the unit installed at `plan.path` (node, script, then its arguments), read
+ * back as `servicePlan` wrote it: what the service runs with when it starts again as it is. [] when
+ * no unit is there or it names no command.
+ */
+export function installedArgs(plan: ServicePlan): string[] {
+  let content: string;
+  try {
+    content = readFileSync(plan.path, 'utf8');
+  } catch {
+    return [];
+  }
+  if (plan.platform === 'darwin') {
+    const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(content)?.[1];
+    return [...(array ?? '').matchAll(/<string>([\s\S]*?)<\/string>/g)].map(([, word]) =>
+      word
+        .replace(/&quot;/g, '"')
+        .replace(/&gt;/g, '>')
+        .replace(/&lt;/g, '<')
+        .replace(/&amp;/g, '&'),
+    );
+  }
+  const line = /^ExecStart=(.*)$/m.exec(content)?.[1] ?? '';
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, word]) =>
+    word
+      .replace(/\$\$/g, () => '$')
+      .replace(/%%/g, '%')
+      .replace(/\\(.)/g, (_, escaped: string) => escaped),
+  );
 }
 
 /** Writes the unit and loads it; the first failing load command is reported. */
 export function installService(plan: ServicePlan, run: Runner = runCommand) {
   for (const [command, ...args] of plan.stop) run(command, args);
-  writeUnit(plan.path, plan.content);
+  writeServiceUnit(plan);
   for (const [command, ...args] of plan.install) {
     const result = run(command, args);
     if (result.status !== 0)

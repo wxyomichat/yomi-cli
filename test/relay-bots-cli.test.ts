@@ -459,7 +459,7 @@ describe('a background service running', () => {
       const refused = await run(['relay', '--forget', '--bot', 'harbor']);
       expect(refused.code).toBe(1);
       expect(refused.err).toContain(
-        `relay 正在运行（Telegram bot @Lin_Bots_Bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --forget。`,
+        `relay 正在运行（Telegram bot @Lin_Bots_Bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --forget。`,
       );
       expect(service.paused).toBe(0);
     } finally {
@@ -619,7 +619,7 @@ describe('removing bots', () => {
       const refused = await run(['relay', '--forget', '--all']);
       expect(refused.code).toBe(1);
       expect(refused.err).toContain(
-        `relay 正在运行（Telegram bot @Lin_Bots_Bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --telegram --uninstall-service），再 --forget --all。`,
+        `relay 正在运行（Telegram bot @Lin_Bots_Bot，进程 ${process.pid}）：先停止它（Ctrl+C，或 yomi relay --uninstall-service），再 --forget --all。`,
       );
       // The services go first (design §1.3); the bots stay, with their secrets and states.
       expect(refused.out).toContain(`已停止并删除后台服务（${path}）`);

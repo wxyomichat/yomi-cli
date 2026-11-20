@@ -502,7 +502,7 @@ describe('a bot of before the registry', () => {
         `角色 ${MOCK_NPCS.single} 已经绑在 bot "qq-0001" 上：一个角色只能绑一个 bot。`,
       );
       expect(installed).toHaveLength(1);
-      // One nobody has goes into the service, which binds it when it starts.
+      // One nobody has is bound now: the service's own arguments name no character.
       const free = await run([
         'relay',
         '--telegram',
@@ -513,7 +513,11 @@ describe('a bot of before the registry', () => {
       ]);
       expect(free.code).toBe(0);
       expect(free.err).not.toContain('还没有绑定角色');
-      expect(installed[1]).toContain(MOCK_NPCS.group);
+      expect(free.out).toContain(`已把 bot lin_registry_bot 绑定到雾港（${MOCK_NPCS.group}）。`);
+      expect(BotRegistry.open(account).find('lin_registry_bot')?.character?.npcId).toBe(
+        MOCK_NPCS.group,
+      );
+      expect(installed[1]).not.toContain('--character');
     } finally {
       process.env.HOME = home;
       registry.commit((file) => {
@@ -575,11 +579,27 @@ describe('a bot of before the registry', () => {
     expect(english.err).toContain(
       'The saved Telegram credentials belong to a bot other than the registered lin_registry_bot, so the relay was not started.',
     );
-    expect((await run(['relay', '--list'])).out).toContain('  状态：凭证属于另一个 bot');
+    // Every place that says so names what to run: its own credentials, or taking it away.
+    expect((await run(['relay', '--list'])).out).toContain(
+      '  状态：凭证属于另一个 bot：要重新设置它自己的凭证，运行 yomi relay --bot lin_registry_bot --set-token；要删掉它，运行 yomi relay --forget --bot lin_registry_bot',
+    );
     // The installation is refused too.
     const install = await run(['relay', '--telegram', '--install-service', '--allow-file-store']);
     expect(install.code).toBe(1);
-    expect(install.err).toContain('凭证属于另一个 bot');
+    expect(install.err).toContain(
+      'bot lin_registry_bot 还不能在后台服务里运行：凭证属于另一个 bot：要重新设置它自己的凭证，运行 yomi relay --bot lin_registry_bot --set-token；要删掉它，运行 yomi relay --forget --bot lin_registry_bot',
+    );
+    const installEnglish = await run([
+      '--lang',
+      'en',
+      'relay',
+      '--install-service',
+      '--allow-file-store',
+    ]);
+    expect(installEnglish.code).toBe(1);
+    expect(installEnglish.err).toContain(
+      'credentials belong to another bot: set its own with yomi relay --bot lin_registry_bot --set-token, or remove it with yomi relay --forget --bot lin_registry_bot',
+    );
 
     // --set-token for the channel's one bot sets its own token again: another bot's is refused
     // before Telegram is asked, and nothing is saved.

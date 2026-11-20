@@ -52,7 +52,8 @@ ClawBot 是微信里的一个插件：扫码绑定后，你的微信号和一个
 登录之后：
 
 - 登录凭证（`bot_token` 等）只保存在系统钥匙串里；没有钥匙串时要加 `--allow-file-store`，才会写进 0600 的本地文件。它不接受命令行参数和环境变量，也不会出现在日志里；二维码的内容同样不记录。
-- 一个微信号可以连接多个 ClawBot：每扫码连接一个新的 ClawBot，就添加一个 bot（`--login --character <ID>`），各自有自己的状态和主人记录。登录过期时用 `yomi relay --bot <名字> --login` 只重新登录这一个，二维码请求只带上这一个的登录。
+- 一个微信号可以连接多个 ClawBot：每扫码连接一个新的 ClawBot，就添加一个 bot（`--login --character <ID>`），各自有自己的状态和主人记录，各自固定和一个角色聊天。登录过期时用 `yomi relay --bot <名字> --login` 只重新登录这一个，二维码请求只带上这一个的登录。`yomi relay --list` 列出这些 bot 的名字和状态。
+- **一个微信号连接多个 ClawBot 只在本地模拟的 iLink 服务上测试过，还没有在真实的微信账号上验证。** 真实的微信会不会给每个 ClawBot 一个独立的登录、再扫一个码会不会让之前的登录失效、已经绑定的 ClawBot 再扫码时怎样回应，都还不知道（见文末「需要在真机上核实的事」）。只连一个 ClawBot 不受影响。
 - 同一个微信号重新扫码登录，主人、预算、还没核对的花费和记录都保留（即使 bot 换了 ID）。换一个微信号扫码就是换了主人：旧主人和他的预算、记录会被清除（终端里会提示），新主人从头开始，没有预算（不设上限，按 Yomi 的正常规则扣费，`--max-spend` 仍然有效）。
 - 终端里有 relay 在运行时不能 `--login`：先停止它（Ctrl+C）；后台服务在运行时，命令会先停止它，登录完再重新启动。
 - 微信说这个 ClawBot“已经绑定”时：重新登录一个 bot，就保留它原来的登录；添加新 bot 时，说明它已经是这台电脑上的某个 bot，什么都不保存（用 `yomi relay --list` 看名字，再 `--bot <名字> --login`）；本机没有任何登录（例如 `--forget` 之后、换了电脑）就要先在手机微信里解除 ClawBot 的绑定，再 `--login`。
@@ -67,7 +68,7 @@ yomi relay --channel wechat --experimental --character 7300000000000009001 --max
 
 微信的 bot 不能先开口，所以绑定后的介绍（AI 提示、角色的封面图、简介、开场白或最近一条回复，见 [docs/relay.md](relay.md#运行与配对)）在 `--login` 之后你发来的第一条消息时发出，然后才是对这条消息的回复，前后大约多几秒。同一个微信号重新登录、relay 重启都不再发；换一个微信号扫码登录会发。
 
-后台服务：`--install-service`（macOS 的 LaunchAgent 是 `io.yomichat.yomi-cli.relay.wechat-<环境>`，Linux 是 `yomi-relay-wechat-<环境>.service`），服务的启动参数里自带 `--experimental`。安装前要先登录过；同一个 Yomi 账号和环境只能装一个 relay 服务。
+后台服务：`yomi relay --install-service` 装一个服务，在一个进程里运行这台电脑上的全部 bot（微信的和其他通道的），名字和细节见 [docs/relay.md](relay.md#一直运行后台服务)。服务的启动参数里不再带 `--experimental`：添加微信 bot 时给的 `--experimental` 记在这个 bot 的登记里，服务以它为准。还没登录的微信 bot 安装时会被指出，在服务里不运行。旧版本装的微信服务（macOS 是 `io.yomichat.yomi-cli.relay.wechat-<环境>`，Linux 是 `yomi-relay-wechat-<环境>.service`）会在 `--install-service` 时停止并删除。服务运行时 `--login`（添加或重新登录一个 ClawBot），命令会先停止服务，扫码登录完再重新启动服务，这期间所有 bot 都离线。
 
 ## 能做什么，不能做什么
 
@@ -103,7 +104,7 @@ relay 没在运行时你发给 ClawBot 的消息，按协议会在重新连上�
 yomi relay --channel wechat --forget
 ```
 
-- 删除本机保存的微信登录、这个通道的记录（主人、预算、队列、游标）和它的后台服务；Telegram、QQ 的不受影响。`--forget` 不需要 `--experimental`。微信有多个 bot 时，用 `yomi relay --forget --bot <名字>` 一个一个删除（`--forget --all` 会删除这台电脑上所有通道的全部 bot，包括 Telegram 和 QQ 的，以及它们的后台服务和花费记录）。
+- 删除本机保存的微信登录、这个通道的记录（主人、预算、队列、游标）和这个通道旧版的后台服务；Telegram、QQ 的不受影响。所有 bot 共用的后台服务在运行时会先停止，删除后再重新启动（删掉的是最后一个 bot 时不再启动）。`--forget` 不需要 `--experimental`。微信有多个 bot 时，用 `yomi relay --forget --bot <名字>` 一个一个删除（`--forget --all` 会删除这台电脑上所有通道的全部 bot，包括 Telegram 和 QQ 的，以及它们的后台服务和花费记录）。
 - 然后在手机微信里解除 ClawBot 的绑定（在 ClawBot 插件的设置里，具体位置以你的微信为准）。只删除本机的登录不会让那个 `bot_token` 在微信那边失效；要让它失效，应在手机上解除绑定（解除后的具体效果还没在真机上核实）。
 - 怀疑二维码或登录被别人拿到时：立刻在手机微信里解除绑定，再 `--forget`，需要时重新 `--login`。
 
@@ -113,4 +114,4 @@ yomi relay --channel wechat --forget
 
 ## 需要在真机上核实的事
 
-relay 现在按下面的假设运行，核实前都可能调整：回复时限和条数（23 小时、10 条）；收到的消息里 `from_user_id` 是否就是登录时的 `ilink_user_id`（不是的话 relay 认不出主人）；“正在输入”能显示多久；单条消息的长度上限；重新登录是否换 bot ID、旧的登录是否立即失效；不带回复凭证的消息能否送达；relay 停着时发的消息重新连上后是否还能收到；手机上解除绑定后旧的登录是否立即失效；服务器是否接受 relay 声明的协议版本 2.4.10。
+relay 现在按下面的假设运行，核实前都可能调整：回复时限和条数（23 小时、10 条）；收到的消息里 `from_user_id` 是否就是登录时的 `ilink_user_id`（不是的话 relay 认不出主人）；“正在输入”能显示多久；单条消息的长度上限；重新登录是否换 bot ID、旧的登录是否立即失效；不带回复凭证的消息能否送达；relay 停着时发的消息重新连上后是否还能收到；手机上解除绑定后旧的登录是否立即失效；服务器是否接受 relay 声明的协议版本 2.4.10。一个微信号连接多个 ClawBot 时（目前只在本地模拟的服务上测试过）：每个 ClawBot 是否有自己的 `bot_token`；登录请求带着几个已有的登录时，“已经绑定”怎样回应；扫码连接一个新的 ClawBot 会不会让其他 ClawBot 的登录失效；重新登录后 bot ID 会不会变。

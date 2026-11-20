@@ -15,6 +15,7 @@ import { cutText, htmlToText, introductionOf } from '../src/chat/introduction.js
 import { PairingCode } from '../src/relay/pairing.js';
 import { unknownOutcome } from '../src/relay/relay.js';
 import {
+  installedArgs,
   installService,
   pauseService,
   resumeService,
@@ -174,6 +175,27 @@ describe('the background service', () => {
         output: 'Bootstrap failed: 5: Input/output error',
       })),
     ).toThrow(/Bootstrap failed/);
+  });
+
+  it('reads back the command line an installed unit runs, on either system', () => {
+    const home = mkdtempSync(join(tmpdir(), 'yomi-home-'));
+    const args = [
+      'relay',
+      '--env',
+      'test',
+      '--max-spend',
+      '50',
+      '--no-drafts',
+      'a "b" <c> & 100% $d \\e',
+    ];
+    for (const platform of ['darwin', 'linux'] as const) {
+      const plan = servicePlan({ ...base, args, platform, home, uid: 501 });
+      // Not installed: nothing to read.
+      expect(installedArgs(plan)).toEqual([]);
+      mkdirSync(dirname(plan.path), { recursive: true });
+      writeFileSync(plan.path, plan.content);
+      expect(installedArgs(plan), platform).toEqual([base.node, base.script, ...args]);
+    }
   });
 });
 
