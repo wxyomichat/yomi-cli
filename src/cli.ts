@@ -3,6 +3,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 
 import { ApiError, NotSignedIn } from './core/api.js';
 import { UsageError } from './core/env.js';
+import { docUrl } from './core/docs.js';
 import { type Language, parseLanguage, setLanguage, tr } from './core/i18n.js';
 import { redact } from './core/redact.js';
 import { type Io, paint, processIo, say } from './core/ui.js';
@@ -488,8 +489,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     wechat     微信 ClawBot（iLink），扫码登录（实验功能，仅限个人使用；要加 --experimental）
   只服务配对过的本人。默认不设花费上限：和在 App 里一样按 Yomi 的正常规则扣费，钻石不足时会在聊天
   里提示，relay 继续运行。上限都是可选的：本机的 --max-spend（累计花费，聊天里不能重置；0 表示只用
-  免费额度），以及聊天里的 /budget <数量>（Telegram 点按钮确认，QQ 和微信回复确认码）。
-  详见 docs/relay.md、docs/relay-qq.md、docs/relay-wechat.md。
+  免费额度），以及聊天里的 /budget <数量>（Telegram 点按钮确认，QQ 和微信回复确认码）。详见：
+    ${docUrl('relay.md')}
+    ${docUrl('relay-qq.md')}
+    ${docUrl('relay-wechat.md')}
   --set-token           Telegram：添加 bot，或给 --bot 名字 重新设置 token（终端里输入，不显示；或配合
                         --token-stdin）
   --set-app             QQ：添加 bot，或给 --bot 名字 重新设置 AppID 和 AppSecret（AppSecret 不显示；
@@ -532,8 +535,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   Serves only the paired owner. By default there is no spending cap: Yomi charges by its normal rules, as in
   the app, and when the balance is too low the relay says so in the chat and keeps running. Optional caps:
   --max-spend on this computer (a running total nothing in the chat resets; 0 means free replies only) and
-  /budget <amount> in the chat (confirmed with a button in Telegram, a typed code in QQ and WeChat). See
-  docs/relay.md, docs/relay-qq.md and docs/relay-wechat.md.
+  /budget <amount> in the chat (confirmed with a button in Telegram, a typed code in QQ and WeChat). Details:
+    ${docUrl('relay.md')}
+    ${docUrl('relay-qq.md')}
+    ${docUrl('relay-wechat.md')}
   --set-token           Telegram: add a bot, or set the token of --bot name again (typed in the terminal,
                         hidden; or with --token-stdin)
   --set-app             QQ: add a bot, or set the AppID and AppSecret of --bot name again (the AppSecret
@@ -584,7 +589,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   como en la app, y cuando el saldo no alcanza el relay lo avisa en el chat y sigue funcionando. Límites
   opcionales: --max-spend en este equipo (un total acumulado que nada en el chat reinicia; 0 significa solo
   respuestas gratis) y /budget <cantidad> en el chat (se confirma con un botón en Telegram y con un código
-  escrito en QQ y WeChat). Consulta docs/relay.md, docs/relay-qq.md y docs/relay-wechat.md.
+  escrito en QQ y WeChat). Más detalles:
+    ${docUrl('relay.md')}
+    ${docUrl('relay-qq.md')}
+    ${docUrl('relay-wechat.md')}
   --set-token           Telegram: agrega un bot, o vuelve a configurar el token de --bot nombre (se escribe en la
                         terminal, oculto; o con --token-stdin)
   --set-app             QQ: agrega un bot, o vuelve a configurar el AppID y el AppSecret de --bot nombre (el
@@ -637,7 +645,10 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
   app, e quando o saldo fica baixo o relay avisa no chat e continua funcionando. Limites opcionais:
   --max-spend neste computador (um total acumulado que nada no chat zera; 0 significa só respostas grátis) e
   /budget <quantidade> no chat (confirmado com um botão no Telegram e com um código digitado no QQ e no
-  WeChat). Veja docs/relay.md, docs/relay-qq.md e docs/relay-wechat.md.
+  WeChat). Mais detalhes:
+    ${docUrl('relay.md')}
+    ${docUrl('relay-qq.md')}
+    ${docUrl('relay-wechat.md')}
   --set-token           Telegram: adiciona um bot, ou define de novo o token de --bot nome (digitado no terminal,
                         oculto; ou com --token-stdin)
   --set-app             QQ: adiciona um bot, ou define de novo o AppID e o AppSecret de --bot nome (o AppSecret

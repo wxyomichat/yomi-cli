@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { main } from '../src/cli.js';
 import { FileStore } from '../src/core/credentials.js';
+import { VERSION } from '../src/core/version.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import { authorizeLikeTheBrowser as authorizeWith } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
@@ -106,7 +107,7 @@ describe('yomi against the mock gateway', () => {
     expect(exchange).toMatchObject({
       state: params.get('state'),
       callback_port: Number(params.get('port')),
-      client_version: '0.1.0',
+      client_version: VERSION,
       device_info: { os: 3 },
     });
     expect(mock.state.sessions.at(-1)?.platform).toBe('cli');

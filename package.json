@@ -1,25 +1,51 @@
 {
-  "name": "yomi-cli",
+  "name": "@yomichat/cli",
   "version": "0.1.0",
-  "private": true,
-  "description": "Yomi 命令行工具：网页授权登录、创建角色、终端里试聊草稿角色",
+  "description": "Yomi command-line tool: sign in through the web, create characters from a file, preview-chat with drafts, generate images and videos, and relay your own bot's private chat to a character.",
+  "keywords": [
+    "yomi",
+    "yomichat",
+    "cli",
+    "ai",
+    "ai-character",
+    "chat",
+    "telegram",
+    "relay"
+  ],
+  "homepage": "https://github.com/wxyomichat/yomi-cli#readme",
+  "bugs": {
+    "url": "https://github.com/wxyomichat/yomi-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wxyomichat/yomi-cli.git"
+  },
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.28.0",
   "engines": {
-    "node": ">=22.4 <23"
+    "node": ">=22.4"
   },
   "bin": {
     "yomi": "dist/cli.js"
   },
   "files": [
     "dist",
-    "README.md",
+    "!dist/mock",
+    "!dist/**/*.map",
     "docs",
-    "examples"
+    "!docs/release.md",
+    "examples",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "prepack": "pnpm clean && pnpm build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { VERSION } from '../src/core/version.js';
 import { startMockWechat, type MockWechat } from '../src/mock/wechat.js';
 import { splitText, WechatChannel, wechatSetup } from '../src/relay/channels/wechat.js';
 import {
@@ -71,7 +72,7 @@ describe('the iLink protocol', () => {
     expect(clientVersion()).toBe('132106');
     expect(clientVersion('1.0.11')).toBe('65547');
     const info = baseInfo();
-    expect(info.channel_version).toBe('2.4.10/yomi-cli-0.1.0');
+    expect(info.channel_version).toBe(`2.4.10/yomi-cli-${VERSION}`);
     // A bare name would be dropped and reported as OpenClaw: Name/Version.
     expect(info.bot_agent).toMatch(/^[A-Za-z0-9_.-]{1,32}\/[A-Za-z0-9_.+-]{1,32}$/);
     expect(info.bot_agent).not.toContain('OpenClaw');

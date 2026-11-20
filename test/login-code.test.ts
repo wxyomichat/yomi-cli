@@ -7,7 +7,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { codeChallenge } from '../src/auth/pkce.js';
 import { main } from '../src/cli.js';
 import { ApiError, Gateway } from '../src/core/api.js';
+import { docUrl } from '../src/core/docs.js';
 import type { Json } from '../src/core/json.js';
+import { VERSION } from '../src/core/version.js';
 import { type MockServer, startMockServer } from '../src/mock/server.js';
 import {
   authorizeLikeTheBrowser,
@@ -128,7 +130,7 @@ describe('yomi login with a one-time code', () => {
     expect(request.body).toMatchObject({
       state: params.get('state'),
       callback_port: Number(params.get('port')),
-      client_version: '0.1.0',
+      client_version: VERSION,
       device_info: { os: 3, idfv: expect.any(String) },
     });
     // The verifier and the code appear nowhere: not on stdout, stderr, the debug log or disk.
@@ -192,6 +194,8 @@ describe('yomi login with a one-time code', () => {
     expect(old.revoked).toBe(false);
     expect(second.terminal.err).toContain('被替换的旧 CLI 会话没能在服务端撤销');
     expect(second.terminal.err).toContain('它可能仍然有效');
+    // by its web address: an npm install has no docs/ where yomi runs
+    expect(second.terminal.err).toContain(`见 ${docUrl('security.md')} 第 5.1 节`);
   });
 
   it('warns when revoking the session it replaces fails', async () => {

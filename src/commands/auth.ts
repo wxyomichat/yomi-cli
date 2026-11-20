@@ -12,6 +12,7 @@ import {
 } from '../auth/session.js';
 import { ApiError, type Gateway, NotSignedIn, refreshLockPath } from '../core/api.js';
 import { type Credential, storeDescription } from '../core/credentials.js';
+import { docUrl } from '../core/docs.js';
 import { describeEnvironment } from '../core/env.js';
 import { tr } from '../core/i18n.js';
 import { withFileLock } from '../core/lock.js';
@@ -19,6 +20,9 @@ import { askYesOrNo, paint, say, terminalText, warn } from '../core/ui.js';
 import { type Context, requireSignIn } from './context.js';
 
 export type LoginOptions = { browser: boolean; timeoutSeconds: number };
+
+/** Where a session that may live on is said to be dealt with (its section 5.1). */
+const SECURITY = docUrl('security.md');
 
 /**
  * `yomi login`: the web authorizes, the CLI gets its own session. See docs/auth-protocol.md and
@@ -72,10 +76,10 @@ export async function login(context: Context, options: LoginOptions) {
         warn(
           io,
           tr(
-            '已登录；被替换的旧 CLI 会话可能没有撤销（见 docs/security.md 5.1）。',
-            'Signed in; the replaced CLI session may not have been revoked (see docs/security.md 5.1).',
-            'Sesión iniciada; puede que la sesión de la CLI reemplazada no se haya revocado (consulta docs/security.md 5.1).',
-            'Login feito; a sessão da CLI substituída pode não ter sido revogada (veja docs/security.md 5.1).',
+            `已登录；被替换的旧 CLI 会话可能没有撤销，见 ${SECURITY} 第 5.1 节。`,
+            `Signed in; the replaced CLI session may not have been revoked: see ${SECURITY} (section 5.1).`,
+            `Sesión iniciada; puede que la sesión de la CLI reemplazada no se haya revocado: consulta ${SECURITY} (sección 5.1).`,
+            `Login feito; a sessão da CLI substituída pode não ter sido revogada: veja ${SECURITY} (seção 5.1).`,
           ),
         );
       process.exit(130);
@@ -193,10 +197,10 @@ export async function login(context: Context, options: LoginOptions) {
         warn(
           io,
           tr(
-            '新建立的会话没能在服务端撤销，它可能仍然有效（见 docs/security.md 5.1）。',
-            'The new session could not be revoked on the server; it may still be valid (see docs/security.md 5.1).',
-            'No se pudo revocar la nueva sesión en el servidor; puede que siga siendo válida (consulta docs/security.md 5.1).',
-            'Não foi possível revogar a nova sessão no servidor; ela pode continuar válida (veja docs/security.md 5.1).',
+            `新建立的会话没能在服务端撤销，它可能仍然有效，见 ${SECURITY} 第 5.1 节。`,
+            `The new session could not be revoked on the server; it may still be valid: see ${SECURITY} (section 5.1).`,
+            `No se pudo revocar la nueva sesión en el servidor; puede que siga siendo válida: consulta ${SECURITY} (sección 5.1).`,
+            `Não foi possível revogar a nova sessão no servidor; ela pode continuar válida: veja ${SECURITY} (seção 5.1).`,
           ),
         );
       throw error;
@@ -216,10 +220,10 @@ export async function login(context: Context, options: LoginOptions) {
         warn(
           io,
           tr(
-            '被替换的旧 CLI 会话没能在服务端撤销（网络问题，或已被别的进程刷新），它可能仍然有效（见 docs/security.md 5.1）。',
-            'The replaced CLI session could not be revoked on the server (a network problem, or another process refreshed it); it may still be valid (see docs/security.md 5.1).',
-            'No se pudo revocar en el servidor la sesión de la CLI reemplazada (un problema de red, u otro proceso la renovó); puede que siga siendo válida (consulta docs/security.md 5.1).',
-            'Não foi possível revogar no servidor a sessão da CLI substituída (um problema de rede, ou outro processo a renovou); ela pode continuar válida (veja docs/security.md 5.1).',
+            `被替换的旧 CLI 会话没能在服务端撤销（网络问题，或已被别的进程刷新），它可能仍然有效，见 ${SECURITY} 第 5.1 节。`,
+            `The replaced CLI session could not be revoked on the server (a network problem, or another process refreshed it); it may still be valid: see ${SECURITY} (section 5.1).`,
+            `No se pudo revocar en el servidor la sesión de la CLI reemplazada (un problema de red, u otro proceso la renovó); puede que siga siendo válida: consulta ${SECURITY} (sección 5.1).`,
+            `Não foi possível revogar no servidor a sessão da CLI substituída (um problema de rede, ou outro processo a renovou); ela pode continuar válida: veja ${SECURITY} (seção 5.1).`,
           ),
         );
     }
@@ -816,10 +820,10 @@ export async function logout(context: Context) {
     warn(
       io,
       tr(
-        '服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，见 docs/security.md 5.1。',
-        'The sign-out request to the server failed (network problem, or the session had already expired); local credentials were deleted anyway. If you suspect the credentials leaked, see docs/security.md 5.1.',
-        'La solicitud de cierre de sesión al servidor falló (problema de red, o la sesión ya había caducado); las credenciales locales se borraron de todos modos. Si sospechas que las credenciales se filtraron, consulta docs/security.md 5.1.',
-        'A solicitação de logout ao servidor falhou (problema de rede, ou a sessão já tinha expirado); as credenciais locais foram apagadas mesmo assim. Se você suspeitar que as credenciais vazaram, veja docs/security.md 5.1.',
+        `服务端注销请求没有成功（网络或会话已失效），本机凭证仍已删除。如果怀疑凭证外泄，见 ${SECURITY} 第 5.1 节。`,
+        `The sign-out request to the server failed (network problem, or the session had already expired); local credentials were deleted anyway. If you suspect the credentials leaked, see ${SECURITY} (section 5.1).`,
+        `La solicitud de cierre de sesión al servidor falló (problema de red, o la sesión ya había caducado); las credenciales locales se borraron de todos modos. Si sospechas que las credenciales se filtraron, consulta ${SECURITY} (sección 5.1).`,
+        `A solicitação de logout ao servidor falhou (problema de rede, ou a sessão já tinha expirado); as credenciais locais foram apagadas mesmo assim. Se você suspeitar que as credenciais vazaram, veja ${SECURITY} (seção 5.1).`,
       ),
     );
   relayTokenHint(context);

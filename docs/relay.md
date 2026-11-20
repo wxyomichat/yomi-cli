@@ -117,6 +117,7 @@ yomi relay --uninstall-service                  # 停止并删除服务，bot �
 - 安装前逐个检查 bot（只看本机，不联网）：还没有凭证、凭证属于另一个 bot、还没配对（微信：还没登录）的 bot 会被指出，并给出要运行的命令，它们在服务里不运行；还没有角色的 bot 会运行，但只回复「在电脑上绑定角色」。一个能运行的 bot 都没有时不安装，这台电脑上还没有 bot 时也不安装。之后补上配对或登录时，命令会停止服务、在终端里完成，再重新启动服务（见[多个 bot](#多个-bot)）。
 - 旧版本每个通道装一个服务（Telegram `io.yomichat.yomi-cli.relay.<环境>`，QQ `….relay.qq-<环境>`，微信 `….relay.wechat-<环境>`；Linux 是 `yomi-relay-<环境>.service`、`yomi-relay-qq-<环境>.service`、`yomi-relay-wechat-<环境>.service`）。`--install-service` 先写好新的服务，再停止并删除这些旧服务（终端里列出删了哪些），然后启动新的；启动失败时如实报告。没换之前，`--list`、`--service-status` 和 relay 启动时都会提示还装着旧服务，它仍按原来的参数只运行那个通道的 bot。新的服务已经装好时，提示里不再建议 `--uninstall-service`：它会把新的服务一起删掉。
 - 重新 `--install-service` 会重启服务，这次给的 `--max-spend` 等参数随之生效（没给 `--max-spend` 就是不设上限）。终端里有 relay 在运行时会被拒绝，先停止它。正在运行的旧服务 30 秒内没有停下来时，新的服务写好了但不启动，稍后再运行一次。
+- 升级 yomi（`npm install -g @yomichat/cli`）后，正在运行的服务仍是旧版本，要重新启动：用安装时的参数再运行一次 `--install-service`（例如 `yomi relay --max-spend 200 --install-service`，原来带 `--no-drafts`、`--allow-file-store` 的也带上）。在终端里运行的 relay 同样要停下再启动。
 - `--install-service` 带的 `--character` 只给还没有角色的 bot 绑定（指定的通道里、或这台电脑上只有这一个 bot 时），安装时立即绑定；这个角色已经绑在别的 bot 上，或者指定的通道里还没有 bot 时，安装会被拒绝（后者会给出添加这个通道的 bot 并绑定这个角色的命令）。已经绑定角色的 bot 不变（会提示），要换角色用 `yomi relay --bot <名字> --character <ID>`。
 - `--service-status` 显示服务是否在运行（进程号）、服务文件和日志的位置、还装着的旧服务，以及和 `--list` 相同的每个 bot 的状态。
 - **服务运行时改动 bot**（添加、重新设置凭证、换绑、删除、配对）：命令先停止服务，在终端里完成改动，再重新启动服务，这期间所有 bot 都离线，通常一分钟左右；服务不会自己发现改动。细节见[多个 bot](#多个-bot)。

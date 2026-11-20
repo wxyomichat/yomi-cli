@@ -2,6 +2,23 @@
 
 Yomi 的命令行工具：在终端里通过网页授权登录、按文件创建角色、和草稿角色试聊（流式显示回复），用 AI 生成角色图片、动态封面 / 介绍视频和聊天人设头像（花钻石，先显示价格），以及把你自己的 bot 私聊转给已发布的角色（实验；Telegram，以及仅限个人使用的 QQ 和微信 ClawBot）。调用的接口、字段规则和审核流程与 App / 网页端相同。
 
+## 安装
+
+需要 Node.js 22.4 或更高版本（`node --version` 查看）。
+
+```bash
+npm install -g @yomichat/cli
+yomi --version
+yomi login                 # 打开浏览器授权登录
+```
+
+- 升级：再运行一次 `npm install -g @yomichat/cli`。正在运行的 relay 不会自己换成新版本（服务端要求更高版本时，它会在聊天里提示并暂停）：在终端里运行的，停下再启动；装了后台服务的，用安装时的参数重新运行 `--install-service`，例如 `yomi relay --max-spend 50 --install-service`（原来带 `--no-drafts`、`--allow-file-store` 的也照样带上）。不带 `--max-spend` 重新安装会去掉上限，累计花费从头算。
+- 卸载：用过 relay 的，先停掉在终端里运行的 relay，再运行 `yomi relay --forget --all`，删除这台电脑上所有 bot 的凭证（Telegram token、QQ AppSecret、微信 ClawBot 登录）、配对信息、花费记录和后台服务；`yomi logout` 和 `--uninstall-service` 都不删 bot 的凭证。然后 `yomi logout`（撤销 Yomi 会话并删除本机的 Yomi 凭证），最后 `npm uninstall -g @yomichat/cli`。这两条命令只管当前环境：用过测试环境（`--env test`）的，在同样的设置下对它再各运行一次。配置目录 `~/.config/yomi-cli`（设了 `YOMI_CONFIG_DIR` 或 `XDG_CONFIG_HOME` 时在那里）不会被删除，里面还有日志和本机的设备标识，不再需要可以手动删掉。
+
+想从源码运行或参与开发，见下文[从源码构建](#从源码构建)。
+
+## 用法
+
 ```bash
 yomi login                                   # 打开网页授权（像 gh auth login）
 yomi init lin-xia.yaml                       # 生成角色文件模板
@@ -25,9 +42,9 @@ yomi whoami / yomi logout
 
 测试环境由运行它的人提供，CLI 不内置它的地址：加 `--env test`（或设 `YOMI_ENV=test`），并用 `YOMI_TEST_API_ORIGIN` / `YOMI_TEST_WEB_ORIGIN` 设好它的 API 与网页地址。测试环境如有泳道，用 `--lane <名称>` 指定（加 `Lane` 请求头）。
 
-## 安装与开发
+## 从源码构建
 
-需要 Node 22（≥ 22.4，自带 `fetch` 和 `WebSocket`）与 pnpm 10。
+给参与开发的人。需要 Node 22.4 或更高版本（自带 `fetch` 和 `WebSocket`；开发用的版本见 `.nvmrc`）与 pnpm 10。
 
 ```bash
 pnpm install
@@ -36,7 +53,7 @@ node dist/cli.js --help    # 或 pnpm link --global 后直接用 yomi
 pnpm verify                # 格式检查 + 类型检查 + 单元测试 + 构建
 ```
 
-尚未发布到 npm。
+npm 包 `@yomichat/cli` 只含 `dist/`（不含 mock 和 source map）、`docs/`、`examples/`、README 和 LICENSE；`npm pack` / `npm publish` 前 `prepack` 会清空并重新构建 `dist/`。发布步骤见 [docs/release.md](docs/release.md)。
 
 ### 不依赖真实服务的测试路径
 
