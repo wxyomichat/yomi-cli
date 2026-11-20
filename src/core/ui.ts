@@ -108,7 +108,7 @@ export async function askYesOrNo(
  * Reads and drops whatever input is already waiting; true when the input ended meanwhile. On a
  * terminal it reads raw for that moment, so a line typed without Enter goes too.
  */
-async function dropTypeahead(stdin: Readable, ms = 60): Promise<boolean> {
+export async function dropTypeahead(stdin: Readable, ms = 60): Promise<boolean> {
   const tty = stdin as Readable & { isTTY?: boolean; setRawMode?: (raw: boolean) => unknown };
   const raw = Boolean(tty.isTTY && typeof tty.setRawMode === 'function');
   let ended = false;

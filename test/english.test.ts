@@ -9,7 +9,8 @@ import { startCallbackServer } from '../src/auth/loopback.js';
 import { main } from '../src/cli.js';
 import { currentLanguage } from '../src/core/device.js';
 import { setLanguage } from '../src/core/i18n.js';
-import { type MockServer, startMockServer } from '../src/mock/server.js';
+import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
+import { QQ_CONSOLE_ZH } from '../src/relay/channels/qq-guide.js';
 import { COMMANDS, relayTexts } from '../src/relay/texts.js';
 import { authorizeLikeTheBrowser } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
@@ -185,6 +186,29 @@ describe('yomi in English', () => {
     setEnv({ LANG: 'de_DE.UTF-8' });
     expect((await run(['whoami'])).out).toContain('Account: ');
     setEnv({ YOMI_LANG: 'en' });
+  });
+
+  it("guides a QQ setup in English, naming QQ's console as it shows itself", async () => {
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['relay', '--setup', '--allow-file-store'], terminal.io);
+    await terminal.waitFor(/paste its link or ID \(only its digits are shown\):/);
+    terminal.stdin.write(`${MOCK_NPCS.single}\n`);
+    await terminal.waitFor(/Is this the character\? \[y\/n\] /);
+    terminal.stdin.write('y\n');
+    await terminal.waitFor(/Enter: done · o: open q\.qq\.com in the browser · q: quit /);
+    terminal.stdin.write('\n');
+    await terminal.waitFor(/AppID \(only digits are shown\):/);
+    terminal.stdin.write('q\n');
+    expect(await pending).toBe(0);
+    const all = terminal.out + terminal.err;
+    expect(all).toContain('Step 1 of 7 · Choose the character');
+    expect(all).toContain('Step 3 of 7 · Enter the AppID and AppSecret');
+    expect(all).toContain(`On ${QQ_CONSOLE_ZH.bots} (Bots) click`);
+    expect(all).toContain('Quit; nothing was saved.');
+    // The console's own names (and the character's, as the server says it) only.
+    let rest = all;
+    for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏']) rest = rest.replaceAll(word, '');
+    expect(noChinese(rest)).toBe('');
   });
 
   it('has the relay speak English in Telegram and serves the callback pages in English', async () => {

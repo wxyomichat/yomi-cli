@@ -64,12 +64,13 @@ export function parsePolicy(result: Json): RelayPolicy {
 export async function relayPolicy(
   gateway: Gateway,
   channel: ChannelKind = 'telegram',
+  signal?: AbortSignal,
 ): Promise<RelayPolicy> {
   try {
     const result = await gateway.request(
       'relay/get_policy',
       { client: 'yomi-cli', client_version: VERSION, channel },
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, signal },
     );
     return parsePolicy(result);
   } catch {

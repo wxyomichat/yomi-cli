@@ -54,6 +54,7 @@ import {
   ChannelError,
   type ChannelHost,
   channelName,
+  type FlushReport,
   type InboundEvent,
   type OutgoingFile,
   type OutgoingText,
@@ -226,6 +227,9 @@ export class QqChannel implements RelayChannel, QqOutlet {
   private saveTimer: ReturnType<typeof setInterval> | null = null;
   /** Ends a token request waiting out QQ's "too many requests" (the relay's end, close()). */
   private readonly ending = new AbortController();
+  /** What the sends since the event being handled arrived came to (`lastFlush`). */
+  private tally: FlushReport = { sent: 0, notFriend: false, failed: 0 };
+  private flushed: FlushReport | null = null;
 
   constructor(private readonly options: QqChannelOptions) {
     this.settings = { ...QQ_DEFAULTS };
@@ -487,6 +491,15 @@ export class QqChannel implements RelayChannel, QqOutlet {
     if (this.isOwner(context.openid) && !this.ownerContexts.includes(context))
       this.ownerContexts.push(context);
     if (!context.presenterOpen) await this.release(context);
+    this.flushed = { ...this.tally };
+  }
+
+  /**
+   * What the sends since the last event arrived came to, as of its flush: those that went out,
+   * a refusal because the person is not the bot's friend (40054004), the other failures.
+   */
+  lastFlush(): FlushReport | null {
+    return this.flushed;
   }
 
   /** Sends what is held (≤ 3 s); the rest waits in the queue for the owner's next message. */
@@ -606,6 +619,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
       if (last && Date.now() - last >= this.settings.offlineGapMs) this.offlineNotice = true;
     }
     this.saveGateway();
+    this.host?.ready?.();
   }
 
   private async translate(dispatch: Queued): Promise<InboundEvent | null> {
@@ -701,6 +715,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
     // Handled before (a Resume after a restart replays, and QQ may push a message twice).
     if (this.seen.includes(id)) return null;
     this.remember(id, dispatch);
+    this.tally = { sent: 0, notFriend: false, failed: 0 };
     const context = this.context(openid, id, dispatch.id, dispatch.at);
     const owner = host.owner();
     if (owner && owner.userId === openid) {
@@ -901,6 +916,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
       try {
         const body = { ...this.textBody(text), ...fields };
         const sent = await this.retried(() => this.api.send(to, body), { id: '' });
+        this.tally.sent += 1;
         return [this.refOf(sent)];
       } catch (error) {
         const code = codeOf(error);
@@ -925,7 +941,9 @@ export class QqChannel implements RelayChannel, QqOutlet {
     if (!allowed || this.closed) return this.toQueue(to, text);
     try {
       const body = this.textBody(text);
-      return [this.refOf(await this.retried(() => this.api.send(to, body)))];
+      const sent = await this.retried(() => this.api.send(to, body));
+      this.tally.sent += 1;
+      return [this.refOf(sent)];
     } catch (error) {
       return this.failed(error, codeOf(error), to, text, split, null);
     }
@@ -943,6 +961,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
     const host = this.requireHost();
     const reason = error instanceof ChannelError ? error.reason : 'other';
     if (reason === 'contentRefused') {
+      this.tally.failed += 1;
       this.contentRefused(context);
       return [];
     }
@@ -995,6 +1014,8 @@ export class QqChannel implements RelayChannel, QqOutlet {
           `Não foi possível enviar ao QQ (${error instanceof ChannelError ? `${error.operation} ${error.code}` : 'error'})`,
         ),
       );
+    if (reason === 'blocked') this.tally.notFriend = true;
+    else this.tally.failed += 1;
     return this.toQueue(to, text);
   }
 
@@ -1070,6 +1091,7 @@ export class QqChannel implements RelayChannel, QqOutlet {
       const body = { ...media(withCaption), ...(context ? this.replyFields(context) : {}) };
       try {
         const sent = await this.retried(() => this.api.send(to, body), { id: '' });
+        this.tally.sent += 1;
         return { status: 'sent', refs: [this.refOf(sent)] };
       } catch (error) {
         const code = codeOf(error);
@@ -1092,7 +1114,11 @@ export class QqChannel implements RelayChannel, QqOutlet {
           store.set('activeHoldUntil', Date.now() + this.settings.activeHoldMs);
           return queued();
         }
-        if (reason === 'blocked') return queued();
+        if (reason === 'blocked') {
+          this.tally.notFriend = true;
+          return queued();
+        }
+        this.tally.failed += 1;
         if (reason === 'contentRefused') this.contentRefused(context);
         this.refusedToken(error);
         throw error;
@@ -1166,9 +1192,16 @@ function appOf(secret: string): { appId: string; secret: string } | null {
 
 const secretName = (account: string) => `qq-bot:${account}`;
 
-function apiFor(app: { appId: string; secret: string }): QqApi {
+/** QQ's API for `app`; `signal` ends each of its requests at once (the guide's Ctrl+C). */
+function apiFor(app: { appId: string; secret: string }, signal?: AbortSignal): QqApi {
   const origin = qqApiOrigin(process.env.YOMI_QQ_API_ORIGIN);
-  return new QqApi(new QqTokens({ ...app, origin }), origin);
+  if (!signal) return new QqApi(new QqTokens({ ...app, origin }), origin);
+  const fetcher: typeof fetch = (input, init) =>
+    fetch(input, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+    });
+  return new QqApi(new QqTokens({ ...app, origin, fetch: fetcher, signal }), origin, fetcher);
 }
 
 /** QQ's refusal of the AppID/AppSecret, as the command words it. */
@@ -1195,10 +1228,10 @@ async function askApp(
         io,
         'dim',
         tr(
-          '在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的「开发设置」里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。',
-          "Create a bot with your own QQ on the QQ Open Platform (q.qq.com) and find its AppID and AppSecret in the bot's development settings (the AppSecret will not be shown as you type). Personal use only.",
-          'Crea un bot con tu propia cuenta de QQ en la QQ Open Platform (q.qq.com) y busca su AppID y su AppSecret en la configuración de desarrollo del bot (el AppSecret no se mostrará al escribirlo). Solo para uso personal.',
-          'Crie um bot com a sua própria conta do QQ na QQ Open Platform (q.qq.com) e encontre o AppID e o AppSecret nas configurações de desenvolvimento do bot (o AppSecret não aparece enquanto você digita). Somente para uso pessoal.',
+          '在 QQ 开放平台（q.qq.com）用自己的 QQ 创建机器人，在它的「开发设置」里找到 AppID 和 AppSecret（AppSecret 输入时不会显示）。仅限个人使用。第一次设置可以用 yomi relay --setup，按步骤来。',
+          "Create a bot with your own QQ on the QQ Open Platform (q.qq.com) and find its AppID and AppSecret in the bot's development settings (the AppSecret will not be shown as you type). Personal use only. The first time, yomi relay --setup takes you through it step by step.",
+          'Crea un bot con tu propia cuenta de QQ en la QQ Open Platform (q.qq.com) y busca su AppID y su AppSecret en la configuración de desarrollo del bot (el AppSecret no se mostrará al escribirlo). Solo para uso personal. La primera vez, yomi relay --setup te guía paso a paso.',
+          'Crie um bot com a sua própria conta do QQ na QQ Open Platform (q.qq.com) e encontre o AppID e o AppSecret nas configurações de desenvolvimento do bot (o AppSecret não aparece enquanto você digita). Somente para uso pessoal. Na primeira vez, yomi relay --setup guia você passo a passo.',
         ),
       ),
     );
@@ -1252,13 +1285,22 @@ function appRefusal(error: unknown): UsageError | null {
   return null;
 }
 
-/** Fetches a token: refused → the command's refusal. */
-async function checkApp(api: QqApi): Promise<void> {
-  try {
-    await api.tokens.get();
-  } catch (error) {
-    throw appRefusal(error) ?? error;
-  }
+/**
+ * Asks QQ for a token with `app` (its refusal is QQ's own error, a `QqError`), then for the bot's
+ * name: the API to go on with, and the bot as QQ names it (its AppID when QQ does not say).
+ * `signal` ends these requests, and every later one of the API, at once.
+ */
+export async function qqIdentify(
+  app: { appId: string; secret: string },
+  signal?: AbortSignal,
+): Promise<{ api: QqApi; identity: BotIdentity }> {
+  const api = apiFor(app, signal);
+  await api.tokens.get();
+  const me = await api.me().catch(() => null);
+  return {
+    api,
+    identity: { id: String(me?.id || app.appId), name: String(me?.username ?? ''), handle: '' },
+  };
 }
 
 export const qqSetup: ChannelSetup = {
@@ -1278,10 +1320,14 @@ export const qqSetup: ChannelSetup = {
     // before the probe below uses one of the day's session starts).
     const stored = qqSetup.storedBot(asciiJson(app))!;
     request.check(stored);
-    const api = apiFor(app);
-    await checkApp(api);
-    const me = await api.me().catch(() => null);
-    const name = String(me?.username || app.appId);
+    let identified: Awaited<ReturnType<typeof qqIdentify>>;
+    try {
+      identified = await qqIdentify(app);
+    } catch (error) {
+      throw appRefusal(error) ?? error;
+    }
+    const { api, identity } = identified;
+    const name = identity.name || app.appId;
     // One Identify with the private-chat intent: QQ refuses it when the bot may not receive
     // private chats (4014) or does not know the intent (4013). It uses one of the day's session
     // starts.
@@ -1307,11 +1353,7 @@ export const qqSetup: ChannelSetup = {
           'Não foi possível conectar ao gateway do QQ para verificar a permissão de chat privado; o AppID e o AppSecret são salvos mesmo assim.',
         ),
       );
-    const record = request.save({
-      secret: asciiJson(app),
-      stored,
-      identity: { id: String(me?.id || app.appId), name: String(me?.username ?? ''), handle: '' },
-    });
+    const record = request.save({ secret: asciiJson(app), stored, identity });
     if (request.atStart) return record;
     // An added bot pairs by its name: the channel's command asks which once it has several, and
     // a background service running is stopped for the pairing and started again (said).

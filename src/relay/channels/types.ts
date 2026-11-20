@@ -230,7 +230,19 @@ export type ChannelHost = {
    */
   pause(reason: PauseReason, until: number | null): void;
   resume(): void;
+  /**
+   * The channel's session is live (QQ: READY or RESUMED), each time it becomes so; optional, and
+   * only QQ tells (the guide of `yomi relay --setup` says when the bot is online).
+   */
+  ready?(): void;
 };
+
+/**
+ * What the sends of the last event the core handled came to (QQ, `RelayChannel.lastFlush`): the
+ * messages that went out, whether one was refused because the person is not the bot's friend
+ * (QQ 40054004), and how many failed otherwise (queued or dropped).
+ */
+export type FlushReport = { sent: number; notFriend: boolean; failed: number };
 
 export interface RelayChannel {
   readonly kind: ChannelKind;
@@ -297,6 +309,10 @@ export interface RelayChannel {
   presenter(request: PresenterRequest): ReplyPresenter;
   /** Called by the core after it finished handling each event (QQ releases held sends; others no-op). */
   flush(): Promise<void>;
+  /**
+   * What the sends of the event last flushed came to; optional (QQ only). null before any.
+   */
+  lastFlush?(): FlushReport | null;
 }
 
 export type ChannelErrorReason =

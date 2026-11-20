@@ -17,7 +17,7 @@ import {
   channelSetup,
 } from '../relay/channels/index.js';
 import type { AcquiredBot, StoredBot } from '../relay/channels/setup.js';
-import type { BotIdentity, RelayChannel } from '../relay/channels/types.js';
+import type { BotIdentity, FlushReport, RelayChannel } from '../relay/channels/types.js';
 import { PairingCode } from '../relay/pairing.js';
 import {
   addProblem,
@@ -269,7 +269,7 @@ function planFor(context: Context, unit: ServiceUnit, args: string[]): ServicePl
 }
 
 /** The options of a plain run of every bot: the background service's when none are given. */
-const PLAIN_OPTIONS: RelayCommandOptions = {
+export const PLAIN_OPTIONS: RelayCommandOptions = {
   channel: null,
   bots: [],
   experimental: false,
@@ -294,7 +294,7 @@ const PLAIN_OPTIONS: RelayCommandOptions = {
 };
 
 /** The background service that runs every bot, with `options`' arguments. */
-const hubPlan = (context: Context, options: RelayCommandOptions = PLAIN_OPTIONS) =>
+export const hubPlan = (context: Context, options: RelayCommandOptions = PLAIN_OPTIONS) =>
   planFor(context, 'hub', relayServiceArgs(context.env, options));
 
 /** A channel's own unit of before the hub: only where it is and what it is called matter. */
@@ -304,7 +304,7 @@ const legacyPlan = (context: Context, kind: ChannelKind) => planFor(context, kin
  * The units of this account and environment installed now: the hub's first, then the channels'
  * of before it. None where no service can be installed (another system, no CLI entry to name).
  */
-function installedPlans(context: Context): ServicePlan[] {
+export function installedPlans(context: Context): ServicePlan[] {
   try {
     return [hubPlan(context), ...CHANNEL_KINDS.map((kind) => legacyPlan(context, kind))].filter(
       (plan) => existsSync(plan.path),
@@ -332,18 +332,28 @@ const UNINSTALL = 'yomi relay --uninstall-service';
  * a bare --install-service would run with no cap and start the running total over, and its
  * `--no-drafts` and `--allow-file-store`.
  */
-function reinstallCommand(plan: ServicePlan): string {
-  const args = installedArgs(plan);
+export function reinstallCommand(plan: ServicePlan): string {
+  return relayCommand(installedOptions(plan), '--install-service');
+}
+
+/**
+ * `yomi relay` with what `options` would keep of a run or a background service (`--allow-file-store`,
+ * its `--max-spend`, `--no-drafts`), then `tail` (`--install-service`): what to run later with the
+ * same cap, as `reinstallCommand` says it for an installed unit.
+ */
+export function relayCommand(
+  options: Pick<RelayCommandOptions, 'allowFileStore' | 'maxSpend' | 'drafts'>,
+  ...tail: string[]
+): string {
   const kept: string[] = [];
-  if (args.includes('--allow-file-store')) kept.push('--allow-file-store');
-  const cap = args.indexOf('--max-spend');
-  if (cap >= 0 && /^\d+$/.test(args[cap + 1] ?? '')) kept.push('--max-spend', args[cap + 1]);
-  if (args.includes('--no-drafts')) kept.push('--no-drafts');
-  return ['yomi relay', ...kept, '--install-service'].join(' ');
+  if (options.allowFileStore) kept.push('--allow-file-store');
+  if (options.maxSpend !== null) kept.push('--max-spend', String(options.maxSpend));
+  if (!options.drafts) kept.push('--no-drafts');
+  return ['yomi relay', ...kept, ...tail].join(' ');
 }
 
 /** Which channel's unit of before the hub `plan` is; null for the hub's. */
-function legacyKind(context: Context, plan: ServicePlan): ChannelKind | null {
+export function legacyKind(context: Context, plan: ServicePlan): ChannelKind | null {
   return CHANNEL_KINDS.find((kind) => legacyPlan(context, kind).path === plan.path) ?? null;
 }
 
@@ -521,7 +531,7 @@ function capLine(maxSpend: number | null, install: boolean): string {
 }
 
 /** A channel's name inside Chinese text: set apart by spaces when it is in Latin letters. */
-const inChinese = (name: string) => (/^[\x21-\x7e]/.test(name) ? ` ${name} ` : name);
+export const inChinese = (name: string) => (/^[\x21-\x7e]/.test(name) ? ` ${name} ` : name);
 
 const lockPath = (name: string) => join(configDir(), 'locks', `relay-${name}.lock`);
 
@@ -565,9 +575,40 @@ function serviceRunningAs(context: Context, pid: number): ServicePlan | null {
 }
 
 /** The background service that holds the environment's lock now, if one does. */
-function serviceHolding(context: Context): ServicePlan | null {
+export function serviceHolding(context: Context): ServicePlan | null {
   const holder = lockHolder(environmentLock(context));
   return holder ? serviceRunningAs(context, holder.pid) : null;
+}
+
+/**
+ * What keeps a change to the bots (`flag`) from starting now, only looking (no lock is taken): a
+ * relay running in a terminal (a background service holding the environment's lock is stopped for
+ * a change, so it does not count), or another change under way (the setup lock, or the
+ * environment's lock noted with a flag). Its refusal, its process and which of the two it is; null
+ * when nothing does.
+ */
+export function busyNow(
+  context: Context,
+  flag: string,
+): { refusal: string; pid: number; kind: 'relay' | 'change' } | null {
+  const running = lockHolder(environmentLock(context));
+  if (running && !serviceRunningAs(context, running.pid)) {
+    const held = holderOf({ heldBy: running.pid, note: running.note });
+    return held.flag
+      ? { refusal: credentialsRunning(held, flag), pid: running.pid, kind: 'change' }
+      : { refusal: runningRefusal(held, flag), pid: running.pid, kind: 'relay' };
+  }
+  const changing = lockHolder(setupLock(context));
+  if (!changing) return null;
+  const held = holderOf({ heldBy: changing.pid, note: changing.note });
+  return { refusal: credentialsRunning(held, flag), pid: changing.pid, kind: 'change' };
+}
+
+/** Whether the credentials stored for `record` are its own (read on this computer alone). */
+export function ownCredentials(context: Context, record: BotRecord): boolean {
+  const secret = context.store.getSecret(record.secretName);
+  const stored = secret ? channelSetup(record.kind).storedBot(secret) : null;
+  return Boolean(stored && sameBot(record, stored));
 }
 
 /** The signals that would end this process while a background service is stopped for a change. */
@@ -749,7 +790,7 @@ type ServiceAfter = {
  * With no service stopped, one installed but not running is said, with how to start it; a unit
  * of before the hub started again is said to run its own channel's bots only (`legacyRestarted`).
  */
-async function whileStopped<T>(
+export async function whileStopped<T>(
   context: Context,
   flag: string,
   kind: ChannelKind | undefined,
@@ -1120,7 +1161,7 @@ async function relayForget(context: Context, options: RelayCommandOptions) {
  * This environment's bot registry, after taking over the bots the channels' credentials stored
  * before it (design §4.3); what the takeover found to warn about is said once, then.
  */
-function openRegistry(context: Context): BotRegistry {
+export function openRegistry(context: Context): BotRegistry {
   const { registry, warnings } = migrateRegistry({
     account: context.account,
     store: context.store,
@@ -1161,7 +1202,7 @@ function credentialsChanged(setup: ChannelSetup): string {
 const bindCommand = (name: string, npcId = 'ID') => `yomi relay --bot ${name} --character ${npcId}`;
 
 /** The character id in `input` (a number or a link with one), '' when there is none. */
-const characterIdOf = (input: string) => /([1-9][0-9]{5,19})/.exec(input)?.[1] ?? '';
+export const characterIdOf = (input: string) => /([1-9][0-9]{5,19})/.exec(input)?.[1] ?? '';
 
 /** `--character` names no character that can chat (not found, removed, or not for this account). */
 function characterBad(input: string, detail: string): string {
@@ -1188,7 +1229,7 @@ async function characterFor(context: Context, input: string): Promise<RelayChara
 }
 
 /** A character in the terminal: its name and id. */
-const nameAndId = (character: RelayCharacter) =>
+export const nameAndId = (character: RelayCharacter) =>
   tr(
     `${character.name}（${character.npcId}）`,
     `${character.name} (${character.npcId})`,
@@ -1245,7 +1286,7 @@ async function characterAtStart(
 }
 
 /** A chat user id shown in part: its first and last two characters. */
-function masked(id: string): string {
+export function masked(id: string): string {
   return id.length > 6 ? `${id.slice(0, 2)}…${id.slice(-2)}` : '…';
 }
 
@@ -1370,7 +1411,7 @@ function offlineStatus(
 }
 
 /** A registered bot's state file, when it has one (read only). */
-function stateOf(context: Context, record: BotRecord): RelayState | null {
+export function stateOf(context: Context, record: BotRecord): RelayState | null {
   const path = relayStatePath(context.account, record.scope);
   return existsSync(path) ? new RelayState(path, record.scope, context.account, record.kind) : null;
 }
@@ -1419,7 +1460,7 @@ function listBots(context: Context, registry: BotRegistry, kind: ChannelKind | n
           ),
         ),
       );
-  } else if (!bots.length) say(io, noBotsYet());
+  } else if (!bots.length) say(io, noBotsYet(false));
   const none = tr('（还没有）', '(none yet)', '(todavía no)', '(ainda não)');
   const hub = hubStatus(context);
   for (const record of bots) {
@@ -1623,7 +1664,7 @@ function unknownBot(name: string, registry: BotRegistry): string {
 }
 
 /** `--bot NAME` with a channel flag naming another channel than the bot's. */
-function otherChannel(record: BotRecord, kind: ChannelKind): string {
+export function otherChannel(record: BotRecord, kind: ChannelKind): string {
   const its = channelSetup(record.kind).displayName;
   const given = channelSetup(kind).displayName;
   return tr(
@@ -1727,13 +1768,26 @@ function chooseChannel(): string {
   );
 }
 
-/** No bot is registered at all: how to set one up. */
-function noBotsYet(): string {
-  return tr(
+/**
+ * No bot is registered at all: how to set one up. `withSetupHint` (an error in a terminal): the
+ * step-by-step setup of a QQ bot too.
+ */
+export function noBotsYet(withSetupHint: boolean): string {
+  const line = tr(
     '这台电脑上还没有 bot：用 yomi relay --telegram --set-token、yomi relay --channel qq --set-app 或 yomi relay --channel wechat --experimental --login 设置一个。',
     'No bots on this computer yet: set one up with yomi relay --telegram --set-token, yomi relay --channel qq --set-app or yomi relay --channel wechat --experimental --login.',
     'Todavía no hay bots en este equipo: configura uno con yomi relay --telegram --set-token, yomi relay --channel qq --set-app o yomi relay --channel wechat --experimental --login.',
     'Ainda não há bots neste computador: configure um com yomi relay --telegram --set-token, yomi relay --channel qq --set-app ou yomi relay --channel wechat --experimental --login.',
+  );
+  if (!withSetupHint) return line;
+  return (
+    line +
+    tr(
+      '或者运行 yomi relay --setup 按步骤设置一个 QQ bot。',
+      ' Or run yomi relay --setup to set up a QQ bot step by step.',
+      ' O ejecuta yomi relay --setup para configurar un bot de QQ paso a paso.',
+      ' Ou execute yomi relay --setup para configurar um bot do QQ passo a passo.',
+    )
   );
 }
 
@@ -1761,12 +1815,12 @@ function selectBots(registry: BotRegistry, options: RelayCommandOptions): Select
   const kind = options.channel;
   const records = registry.list(kind ?? undefined);
   if (!records.length && kind) return [{ setup: channelSetup(kind), record: null }];
-  if (!records.length) throw new UsageError(noBotsYet());
+  if (!records.length) throw new UsageError(noBotsYet(true));
   return records.map((record) => ({ setup: channelSetup(record.kind), record }));
 }
 
 /** No system keychain, and `--allow-file-store` not given: refused. */
-function fileStoreRefusal(setup: ChannelSetup): string {
+export function fileStoreRefusal(setup: ChannelSetup): string {
   return tr(
     `这台机器没有可用的系统钥匙串，relay 默认不启动（${setup.secretLabel} 和会话会以明文文件保存）。确认接受时加 --allow-file-store。`,
     `This machine has no system keychain available, so relay does not start by default (the ${setup.secretLabel} and session would be saved in plain-text files). To accept that, add --allow-file-store.`,
@@ -1802,7 +1856,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
   // Nobody at the terminal (a background service whose last bot was taken away): nothing to run
   // is no failure, or the service would be started again and again.
   if (!options.channel && !options.bots.length && !registry.list().length && !io.interactive)
-    return void warn(io, noBotsYet());
+    return void warn(io, noBotsYet(false));
   let selected = selectBots(registry, options);
   const setup = selected[0].setup;
   // The channel is the bots' own when none is named: --pair needs one that pairs with a code.
@@ -1855,27 +1909,45 @@ export async function relay(context: Context, options: RelayCommandOptions) {
     selected = [{ setup, record }];
   }
   const records = selected.map((item) => ({ setup: item.setup, record: item.record! }));
-  // --pair with the background service running: it is stopped while the owner pairs here, and
-  // started again once they did (or this run ended). The run spends under the service's cap.
   if (options.pair && serviceHolding(context)) {
-    const cap = pairingCap(context, options);
-    let restarted: ServicePlan | null = null;
-    await withSetupLock(context, changeNote('--pair'), () =>
-      withServiceStopped(context, (stopped) => {
-        restarted = stopped;
-        return relayRun(
-          context,
-          registry,
-          records,
-          stopped ? { ...options, maxSpend: cap, resetSpend: false } : options,
-          credential,
-          Boolean(stopped),
-        );
-      }),
-    );
-    return legacyRestarted(context, restarted);
+    await pairUnderService(context, registry, records, options, credential);
+    return;
   }
   return relayRun(context, registry, records, options, credential, false);
+}
+
+/**
+ * A pairing with the background service running (`--pair`, and `yomi relay --setup`'s `flag`): it
+ * is stopped while the owner pairs here, and started again once they did (or this run ended). The
+ * run spends under the service's cap. The service stopped and started again, null when none was.
+ */
+export async function pairUnderService(
+  context: Context,
+  registry: BotRegistry,
+  records: { setup: ChannelSetup; record: BotRecord }[],
+  options: RelayCommandOptions,
+  credential: Credential,
+  flag = '--pair',
+  guide?: GuideHooks,
+): Promise<ServicePlan | null> {
+  const cap = pairingCap(context, options);
+  let restarted: ServicePlan | null = null;
+  await withSetupLock(context, changeNote(flag), () =>
+    withServiceStopped(context, (stopped) => {
+      restarted = stopped;
+      return relayRun(
+        context,
+        registry,
+        records,
+        stopped ? { ...options, maxSpend: cap, resetSpend: false } : options,
+        credential,
+        Boolean(stopped || guide),
+        guide,
+      );
+    }),
+  );
+  legacyRestarted(context, restarted);
+  return restarted;
 }
 
 /**
@@ -1885,7 +1957,7 @@ export async function relay(context: Context, options: RelayCommandOptions) {
  * spent twice). A different `--max-spend`, or `--reset-spend`, typed with `--pair` is refused: it
  * is the service's to change (`--install-service`).
  */
-function pairingCap(context: Context, options: RelayCommandOptions): number | null {
+export function pairingCap(context: Context, options: RelayCommandOptions): number | null {
   const cap = LedgerFileStore.open(context.account).allowance().maxSpend;
   const typed = options.maxSpend !== null && options.maxSpend !== cap;
   if (typed || options.resetSpend) {
@@ -1904,7 +1976,7 @@ function pairingCap(context: Context, options: RelayCommandOptions): number | nu
 }
 
 /** What credentials flags with the bots named ask for (design §1.1): a bot to add or to renew. */
-type CredentialsIntent = { setup: ChannelSetup; renew: BotRecord | null; name: string };
+export type CredentialsIntent = { setup: ChannelSetup; renew: BotRecord | null; name: string };
 
 /**
  * `--set-token`, `--set-app` or `--login` (design §1.1): `--bot NAME` of a registered bot sets
@@ -2014,7 +2086,7 @@ async function relayCredentials(context: Context, options: RelayCommandOptions) 
 }
 
 /** A bot to add (`renew` null) or to set again, and what goes with it. */
-type CredentialsPlan = CredentialsIntent & {
+export type CredentialsPlan = CredentialsIntent & {
   character: RelayCharacter | null;
   atStart: boolean;
 };
@@ -2130,7 +2202,7 @@ function scannersBot(
  * WeChat account has one ClawBot) is signed in again instead, said, with how to change its
  * character.
  */
-function saveAdded(
+export function saveAdded(
   context: Context,
   registry: BotRegistry,
   plan: CredentialsPlan,
@@ -2178,7 +2250,7 @@ function saveAdded(
 }
 
 /** Keeps a bot's new credentials (design §1.2, renew), all or nothing, as `saveAdded` does. */
-function saveRenewed(
+export function saveRenewed(
   context: Context,
   registry: BotRegistry,
   record: BotRecord,
@@ -2343,7 +2415,7 @@ function characterToBind(
  * not let go leaves the hub's unit written, not loaded: said), and the hub's unit is loaded (a
  * running one is started again: the arguments typed now apply, the cap too).
  */
-async function installRelayService(context: Context, options: RelayCommandOptions) {
+export async function installRelayService(context: Context, options: RelayCommandOptions) {
   const { io, store } = context;
   const registry = openRegistry(context);
   const bots = registry.list();
@@ -2393,16 +2465,8 @@ async function installRelayService(context: Context, options: RelayCommandOption
     return;
   const character = unbound ? await characterFor(context, options.characterId) : null;
   const plan = hubPlan(context, options);
-  if (/[\\/](_npx|\.npm|tmp|temp)[\\/]/i.test(plan.content))
-    warn(
-      io,
-      tr(
-        '当前 yomi 像是从临时目录运行的（npx 或缓存），后台服务可能在缓存清理后失效：建议全局安装后再装服务。',
-        'This yomi seems to run from a temporary directory (npx or a cache), so the background service may break when the cache is cleaned: install yomi globally before installing the service.',
-        'Este yomi parece ejecutarse desde un directorio temporal (npx o una caché), así que el servicio en segundo plano podría dejar de funcionar cuando se limpie la caché: instala yomi de forma global antes de instalar el servicio.',
-        'Este yomi parece estar sendo executado de um diretório temporário (npx ou um cache), então o serviço em segundo plano pode parar de funcionar quando o cache for limpo: instale o yomi globalmente antes de instalar o serviço.',
-      ),
-    );
+  const temporary = fromTemporaryDir(plan);
+  if (temporary) warn(io, temporary);
   const flag = '--install-service';
   await withSetupLock(context, changeNote(flag), async () => {
     const holder = lockHolder(environmentLock(context));
@@ -2496,6 +2560,36 @@ async function installRelayService(context: Context, options: RelayCommandOption
     );
 }
 
+/**
+ * A background service written as `plan` would run this yomi from a temporary directory (npx or a
+ * cache, which may be cleaned): what to do instead; null when it would not.
+ */
+export function fromTemporaryDir(plan: ServicePlan): string | null {
+  if (!/[\\/](_npx|\.npm|tmp|temp)[\\/]/i.test(plan.content)) return null;
+  return tr(
+    '当前 yomi 像是从临时目录运行的（npx 或缓存），后台服务可能在缓存清理后失效：建议全局安装后再装服务。',
+    'This yomi seems to run from a temporary directory (npx or a cache), so the background service may break when the cache is cleaned: install yomi globally before installing the service.',
+    'Este yomi parece ejecutarse desde un directorio temporal (npx o una caché), así que el servicio en segundo plano podría dejar de funcionar cuando se limpie la caché: instala yomi de forma global antes de instalar el servicio.',
+    'Este yomi parece estar sendo executado de um diretório temporário (npx ou um cache), então o serviço em segundo plano pode parar de funcionar quando o cache for limpo: instale o yomi globalmente antes de instalar o serviço.',
+  );
+}
+
+/**
+ * The options a background service installed as `plan` runs with (what `reinstallCommand` keeps:
+ * its cap, `--no-drafts`, `--allow-file-store`), to install it again as it was.
+ */
+export function installedOptions(plan: ServicePlan): RelayCommandOptions {
+  const args = installedArgs(plan);
+  const at = args.indexOf('--max-spend');
+  const cap = at >= 0 ? (args[at + 1] ?? '') : '';
+  return {
+    ...PLAIN_OPTIONS,
+    allowFileStore: args.includes('--allow-file-store'),
+    maxSpend: /^\d+$/.test(cap) ? Number(cap) : null,
+    drafts: !args.includes('--no-drafts'),
+  };
+}
+
 /** Another relay holds this bot's own lock. */
 function botRunning(pid: number): string {
   return tr(
@@ -2529,6 +2623,42 @@ function characterForWhich(input: string): string {
 /** A bot ready to run: opened, locked, its owner and character settled. */
 type ReadyBot = OpenedBot & { pairing: PairingCode | null };
 
+/** How a pairing the guide watched ended (`GuideHooks.onPaired`). */
+export type PairOutcome = {
+  /** The owner's chat user id (shown masked). */
+  owner: string;
+  /** What the answer to the pairing came to in the chat (null: the channel does not say). */
+  report: FlushReport | null;
+  /** The server has not enabled the channel yet: the welcome waits for the owner's next message. */
+  gated: boolean;
+};
+
+/**
+ * What `yomi relay --setup` (commands/relay-setup.ts) takes over of a run it starts: the pairing of
+ * its one bot (`bot`, its registry name) is shown by the guide, and so is everything the run logs.
+ * The run itself then prints no banner, no cap, no "Ctrl+C" line and no "Relay stopped."; the
+ * other bots of the run that have no owner only say how to pair them, as with nobody at the
+ * terminal.
+ */
+export type GuideHooks = {
+  bot: string;
+  /** A pairing code to show: the first one, and each one replacing an expired code. */
+  onCode(display: string): void;
+  /** The bot's session with its platform is live (each time it becomes so; QQ only). */
+  onReady(): void;
+  /** The owner paired, and the answer to it went out (or did not: `PairOutcome`). */
+  onPaired(outcome: PairOutcome): void;
+  /** A line of the run's log ('paired': the one naming the owner, which the guide says itself). */
+  onLog(line: string, kind?: 'paired'): void;
+  /**
+   * The guide's bot stopped for good (its reason is said as with any bot): true ends the whole
+   * run there (it has not paired: the other bots of the run would otherwise keep it waiting).
+   */
+  onStopped(): boolean;
+  /** The run ended: stopped (Ctrl+C), on its own, or for the guide's bot (`onStopped`). */
+  onEnd(how: 'aborted' | 'ended'): void;
+};
+
 /**
  * Runs the selected bots in this one process (`RelayHub`, design §1.4, §2): each opened and
  * checked as a single relay always was, each under its own lock and all under the environment's,
@@ -2538,13 +2668,14 @@ type ReadyBot = OpenedBot & { pairing: PairingCode | null };
  * its own (each said why). `untilPaired`: the run ends once an owner paired (the background
  * service stopped for it starts again).
  */
-async function relayRun(
+export async function relayRun(
   context: Context,
   registry: BotRegistry,
   selected: { setup: ChannelSetup; record: BotRecord }[],
   options: RelayCommandOptions,
   credential: Credential,
   untilPaired: boolean,
+  guide?: GuideHooks,
 ) {
   const { io } = context;
   const several = selected.length > 1;
@@ -2585,7 +2716,9 @@ async function relayRun(
     throw error;
   }
   try {
-    const log = (line: string) => io.stderr.write(`${new Date().toISOString()} ${line}\n`);
+    const log: RunLog = guide
+      ? (line, kind) => guide.onLog(line, kind)
+      : (line) => io.stderr.write(`${new Date().toISOString()} ${line}\n`);
     // A run's --character is for its one bot: counted among the bots selected, not those that
     // happened to open.
     if (options.characterId && several) warn(io, characterForWhich(options.characterId));
@@ -2594,81 +2727,105 @@ async function relayRun(
       const prepared = await readyBot(context, registry, bot, options, several);
       if (prepared) ready.push(prepared);
     }
-    const running = ready.filter((bot) => pairingFor(context, bot, options));
+    const running = ready.filter((bot) => pairingFor(context, bot, options, guide));
     if (!running.length) return;
-    for (const bot of running)
-      say(
-        io,
-        tr(
-          `relay 运行中：${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId}（${describeEnvironment(context.env)}）`,
-          `Relay running: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
-          `Relay en ejecución: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
-          `Relay em execução: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
-        ),
-      );
-    if (running.some((bot) => bot.setup.personalUseOnly))
-      say(
-        io,
-        paint(
-          io,
-          'dim',
-          tr(
-            '仅限个人使用：relay 只转发你本人和你自己的 bot 之间的消息。',
-            'Personal use only: this relays your own messages to your own bot.',
-            'Solo para uso personal: esto reenvía tus propios mensajes a tu propio bot.',
-            'Somente para uso pessoal: isto repassa as suas próprias mensagens para o seu próprio bot.',
-          ),
-        ),
-      );
-    if (running.some((bot) => bot.setup.experimental))
-      say(
-        io,
-        paint(
-          io,
-          'dim',
-          tr(
-            '实验功能：微信 ClawBot（iLink）不是给第三方客户端的官方接口。',
-            'Experimental: WeChat ClawBot (iLink) is not an official API for third-party clients.',
-            'Experimental: WeChat ClawBot (iLink) no es una API oficial para clientes de terceros.',
-            'Experimental: o WeChat ClawBot (iLink) não é uma API oficial para clientes de terceiros.',
-          ),
-        ),
-      );
+    if (!guide) runBanner(context, running, options, credential, untilPaired);
+    else {
+      // Units of before the hub (design §4.3): each runs its own channel's bots until replaced.
+      const legacy = legacyLine(context, installedPlans(context));
+      if (legacy) say(io, paint(io, 'dim', legacy));
+    }
+    await runHub(context, registry, running, options, log, untilPaired, guide);
+  } finally {
+    releaseAll();
+  }
+}
+
+/** A run's log line; 'paired' marks the one naming the owner who paired. */
+type RunLog = (line: string, kind?: 'paired') => void;
+
+/**
+ * What a run says as it starts (not under the guide): each bot and the Yomi account, personal use,
+ * the experimental channel, the cap and how to stop, the units of before the hub, and when the run
+ * ends by itself (`untilPaired`).
+ */
+function runBanner(
+  context: Context,
+  running: ReadyBot[],
+  options: RelayCommandOptions,
+  credential: Credential,
+  untilPaired: boolean,
+) {
+  const { io } = context;
+  for (const bot of running)
+    say(
+      io,
+      tr(
+        `relay 运行中：${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId}（${describeEnvironment(context.env)}）`,
+        `Relay running: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
+        `Relay en ejecución: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
+        `Relay em execução: ${bot.setup.label(bot.identity)} ⇄ Yomi ${credential.displayName || credential.userId} (${describeEnvironment(context.env)})`,
+      ),
+    );
+  if (running.some((bot) => bot.setup.personalUseOnly))
     say(
       io,
       paint(
         io,
         'dim',
-        capLine(options.maxSpend, false) +
-          tr(
-            'Ctrl+C 停止。',
-            'Press Ctrl+C to stop.',
-            'Presiona Ctrl+C para detener.',
-            'Pressione Ctrl+C para parar.',
-          ),
+        tr(
+          '仅限个人使用：relay 只转发你本人和你自己的 bot 之间的消息。',
+          'Personal use only: this relays your own messages to your own bot.',
+          'Solo para uso personal: esto reenvía tus propios mensajes a tu propio bot.',
+          'Somente para uso pessoal: isto repassa as suas próprias mensagens para o seu próprio bot.',
+        ),
       ),
     );
-    // Units of before the hub (design §4.3): each runs its own channel's bots until replaced.
-    const legacy = legacyLine(context, installedPlans(context));
-    if (legacy) say(io, paint(io, 'dim', legacy));
-    if (untilPaired)
-      say(
+  if (running.some((bot) => bot.setup.experimental))
+    say(
+      io,
+      paint(
         io,
-        paint(
-          io,
-          'dim',
-          tr(
-            '配对完成（或按 Ctrl+C）后，这次运行结束，后台服务重新启动。',
-            'Once the owner paired (or on Ctrl+C) this run ends and the background service starts again.',
-            'Cuando el dueño se vincule (o con Ctrl+C), esta ejecución termina y el servicio en segundo plano vuelve a iniciarse.',
-            'Quando o dono parear (ou com Ctrl+C), esta execução termina e o serviço em segundo plano inicia de novo.',
-          ),
+        'dim',
+        tr(
+          '实验功能：微信 ClawBot（iLink）不是给第三方客户端的官方接口。',
+          'Experimental: WeChat ClawBot (iLink) is not an official API for third-party clients.',
+          'Experimental: WeChat ClawBot (iLink) no es una API oficial para clientes de terceros.',
+          'Experimental: o WeChat ClawBot (iLink) não é uma API oficial para clientes de terceiros.',
         ),
-      );
-    await runHub(context, registry, running, options, log, untilPaired);
-  } finally {
-    releaseAll();
-  }
+      ),
+    );
+  say(
+    io,
+    paint(
+      io,
+      'dim',
+      capLine(options.maxSpend, false) +
+        tr(
+          'Ctrl+C 停止。',
+          'Press Ctrl+C to stop.',
+          'Presiona Ctrl+C para detener.',
+          'Pressione Ctrl+C para parar.',
+        ),
+    ),
+  );
+  // Units of before the hub (design §4.3): each runs its own channel's bots until replaced.
+  const legacy = legacyLine(context, installedPlans(context));
+  if (legacy) say(io, paint(io, 'dim', legacy));
+  if (untilPaired)
+    say(
+      io,
+      paint(
+        io,
+        'dim',
+        tr(
+          '配对完成（或按 Ctrl+C）后，这次运行结束，后台服务重新启动。',
+          'Once the owner paired (or on Ctrl+C) this run ends and the background service starts again.',
+          'Cuando el dueño se vincule (o con Ctrl+C), esta ejecución termina y el servicio en segundo plano vuelve a iniciarse.',
+          'Quando o dono parear (ou com Ctrl+C), esta execução termina e o serviço em segundo plano inicia de novo.',
+        ),
+      ),
+    );
 }
 
 /**
@@ -2739,17 +2896,26 @@ async function readyBot(
  * shown only to someone at this terminal, never in a service log; a channel whose owner is
  * whoever signed in (WeChat) has nobody to pair here.
  */
-function pairingFor(context: Context, bot: ReadyBot, options: RelayCommandOptions): boolean {
+function pairingFor(
+  context: Context,
+  bot: ReadyBot,
+  options: RelayCommandOptions,
+  guide?: GuideHooks,
+): boolean {
   const { io } = context;
   const { setup, channel, state, identity } = bot;
   if (options.pair && channel.caps.pairing !== 'login') state.resetOwner();
   if (state.data.owner) return true;
-  if (channel.caps.pairing === 'login' || (!io.interactive && !options.pair)) {
+  // Under the guide only its bot pairs here: the others are as with nobody at the terminal.
+  const guided = guide?.bot === bot.record.name ? guide : undefined;
+  const nobody = guide ? !guided : !io.interactive && !options.pair;
+  if (channel.caps.pairing === 'login' || nobody) {
     warn(io, setup.unpairedHint(bot.record));
     return false;
   }
   bot.pairing = new PairingCode();
-  setup.printPairing?.(context, bot.pairing, identity);
+  if (guided) guided.onCode(bot.pairing.display);
+  else setup.printPairing?.(context, bot.pairing, identity);
   return true;
 }
 
@@ -2759,8 +2925,9 @@ async function runHub(
   registry: BotRegistry,
   bots: ReadyBot[],
   options: RelayCommandOptions,
-  log: (line: string) => void,
+  log: RunLog,
   untilPaired: boolean,
+  guide?: GuideHooks,
 ) {
   const { io } = context;
   const kinds = [...new Set(bots.map((bot) => bot.channel.kind))];
@@ -2771,6 +2938,10 @@ async function runHub(
   const several = bots.length > 1;
   const said = new Set<string>();
   const alone: { error: Error | null } = { error: null };
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  // The guide's bot stopped before it paired: the run ends with it, whatever else runs.
+  let guideStopped = false;
   const hub = new RelayHub(gateway, {
     account: context.account,
     log,
@@ -2778,6 +2949,10 @@ async function runHub(
     resetSpend: options.resetSpend,
     ledgerBots: registry.list(),
     onStopped: (name, error) => {
+      if (guide?.bot === name && guide.onStopped()) {
+        guideStopped = true;
+        stop();
+      }
       if (!error) return;
       // One bot alone keeps its old ending: a usage problem is the command's error.
       if (!several && error instanceof UsageError) {
@@ -2792,15 +2967,22 @@ async function runHub(
       warn(io, line);
     },
   });
-  const controller = new AbortController();
-  const stop = () => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let ended: 'aborted' | 'ended';
   try {
     ended = await hub.run(
       bots.map((bot) =>
-        hubBot(context, registry, bot, options, several, log, untilPaired ? stop : undefined),
+        hubBot(
+          context,
+          registry,
+          bot,
+          options,
+          several,
+          log,
+          untilPaired ? stop : undefined,
+          guide,
+        ),
       ),
       controller.signal,
     );
@@ -2816,7 +2998,8 @@ async function runHub(
     process.removeListener('SIGTERM', stop);
   }
   if (alone.error) throw alone.error;
-  if (ended === 'aborted')
+  if (guide) guide.onEnd(guideStopped ? 'ended' : ended);
+  else if (ended === 'aborted')
     say(io, tr('relay 已停止。', 'Relay stopped.', 'El relay se detuvo.', 'O relay parou.'));
 }
 
@@ -2832,11 +3015,14 @@ function hubBot(
   bot: ReadyBot,
   options: RelayCommandOptions,
   several: boolean,
-  log: (line: string) => void,
+  log: RunLog,
   onPaired?: () => void,
+  guide?: GuideHooks,
 ): HubBot {
   const { io } = context;
   const { setup, record, identity } = bot;
+  // The bot whose pairing the guide shows: told once the answer to the pairing went out.
+  const guided = guide?.bot === record.name ? guide : undefined;
   let first = true;
   /** Registry writes the relay asks for: it goes on when one fails (logged), as before. */
   const write = (change: () => void) => {
@@ -2846,7 +3032,7 @@ function hubBot(
       log(error instanceof Error ? error.message : String(error));
     }
   };
-  const botLog = several ? (line: string) => log(`[${record.name}] ${line}`) : log;
+  const botLog: RunLog = several ? (line, kind) => log(`[${record.name}] ${line}`, kind) : log;
   return {
     name: record.name,
     run: async (services, signal) => {
@@ -2883,8 +3069,18 @@ function hubBot(
         },
         hub: services,
         pairing: state.data.owner ? null : bot.pairing,
-        onPaired,
+        onPaired: guided ? undefined : onPaired,
+        ...(guided
+          ? {
+              onPairedFlushed: (outcome: { report: FlushReport | null; gated: boolean }) => {
+                guided.onPaired({ owner: String(state.data.owner?.userId ?? ''), ...outcome });
+                onPaired?.();
+              },
+              onChannelReady: () => guided.onReady(),
+            }
+          : {}),
         onPairingCode: (code) => {
+          if (guided) return guided.onCode(code.display);
           say(
             io,
             paint(

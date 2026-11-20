@@ -2,11 +2,11 @@
 
 把你**本人**在私聊里发给自己 bot 的消息，转给一个已发布的 Yomi 角色，并把角色的回复发回这个私聊。bot 是你自己的，它的凭证只存在这台电脑的系统钥匙串里；relay 只发起出站连接（聊天平台的长轮询或长连接、Yomi 长连接），不在本机开端口。
 
-| 通道                  | 怎样选择                                | 说明                   | 准备、配对、能力与限制                  |
-| --------------------- | --------------------------------------- | ---------------------- | --------------------------------------- |
-| Telegram              | `--channel telegram`（或 `--telegram`） | 实验                   | 本文的 [Telegram](#telegram) 一节       |
-| QQ                    | `--channel qq`                          | 仅限个人使用           | [docs/relay-qq.md](relay-qq.md)         |
-| 微信 ClawBot（iLink） | `--channel wechat --experimental`       | 实验功能，仅限个人使用 | [docs/relay-wechat.md](relay-wechat.md) |
+| 通道                  | 怎样选择                                         | 说明                   | 准备、配对、能力与限制                  |
+| --------------------- | ------------------------------------------------ | ---------------------- | --------------------------------------- |
+| Telegram              | `--channel telegram`（或 `--telegram`）          | 实验                   | 本文的 [Telegram](#telegram) 一节       |
+| QQ                    | `--channel qq`；按步骤设置：`yomi relay --setup` | 仅限个人使用           | [docs/relay-qq.md](relay-qq.md)         |
+| 微信 ClawBot（iLink） | `--channel wechat --experimental`                | 实验功能，仅限个人使用 | [docs/relay-wechat.md](relay-wechat.md) |
 
 下文的运行方式、多个 bot、聊天里的命令、钱、隐私和后台服务对所有通道相同；各通道自己的部分（怎样拿到 bot、怎样配对、能不能流式显示、离线时的消息）在各自的文档里。
 
@@ -35,18 +35,19 @@ yomi relay --channel telegram --character 7300000000000009001
 
 一台电脑上可以登记多个 bot（最多 20 个，每个通道最多 10 个），Telegram、QQ 和微信可以混用。每个 bot 固定和一个角色聊天，一个角色只能绑一个 bot。一个微信号只有一个 ClawBot：同一个微信号想和别的角色聊天，就给它的 bot 换绑角色（见 [docs/relay-wechat.md](relay-wechat.md)）。
 
-| 要做的事                           | 命令                                                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------------ |
-| 添加 Telegram bot                  | `yomi relay --telegram --set-token --character <ID> [--bot <名字>]`                  |
-| 添加 QQ bot                        | `yomi relay --channel qq --set-app --character <ID> [--bot <名字>]`                  |
-| 添加微信 ClawBot（每个微信号一个） | `yomi relay --channel wechat --experimental --login --character <ID> [--bot <名字>]` |
-| 配对（Telegram、QQ）               | `yomi relay --bot <名字> --pair`                                                     |
-| 重新设置凭证、重新登录             | `yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）              |
-| 列出 bot、角色、主人和状态         | `yomi relay --list`（加 `--channel <通道>` 只看一个通道）                            |
-| 换绑角色                           | `yomi relay --bot <名字> --character <ID>`                                           |
-| 删除一个 bot / 全部                | `yomi relay --forget --bot <名字>` / `yomi relay --forget --all`                     |
-| 运行全部 / 一个通道 / 几个 bot     | `yomi relay` / `yomi relay --channel <通道>` / `yomi relay --bot a,b`                |
-| 一个后台服务运行全部 bot           | `yomi relay --install-service`（见[一直运行（后台服务）](#一直运行后台服务)）        |
+| 要做的事                            | 命令                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------ |
+| 添加 Telegram bot                   | `yomi relay --telegram --set-token --character <ID> [--bot <名字>]`                  |
+| 添加 QQ bot                         | `yomi relay --channel qq --set-app --character <ID> [--bot <名字>]`                  |
+| 按步骤设置一个 QQ bot（终端里引导） | `yomi relay --setup`                                                                 |
+| 添加微信 ClawBot（每个微信号一个）  | `yomi relay --channel wechat --experimental --login --character <ID> [--bot <名字>]` |
+| 配对（Telegram、QQ）                | `yomi relay --bot <名字> --pair`                                                     |
+| 重新设置凭证、重新登录              | `yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）              |
+| 列出 bot、角色、主人和状态          | `yomi relay --list`（加 `--channel <通道>` 只看一个通道）                            |
+| 换绑角色                            | `yomi relay --bot <名字> --character <ID>`                                           |
+| 删除一个 bot / 全部                 | `yomi relay --forget --bot <名字>` / `yomi relay --forget --all`                     |
+| 运行全部 / 一个通道 / 几个 bot      | `yomi relay` / `yomi relay --channel <通道>` / `yomi relay --bot a,b`                |
+| 一个后台服务运行全部 bot            | `yomi relay --install-service`（见[一直运行（后台服务）](#一直运行后台服务)）        |
 
 - **添加和重新设置 bot**：`--set-token`（QQ `--set-app`，微信 `--login`）加上 `--character <ID>` 会添加一个新的 bot，固定和这个角色聊天（名字默认取 Telegram 用户名、`qq-<AppID 后 4 位>` 或 `wechat-<序号>`，也可以用 `--bot <新名字>` 指定）；加上 `--bot <已有的名字>` 只重新设置这个 bot 的凭证，而且必须是同一个 bot（同一个 Telegram bot、同一个 AppID；微信是同一个 ClawBot，或这个 bot 换人扫码）。两个都不加时：这个通道还没有 bot 就添加一个（之后再绑定角色），正好有一个就重新设置它，有多个时会要求用 `--bot` 指定。同一个 bot、同一个角色都不能登记两次；新 bot 的凭证在钥匙串里用自己的名字保存，保存失败时什么都不会留下。新添加的 Telegram、QQ bot 用 `yomi relay --bot <名字> --pair` 配对。微信：一个微信号只有一个 ClawBot，同一个微信号再扫码不会添加 bot（终端会给出换绑角色的命令）；几个微信 bot 要用不同的微信号扫码（这一点只在本地模拟的服务上测试过，还没有在真实的微信账号上验证，见 [docs/relay-wechat.md](relay-wechat.md)）。
 - **`--list`** 列出每个 bot 的名字、通道、平台上的名字、角色、主人（Telegram 显示名字，其他只显示用户 ID 的头尾）和状态（运行中、已停止和原因、需要凭证、需要配对、需要登录、需要绑定角色、凭证属于另一个 bot），最后一行说明后台服务是否已安装、是否在运行，以及是否还装着旧版按通道分开的服务。它不做任何改动，也不联网。

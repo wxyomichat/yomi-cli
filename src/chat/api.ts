@@ -301,13 +301,17 @@ export type CharacterProfile = {
 };
 
 /** `npc/get_npc_profile` → `{data: NpcProfile}`. */
-export async function characterProfile(gateway: Gateway, npcId: string): Promise<CharacterProfile> {
+export async function characterProfile(
+  gateway: Gateway,
+  npcId: string,
+  signal?: AbortSignal,
+): Promise<CharacterProfile> {
   let data: Json;
   try {
     data = await gateway.requestData(
       'npc/get_npc_profile',
       { npc_id: i64(npcId) },
-      { timeoutMs: 30_000 },
+      { timeoutMs: 30_000, signal },
     );
   } catch (error) {
     throw refusalOf(error);

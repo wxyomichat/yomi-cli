@@ -553,38 +553,70 @@ export class QqGateway {
   }
 }
 
+/** What one check of the gateway found (`probeGatewayDetail`). */
+export type GatewayProbe = {
+  /**
+   * 'ok': READY; 'intents': QQ closed it with 4014 (the bot may not have the intent); 'protocol':
+   * 4013 (QQ calls the intent invalid); 'failed': anything else (no answer within the time, another
+   * close: `closeCode`, the network).
+   */
+  result: 'ok' | 'intents' | 'protocol' | 'failed';
+  /** The close code QQ ended the connection with (0: none). */
+  closeCode: number;
+  /** Session starts left today, as `/gateway/bot` said before the check (null: not said). */
+  remaining: number | null;
+  /** When they come back, in ms from then (null: not said). */
+  resetAfterMs: number | null;
+  /** When the Identify went (0: none went), for QQ's 5 s between two of them. */
+  identifiedAt: number;
+};
+
 /**
- * `--set-app`'s check of the gateway: one Identify with the private-chat intent (it uses one of
- * the day's session starts), then the socket is closed. 'intents': the bot may not have the
- * intent (4014); 'protocol': QQ says the intent is invalid (4013); 'failed': no answer within
- * `timeoutMs` or another close.
+ * One Identify with the private-chat intent (it uses one of the day's session starts), then the
+ * socket is closed: what QQ answered (`GatewayProbe`). `signal` ends it early ('failed').
  */
-export async function probeGateway(
+export async function probeGatewayDetail(
   api: QqApi,
-  timeoutMs = 10_000,
-): Promise<'ok' | 'intents' | 'protocol' | 'failed'> {
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<GatewayProbe> {
+  const probe: GatewayProbe = {
+    result: 'failed',
+    closeCode: 0,
+    remaining: null,
+    resetAfterMs: null,
+    identifiedAt: 0,
+  };
   let url: string;
   try {
-    url = qqGatewayUrl(String((await api.gatewayBot()).url ?? ''), api.origin);
+    const info = await api.gatewayBot();
+    const limit = info.session_start_limit;
+    if (limit && typeof limit.remaining === 'number') probe.remaining = limit.remaining;
+    if (limit && typeof limit.reset_after === 'number') probe.resetAfterMs = limit.reset_after;
+    url = qqGatewayUrl(String(info.url ?? ''), api.origin);
   } catch {
-    return 'failed';
+    return probe;
   }
+  const { signal } = options;
+  if (signal?.aborted) return probe;
   return new Promise((resolve) => {
     let settled = false;
     const socket = new WebSocket(url);
-    const done = (result: 'ok' | 'intents' | 'protocol' | 'failed') => {
+    const done = (result: GatewayProbe['result'], closeCode = 0) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       socket.onmessage = socket.onclose = socket.onerror = null;
       try {
         socket.close();
       } catch {
         // Already closed.
       }
-      resolve(result);
+      resolve({ ...probe, result, closeCode });
     };
-    const timer = setTimeout(() => done('failed'), timeoutMs);
+    const onAbort = () => done('failed');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => done('failed'), options.timeoutMs ?? 10_000);
     socket.onmessage = (event) => {
       let payload: { op?: number; t?: string };
       try {
@@ -596,6 +628,7 @@ export async function probeGateway(
         void api.tokens.get().then(
           (token) => {
             if (settled) return;
+            probe.identifiedAt = Date.now();
             socket.send(
               JSON.stringify({
                 op: 2,
@@ -613,6 +646,21 @@ export async function probeGateway(
       else if (payload.op === 0 && payload.t === 'READY') done('ok');
     };
     socket.onclose = (event) =>
-      done(event.code === 4014 ? 'intents' : event.code === 4013 ? 'protocol' : 'failed');
+      done(
+        event.code === 4014 ? 'intents' : event.code === 4013 ? 'protocol' : 'failed',
+        event.code,
+      );
   });
+}
+
+/**
+ * `--set-app`'s check of the gateway (`probeGatewayDetail`): 'intents': the bot may not have the
+ * intent (4014); 'protocol': QQ says the intent is invalid (4013); 'failed': no answer within
+ * `timeoutMs` or another close.
+ */
+export async function probeGateway(
+  api: QqApi,
+  timeoutMs = 10_000,
+): Promise<'ok' | 'intents' | 'protocol' | 'failed'> {
+  return (await probeGatewayDetail(api, { timeoutMs })).result;
 }

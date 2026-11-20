@@ -15,7 +15,8 @@ import { create } from './commands/create.js';
 import { image } from './commands/image.js';
 import { persona } from './commands/persona.js';
 import { preview } from './commands/preview.js';
-import { relay, relayList, relayRebind } from './commands/relay.js';
+import { relay, type RelayCommandOptions, relayList, relayRebind } from './commands/relay.js';
+import { relaySetup } from './commands/relay-setup.js';
 import { video } from './commands/video.js';
 import { CHANNEL_KINDS, type ChannelKind } from './relay/channels/types.js';
 import { UgcFailure } from './ugc/api.js';
@@ -493,6 +494,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     ${docUrl('relay.md')}
     ${docUrl('relay-qq.md')}
     ${docUrl('relay-wechat.md')}
+  --setup               QQ：在终端里按步骤设置一个 QQ bot（创建机器人、AppID 和 AppSecret、加好友、配对，
+                        以及之后怎样运行）；中途退出后再运行，会接着做
   --set-token           Telegram：添加 bot，或给 --bot 名字 重新设置 token（终端里输入，不显示；或配合
                         --token-stdin）
   --set-app             QQ：添加 bot，或给 --bot 名字 重新设置 AppID 和 AppSecret（AppSecret 不显示；
@@ -539,6 +542,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     ${docUrl('relay.md')}
     ${docUrl('relay-qq.md')}
     ${docUrl('relay-wechat.md')}
+  --setup               QQ: set up a QQ bot step by step in this terminal (create it, its AppID and AppSecret,
+                        add it as a friend, pair, and how it runs from then on); run it again to go on
   --set-token           Telegram: add a bot, or set the token of --bot name again (typed in the terminal,
                         hidden; or with --token-stdin)
   --set-app             QQ: add a bot, or set the AppID and AppSecret of --bot name again (the AppSecret
@@ -593,6 +598,9 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     ${docUrl('relay.md')}
     ${docUrl('relay-qq.md')}
     ${docUrl('relay-wechat.md')}
+  --setup               QQ: configura un bot de QQ paso a paso en esta terminal (crearlo, su AppID y su
+                        AppSecret, agregarlo como amigo, vincularlo y cómo se ejecuta después); vuelve a
+                        ejecutarlo para continuar
   --set-token           Telegram: agrega un bot, o vuelve a configurar el token de --bot nombre (se escribe en la
                         terminal, oculto; o con --token-stdin)
   --set-app             QQ: agrega un bot, o vuelve a configurar el AppID y el AppSecret de --bot nombre (el
@@ -649,6 +657,8 @@ yomi persona avatar -p <prompt> [--persona ID | --new --name nome --gender male|
     ${docUrl('relay.md')}
     ${docUrl('relay-qq.md')}
     ${docUrl('relay-wechat.md')}
+  --setup               QQ: configura um bot do QQ passo a passo neste terminal (criar, o AppID e o AppSecret,
+                        adicionar como amigo, parear e como ele funciona depois); execute de novo para continuar
   --set-token           Telegram: adiciona um bot, ou define de novo o token de --bot nome (digitado no terminal,
                         oculto; ou com --token-stdin)
   --set-app             QQ: adiciona um bot, ou define de novo o AppID e o AppSecret de --bot nome (o AppSecret
@@ -776,6 +786,7 @@ const OPTIONS: Record<string, ParseArgsConfig['options']> = {
     list: { type: 'boolean' },
     bot: { type: 'string', multiple: true },
     all: { type: 'boolean' },
+    setup: { type: 'boolean' },
   },
   image: {
     prompt: { type: 'string', short: 'p' },
@@ -935,6 +946,23 @@ const LIST_GOES_WITH = new Set([
   ...Object.keys(GLOBAL ?? {}),
 ]);
 
+/**
+ * What `yomi relay --setup` may be given besides the global options (the guide asks for the rest).
+ * A channel other than QQ is refused by the guide itself, with that channel's own command.
+ */
+const SETUP_GOES_WITH = new Set([
+  'setup',
+  'channel',
+  'telegram',
+  'experimental',
+  'bot',
+  'character',
+  'allow-file-store',
+  'max-spend',
+  'confirm-prod',
+  ...Object.keys(GLOBAL ?? {}),
+]);
+
 /** What `yomi relay --bot NAME --character ID` may be given besides those two and the global options. */
 const BOT_GOES_WITH = new Set([
   'bot',
@@ -951,6 +979,52 @@ const BOT_RUN_REFUSES = new Set(['install-service', 'uninstall-service', 'servic
 
 /** The flags that set a bot's credentials (with `--bot` and `--character`: a bot added). */
 const CREDENTIALS = ['set-token', 'set-app', 'login'];
+
+/** `--bot a,b` (repeatable): the names, refused when none is given (`--bot ""`). */
+function botNames(values: Values): string[] {
+  const bots = ((values.bot as string[] | undefined) ?? [])
+    .flatMap((value) => value.split(','))
+    .map((name) => name.trim())
+    .filter(Boolean);
+  // An empty name (an unset variable, say) would widen the run to every bot.
+  if (values.bot !== undefined && !bots.length)
+    throw new UsageError(
+      tr(
+        '--bot 需要一个 bot 名字（名字见 yomi relay --list）',
+        '--bot needs a bot name (the names are in yomi relay --list)',
+        '--bot necesita el nombre de un bot (los nombres están en yomi relay --list)',
+        '--bot precisa do nome de um bot (os nomes estão em yomi relay --list)',
+      ),
+    );
+  return bots;
+}
+
+/** `yomi relay`'s options as the command takes them. */
+function relayOptions(values: Values, channel: ChannelKind | null): RelayCommandOptions {
+  return {
+    channel,
+    bots: botNames(values),
+    experimental: Boolean(values.experimental),
+    setToken: Boolean(values['set-token']),
+    setApp: Boolean(values['set-app']),
+    login: Boolean(values.login),
+    qrLink: Boolean(values['qr-link']),
+    tokenStdin: Boolean(values['token-stdin']),
+    pair: Boolean(values.pair),
+    forget: Boolean(values.forget),
+    all: Boolean(values.all),
+    characterId: (values.character as string | undefined) ?? '',
+    maxSpend: gems(values['max-spend']),
+    allowFileStore: Boolean(values['allow-file-store']),
+    installService: Boolean(values['install-service']),
+    uninstallService: Boolean(values['uninstall-service']),
+    serviceStatus: Boolean(values['service-status']),
+    replyTimeoutMs: seconds(values['reply-timeout'], 120, '--reply-timeout') * 1000,
+    drafts: !values['no-drafts'],
+    confirmProd: Boolean(values['confirm-prod']),
+    resetSpend: Boolean(values['reset-spend']),
+  };
+}
 
 /**
  * Which relay: `--channel telegram|qq|wechat`, or `--telegram` (the same as `--channel telegram`,
@@ -1191,6 +1265,22 @@ async function run(argv: string[], io: Io): Promise<number> {
         });
         break;
       case 'relay':
+        if (values.setup) {
+          const others = Object.keys(values).filter(
+            (key) => values[key] !== undefined && !SETUP_GOES_WITH.has(key),
+          );
+          if (others.length)
+            throw new UsageError(
+              tr(
+                `--setup 不能和 --${others[0]} 一起用`,
+                `--setup does not go with --${others[0]}`,
+                `--setup no se usa con --${others[0]}`,
+                `--setup não é usado com --${others[0]}`,
+              ),
+            );
+          await relaySetup(context, relayOptions(values, relayKind));
+          break;
+        }
         if (values.list) {
           const others = Object.keys(values).filter(
             (key) => values[key] !== undefined && !LIST_GOES_WITH.has(key),
@@ -1207,20 +1297,7 @@ async function run(argv: string[], io: Io): Promise<number> {
           await relayList(context, relayKind);
           break;
         }
-        const bots = ((values.bot as string[] | undefined) ?? [])
-          .flatMap((value) => value.split(','))
-          .map((name) => name.trim())
-          .filter(Boolean);
-        // An empty name (an unset variable, say) would widen the run to every bot.
-        if (values.bot !== undefined && !bots.length)
-          throw new UsageError(
-            tr(
-              '--bot 需要一个 bot 名字（名字见 yomi relay --list）',
-              '--bot needs a bot name (the names are in yomi relay --list)',
-              '--bot necesita el nombre de un bot (los nombres están en yomi relay --list)',
-              '--bot precisa do nome de um bot (os nomes estão em yomi relay --list)',
-            ),
-          );
+        const bots = botNames(values);
         const credentials = CREDENTIALS.some((key) => values[key] !== undefined);
         if (values.bot !== undefined && values.character !== undefined && !credentials) {
           const others = Object.keys(values).filter(
@@ -1265,29 +1342,7 @@ async function run(argv: string[], io: Io): Promise<number> {
               ),
             );
         }
-        await relay(context, {
-          channel: relayKind,
-          bots,
-          experimental: Boolean(values.experimental),
-          setToken: Boolean(values['set-token']),
-          setApp: Boolean(values['set-app']),
-          login: Boolean(values.login),
-          qrLink: Boolean(values['qr-link']),
-          tokenStdin: Boolean(values['token-stdin']),
-          pair: Boolean(values.pair),
-          forget: Boolean(values.forget),
-          all: Boolean(values.all),
-          characterId: (values.character as string | undefined) ?? '',
-          maxSpend: gems(values['max-spend']),
-          allowFileStore: Boolean(values['allow-file-store']),
-          installService: Boolean(values['install-service']),
-          uninstallService: Boolean(values['uninstall-service']),
-          serviceStatus: Boolean(values['service-status']),
-          replyTimeoutMs: seconds(values['reply-timeout'], 120, '--reply-timeout') * 1000,
-          drafts: !values['no-drafts'],
-          confirmProd: Boolean(values['confirm-prod']),
-          resetSpend: Boolean(values['reset-spend']),
-        });
+        await relay(context, relayOptions(values, relayKind));
         break;
     }
     return typeof process.exitCode === 'number' ? process.exitCode : 0;

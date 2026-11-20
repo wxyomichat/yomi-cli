@@ -60,6 +60,7 @@ import {
   type BotIdentity,
   ChannelError,
   type ChannelHost,
+  type FlushReport,
   type InboundAnswer,
   type InboundCommand,
   type InboundEvent,
@@ -235,6 +236,14 @@ export type RelayOptions = {
   onPairingCode?: (code: PairingCode) => void;
   /** Called once an owner paired with the code and was answered (and welcomed). */
   onPaired?: () => void;
+  /**
+   * Called once the answer to the pairing went out (the channel's `flush` after it): what its sends
+   * came to (`lastFlush`, null when the channel does not say) and whether the server has not
+   * enabled the channel yet (`gated`: the welcome waits for the owner's next message).
+   */
+  onPairedFlushed?: (outcome: { report: FlushReport | null; gated: boolean }) => void;
+  /** Called each time the channel's session is live (`ChannelHost.ready`; QQ only). */
+  onChannelReady?: () => void;
   replyTimeoutMs: number;
   /** Minimum time between two Telegram calls in the chat (when a `TelegramBot` is given). */
   intervalMs: number;
@@ -245,7 +254,8 @@ export type RelayOptions = {
   /** Telegram drafts, else edits (when a `TelegramBot` is given). */
   drafts: boolean;
   language: string;
-  log: (line: string) => void;
+  /** The relay's log; `kind` 'paired' marks the one line that names the owner who paired. */
+  log: (line: string, kind?: 'paired') => void;
   createSocket?: SocketFactory;
   /** How often a paused (signed out) relay looks for a new sign-in. */
   resumeCheckMs?: number;
@@ -531,6 +541,8 @@ export class Relay {
   private channelPause: { reason: PauseReason; until: number | null } | null = null;
   /** The server has not confirmed this channel (production): asked again now and then. */
   private policyGated = false;
+  /** The event being handled paired an owner: `onPairedFlushed` once it is flushed. */
+  private pairedNow = false;
   private policyAt = 0;
   private readonly feed: ImFeed;
   private readonly session: SessionGate;
@@ -589,6 +601,7 @@ export class Relay {
       owner: () => this.ownerIds(),
       pause: (reason, until) => this.pauseChannel(reason, until),
       resume: () => this.resumeChannel(),
+      ready: () => this.options.onChannelReady?.(),
     };
     const hub = options.hub;
     this.ownsServices = !hub;
@@ -609,8 +622,9 @@ export class Relay {
     return this.channel.scope;
   }
 
-  private log(line: string) {
-    this.options.log(line);
+  private log(line: string, kind?: 'paired') {
+    if (kind) this.options.log(line, kind);
+    else this.options.log(line);
   }
 
   /** The bot talks as one character (or none yet), set on the computer: no `/character`. */
@@ -875,6 +889,13 @@ export class Relay {
         await this.unexpected(error);
       }
       await this.channel.flush().catch(() => undefined);
+      if (this.pairedNow) {
+        this.pairedNow = false;
+        this.options.onPairedFlushed?.({
+          report: this.channel.lastFlush?.() ?? null,
+          gated: this.policyGated,
+        });
+      }
       if (this.stopReason || this.abort.signal.aborted) break;
     }
   }
@@ -1016,7 +1037,9 @@ export class Relay {
         `Vinculado: usuario de ${name} ${who ? `${who} (${id})` : id}`,
         `Pareado: usuário do ${name} ${who ? `${who} (${id})` : id}`,
       ),
+      'paired',
     );
+    this.pairedNow = true;
     this.replyTo = event.context;
     // The bot by its handle (Telegram), else its name, else the channel's: never an empty "()".
     const handle = this.identity.handle;

@@ -34,6 +34,7 @@ yomi persona avatar -p "短发，戴眼镜"        # AI 生成人设头像，选
 yomi relay --channel telegram --set-token --character <角色ID>
                                              # 添加自己的 Telegram bot，固定和这个角色聊（实验；--telegram 同义）
 yomi relay --bot <名字> --pair                # 配对后，Telegram 私聊 ⇄ 角色，流式回复；QQ、微信见 docs/relay.md
+yomi relay --setup                           # 在终端里按步骤设置自己的 QQ bot：创建、AppID 和 AppSecret、加好友、配对
 yomi relay --list                            # 这台电脑上的 bot；yomi relay 在一个进程里运行全部 bot
 yomi whoami / yomi logout
 ```
@@ -156,7 +157,7 @@ YAML 或 JSON，见 [examples/character.yaml](examples/character.yaml)（英文�
 
 一台电脑可以登记多个 bot（Telegram、QQ、微信混用），每个 bot 固定和一个角色聊天，一个角色只能绑一个 bot：
 
-- 添加：`--set-token`（QQ `--set-app`，微信 `--login`，一个微信号只有一个 ClawBot）加上 `--character <ID>`，可以用 `--bot <名字>` 起名；Telegram 和 QQ 再用 `yomi relay --bot <名字> --pair` 配对。
+- 添加：`--set-token`（QQ `--set-app`，微信 `--login`，一个微信号只有一个 ClawBot）加上 `--character <ID>`，可以用 `--bot <名字>` 起名；Telegram 和 QQ 再用 `yomi relay --bot <名字> --pair` 配对。QQ 也可以用 `yomi relay --setup` 在终端里一步步设置到配对完成。
 - 查看：`yomi relay --list` 列出每个 bot 的通道、角色、主人和状态，以及后台服务是否在运行。
 - 换绑：`yomi relay --bot <名字> --character <ID>`；重新设置凭证或重新登录：`yomi relay --bot <名字> --set-token`（QQ `--set-app`，微信 `--login`）。
 - 删除：`yomi relay --forget --bot <名字>`；全部：`yomi relay --forget --all`。

@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
 import { currentLanguage } from '../src/core/device.js';
 import { setLanguage } from '../src/core/i18n.js';
-import { type MockServer, startMockServer } from '../src/mock/server.js';
+import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
+import { QQ_CONSOLE_ZH } from '../src/relay/channels/qq-guide.js';
 import { COMMANDS, relayCommands, relayTexts } from '../src/relay/texts.js';
 import { authorizeLikeTheBrowser } from './helpers/authorize.js';
 import { memoryIo } from './helpers/io.js';
@@ -76,6 +77,9 @@ const CASES = [
     account: 'Cuenta: Mock Creator',
     checked: '✓ Nova: comprobaciones locales superadas',
     declaration: 'Declaración',
+    step: 'Paso 3 de 7 · Escribe el AppID y el AppSecret',
+    appId: /AppID \(solo se muestran los dígitos\):/,
+    quit: 'Saliste; no se guardó nada.',
   },
   {
     lang: 'pt',
@@ -84,6 +88,9 @@ const CASES = [
     account: 'Conta: Mock Creator',
     checked: '✓ Nova: as verificações locais passaram',
     declaration: 'Declaração',
+    step: 'Passo 3 de 7 · Digite o AppID e o AppSecret',
+    appId: /AppID \(só os dígitos aparecem\):/,
+    quit: 'Você saiu; nada foi salvo.',
   },
 ] as const;
 
@@ -115,6 +122,26 @@ describe.each(CASES)('yomi in $lang', (c) => {
     } finally {
       setEnv({ YOMI_LANG: 'zh-Hans', LANG: saved.LANG });
     }
+  });
+
+  it('guides a QQ setup in that language, up to the AppID', async () => {
+    const terminal = memoryIo({ interactive: true });
+    const pending = main(['relay', '--setup', '--allow-file-store', '--lang', c.lang], terminal.io);
+    await terminal.waitFor(/\(.*\):\n$/);
+    terminal.stdin.write(`${MOCK_NPCS.single}\n`);
+    await terminal.waitFor(/\[y\/n\] $/);
+    terminal.stdin.write('y\n');
+    await terminal.waitFor(/ · q: (salir|sair) $/);
+    terminal.stdin.write('\n');
+    await terminal.waitFor(c.appId);
+    terminal.stdin.write('q\n');
+    expect(await pending).toBe(0);
+    const all = terminal.out + terminal.err;
+    expect(all).toContain(c.step);
+    expect(all).toContain(c.quit);
+    let rest = all;
+    for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏']) rest = rest.replaceAll(word, '');
+    expect(rest.search(CJK)).toBe(-1);
   });
 
   it('prints its help in that language', async () => {

@@ -117,11 +117,14 @@ export type MockQqApp = {
   /** Every stream chunk accepted, per person. */
   streams(openid: string): MockQqStreamCall[];
   messages(openid: string): MockQqMessage[];
-  /** The person writes to the bot (they become its friend); returns the message id. */
+  /**
+   * The person writes to the bot (they become its friend, unless `friend` is false: a message QQ
+   * passes on from someone the bot may not answer); returns the message id.
+   */
   userSends(
     openid: string,
     text: string,
-    options?: { at?: number; quote?: string; lead?: string },
+    options?: { at?: number; quote?: string; lead?: string; friend?: boolean },
   ): string;
   /** A raw dispatch (`t`, `d`) to the bot's live session. */
   dispatch(type: string, data: Record<string, unknown>): string;
@@ -174,6 +177,8 @@ export type MockQqApp = {
   /** Tokens issued so far expire now (the AppSecret stays): calls answer 401 until a new one. */
   expireTokens(): void;
   identifies: number;
+  /** When each Identify that got READY was answered, oldest first. */
+  identifiedAt: number[];
   resumes: number;
   heartbeats: number;
   /** Sockets connected now. */
@@ -538,6 +543,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
       if (limit.remaining <= 0) return void ws.close(4006, 'session start limit');
       limit = { ...limit, remaining: limit.remaining - 1 };
       mock.identifies += 1;
+      mock.identifiedAt.push(Date.now());
       const session: Session = { id: id('session_'), seq: 0, events: [], socket: ws };
       sessions.set(session.id, session);
       if (live?.socket && live.socket !== ws) live.socket.close(4009, 'session replaced');
@@ -587,7 +593,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
       streams: (openid) => [...(streamCalls.get(openid) ?? [])],
       messages: (openid) => [...chat(openid)],
       userSends(openid, text, extra = {}) {
-        friends.add(openid);
+        if (extra.friend !== false) friends.add(openid);
         const messageId = id('ROBOT1.0_');
         const msgIdx = refIdx();
         inbound.set(messageId, { openid, at: Date.now(), replies: 0, seqs: new Set() });
@@ -678,6 +684,7 @@ export async function startMockQq(options: MockQqOptions = {}): Promise<MockQq> 
         for (const token of tokens.keys()) tokens.set(token, now);
       },
       identifies: 0,
+      identifiedAt: [],
       resumes: 0,
       heartbeats: 0,
       get sockets() {
