@@ -10,9 +10,11 @@ import { main } from '../src/cli.js';
 import { currentLanguage } from '../src/core/device.js';
 import { setLanguage } from '../src/core/i18n.js';
 import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
+import { QQ_CONNECT_TEST } from '../src/relay/channels/qq-connect.js';
 import { QQ_CONSOLE_ZH } from '../src/relay/channels/qq-guide.js';
 import { COMMANDS, relayTexts } from '../src/relay/texts.js';
 import { authorizeLikeTheBrowser } from './helpers/authorize.js';
+import { fakeConnectChild, processGone, SCAN_URL } from './helpers/fake-connect.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -209,6 +211,41 @@ describe('yomi in English', () => {
     let rest = all;
     for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏']) rest = rest.replaceAll(word, '');
     expect(noChinese(rest)).toBe('');
+  });
+
+  it('offers the QR scan in English, naming the third-party bot as the scan page shows it', async () => {
+    // A fake of Tencent's connector, against a loopback QQ address: nothing leaves this computer.
+    const child = fakeConnectChild(work, 'scan-en', [{ send: { type: 'qr', url: SCAN_URL } }]);
+    QQ_CONNECT_TEST.child = child.path;
+    setEnv({ YOMI_QQ_API_ORIGIN: 'http://127.0.0.1:9' });
+    try {
+      const terminal = memoryIo({ interactive: true });
+      const pending = main(['relay', '--setup', '--allow-file-store'], terminal.io);
+      await terminal.waitFor(/paste its link or ID \(only its digits are shown\):/);
+      terminal.stdin.write(`${MOCK_NPCS.single}\n`);
+      await terminal.waitFor(/Is this the character\? \[y\/n\] /);
+      terminal.stdin.write('y\n');
+      await terminal.waitFor(/Enter: done · o: open q\.qq\.com in the browser · q: quit /);
+      terminal.stdin.write('\n');
+      await terminal.waitFor(
+        /Scan the QR code above with QQ on your phone:\n {2}m: type them in instead · q: quit $/,
+      );
+      terminal.stdin.write('q\n');
+      expect(await pending).toBe(0);
+      const all = terminal.out + terminal.err;
+      expect(all).toContain('the next step gets its AppID and AppSecret with a scan');
+      expect(all).toContain(`The scan page says ${QQ_CONSOLE_ZH.thirdParty} ("third-party bot")`);
+      expect(all).toContain("Tencent's QR connector (closed source)");
+      expect(all).toContain('Quit; nothing was saved.');
+      let rest = all;
+      for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏'])
+        rest = rest.replaceAll(word, '');
+      expect(noChinese(rest)).toBe('');
+      expect(await processGone(child.record().pid)).toBe(true);
+    } finally {
+      QQ_CONNECT_TEST.child = '';
+      setEnv({ YOMI_QQ_API_ORIGIN: undefined });
+    }
   });
 
   it('has the relay speak English in Telegram and serves the callback pages in English', async () => {

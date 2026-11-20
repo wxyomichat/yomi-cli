@@ -8,9 +8,11 @@ import { main } from '../src/cli.js';
 import { currentLanguage } from '../src/core/device.js';
 import { setLanguage } from '../src/core/i18n.js';
 import { MOCK_NPCS, type MockServer, startMockServer } from '../src/mock/server.js';
+import { QQ_CONNECT_TEST } from '../src/relay/channels/qq-connect.js';
 import { QQ_CONSOLE_ZH } from '../src/relay/channels/qq-guide.js';
 import { COMMANDS, relayCommands, relayTexts } from '../src/relay/texts.js';
 import { authorizeLikeTheBrowser } from './helpers/authorize.js';
+import { fakeConnectChild, processGone, SCAN_URL } from './helpers/fake-connect.js';
 import { memoryIo } from './helpers/io.js';
 
 /**
@@ -80,6 +82,8 @@ const CASES = [
     step: 'Paso 3 de 7 · Escribe el AppID y el AppSecret',
     appId: /AppID \(solo se muestran los dígitos\):/,
     quit: 'Saliste; no se guardó nada.',
+    scan: /Escanea el código QR de arriba con QQ en tu teléfono:\n {2}m: escribirlos a mano · q: salir $/,
+    thirdParty: 'La página del escaneo dice',
   },
   {
     lang: 'pt',
@@ -91,6 +95,8 @@ const CASES = [
     step: 'Passo 3 de 7 · Digite o AppID e o AppSecret',
     appId: /AppID \(só os dígitos aparecem\):/,
     quit: 'Você saiu; nada foi salvo.',
+    scan: /Escaneie o código QR acima com o QQ no celular:\n {2}m: digitar manualmente · q: sair $/,
+    thirdParty: 'A página do escaneamento diz',
   },
 ] as const;
 
@@ -142,6 +148,42 @@ describe.each(CASES)('yomi in $lang', (c) => {
     let rest = all;
     for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏']) rest = rest.replaceAll(word, '');
     expect(rest.search(CJK)).toBe(-1);
+  });
+
+  it('offers the QR scan in that language', async () => {
+    // A fake of Tencent's connector, against a loopback QQ address: nothing leaves this computer.
+    const child = fakeConnectChild(work, `scan-${c.lang}`, [
+      { send: { type: 'qr', url: SCAN_URL } },
+    ]);
+    QQ_CONNECT_TEST.child = child.path;
+    setEnv({ YOMI_QQ_API_ORIGIN: 'http://127.0.0.1:9' });
+    try {
+      const terminal = memoryIo({ interactive: true });
+      const pending = main(
+        ['relay', '--setup', '--allow-file-store', '--lang', c.lang],
+        terminal.io,
+      );
+      await terminal.waitFor(/\(.*\):\n$/);
+      terminal.stdin.write(`${MOCK_NPCS.single}\n`);
+      await terminal.waitFor(/\[y\/n\] $/);
+      terminal.stdin.write('y\n');
+      await terminal.waitFor(/ · q: (salir|sair) $/);
+      terminal.stdin.write('\n');
+      await terminal.waitFor(c.scan);
+      terminal.stdin.write('q\n');
+      expect(await pending).toBe(0);
+      const all = terminal.out + terminal.err;
+      expect(all).toContain(`${c.thirdParty} ${QQ_CONSOLE_ZH.thirdParty}`);
+      expect(all).toContain(c.quit);
+      let rest = all;
+      for (const word of [...Object.values(QQ_CONSOLE_ZH), '林夏'])
+        rest = rest.replaceAll(word, '');
+      expect(rest.search(CJK)).toBe(-1);
+      expect(await processGone(child.record().pid)).toBe(true);
+    } finally {
+      QQ_CONNECT_TEST.child = '';
+      setEnv({ YOMI_QQ_API_ORIGIN: undefined });
+    }
   });
 
   it('prints its help in that language', async () => {

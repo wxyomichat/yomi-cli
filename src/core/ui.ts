@@ -152,3 +152,39 @@ export async function confirm(io: Io, question: string, expected = 'y'): Promise
   if (expected === 'y') return answer === 'y' || answer === 'yes';
   return answer === expected.toLowerCase();
 }
+
+/** East Asian wide and fullwidth code points (Hangul, CJK, kana, fullwidth forms): two columns each. */
+const WIDE: readonly [number, number][] = [
+  [0x1100, 0x115f],
+  [0x2e80, 0x303e],
+  [0x3041, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x20000, 0x3fffd],
+];
+
+const columnsOf = (character: string) => {
+  const code = character.codePointAt(0) ?? 0;
+  return WIDE.some(([from, to]) => code >= from && code <= to) ? 2 : 1;
+};
+
+/**
+ * How many terminal rows `text` takes on a terminal `columns` wide: a line longer than the
+ * terminal wraps, and a wide character takes two columns. Colour codes take none.
+ */
+export function terminalRows(text: string, columns: number | undefined): number {
+  let rows = 0;
+  for (const line of text.split('\n')) {
+    const plain = line.replace(/\u001b\[[0-9;]*m/g, '');
+    let width = 0;
+    for (const character of plain) width += columnsOf(character);
+    rows += columns && columns > 0 && width > columns ? Math.ceil(width / columns) : 1;
+  }
+  return rows;
+}

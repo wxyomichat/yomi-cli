@@ -7,6 +7,7 @@ import { paint, say } from '../core/ui.js';
 import { VERSION } from '../core/version.js';
 import { channelSetup } from '../relay/channels/index.js';
 import type { QqApi } from '../relay/channels/qq-api.js';
+import { connectChild } from '../relay/channels/qq-connect.js';
 import {
   acceptedText,
   askApp,
@@ -83,8 +84,9 @@ import {
 /**
  * `yomi relay --setup` (QQ, design "QQ guided setup"): the steps from nothing to a paired QQ bot
  * in this terminal, numbered, each said with what to do on q.qq.com and QQ's own link (`o` opens
- * it): choose the character, create the bot, type its AppID and AppSecret (checked with QQ), one
- * check of the gateway and the bot saved, how it runs from then on (this terminal, the background
+ * it): choose the character, create the bot, its AppID and AppSecret (a scan with QQ on the
+ * phone, Tencent's connector run in a child process; or typed) checked with QQ, one check of the
+ * gateway and the bot saved, how it runs from then on (this terminal, the background
  * service, later), adding it as a QQ friend, then connecting and pairing in this same process, the
  * guide saying what the answer to the pairing came to in QQ. Leaving at any step keeps what was
  * saved, and `--setup` again goes on from the registry alone (`decide`); a bot set up already has
@@ -627,7 +629,7 @@ function setupSteps(
         ),
       finished: (state) => Boolean(state.record || state.app),
       run: async (_state, ui) => {
-        ui.lines(...createLines());
+        ui.lines(...createLines(Boolean(connectChild())));
         await ui.checkpoint(QQ_LINKS.console);
       },
     },
@@ -849,8 +851,10 @@ async function bindCharacter(
 // Step 3 ------------------------------------------------------------------------------------------
 
 /**
- * The AppID and AppSecret (the AppID of a bot saved already is its own), checked with QQ. An
- * AppID registered already is offered to be set again instead (its AppSecret checked as typed).
+ * The AppID and AppSecret, checked with QQ: a new bot's from a scan with QQ on the phone first
+ * (`scannedApp`), typed when there is no scan, it is given up or it fails, or QQ refuses what it
+ * gave; a bot saved already has its own AppID, and only the AppSecret is typed. An AppID registered
+ * already is offered to be set again instead (its AppSecret checked as it came).
  */
 async function enterCredentials(
   context: Context,
@@ -858,10 +862,14 @@ async function enterCredentials(
   ui: GuideUi,
 ): Promise<StepResult> {
   const fixed = state.record?.platformId ?? '';
-  ui.lines(...credentialsLines(fixed));
-  let scanned = fixed ? 'manual' : await scannedApp();
+  let scanned: QqApp | 'manual' = fixed ? 'manual' : await scannedApp(ui);
+  let told = false;
   let previous = '';
   for (;;) {
+    if (scanned === 'manual' && !told) {
+      ui.lines(...credentialsLines(fixed));
+      told = true;
+    }
     const app = scanned === 'manual' ? await askApp(ui, fixed, previous) : scanned;
     scanned = 'manual';
     let switched = false;

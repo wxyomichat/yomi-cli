@@ -4,7 +4,7 @@ import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
 import { sha256 } from '../../core/state.js';
 import { readLine } from '../../core/prompt.js';
-import { confirm, type Io, paint, say, warn } from '../../core/ui.js';
+import { confirm, type Io, paint, say, terminalRows, warn } from '../../core/ui.js';
 import type { BotRecord } from '../registry.js';
 import type { RelayCharacter } from '../state.js';
 import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
@@ -42,6 +42,9 @@ import {
  * keeps their budget, pending charge and records); another scanner of the same bot replaces its
  * owner, whose budget and records go.
  */
+
+/** In core/ui.ts now (the guide's QR code counts rows too); still here for its importers. */
+export { terminalRows };
 
 /** What `--login` keeps in the keychain (design §5.3). */
 export type WechatCredentials = {
@@ -120,42 +123,6 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     const timer = setTimeout(done, ms);
     signal?.addEventListener('abort', done, { once: true });
   });
-
-/** East Asian wide and fullwidth code points (Hangul, CJK, kana, fullwidth forms): two columns each. */
-const WIDE: readonly [number, number][] = [
-  [0x1100, 0x115f],
-  [0x2e80, 0x303e],
-  [0x3041, 0x33ff],
-  [0x3400, 0x4dbf],
-  [0x4e00, 0x9fff],
-  [0xa000, 0xa4cf],
-  [0xac00, 0xd7a3],
-  [0xf900, 0xfaff],
-  [0xfe30, 0xfe4f],
-  [0xff00, 0xff60],
-  [0xffe0, 0xffe6],
-  [0x20000, 0x3fffd],
-];
-
-const columnsOf = (character: string) => {
-  const code = character.codePointAt(0) ?? 0;
-  return WIDE.some(([from, to]) => code >= from && code <= to) ? 2 : 1;
-};
-
-/**
- * How many terminal rows `text` takes on a terminal `columns` wide: a line longer than the
- * terminal wraps, and a wide character takes two columns. Colour codes take none.
- */
-export function terminalRows(text: string, columns: number | undefined): number {
-  let rows = 0;
-  for (const line of text.split('\n')) {
-    const plain = line.replace(/\u001b\[[0-9;]*m/g, '');
-    let width = 0;
-    for (const character of plain) width += columnsOf(character);
-    rows += columns && columns > 0 && width > columns ? Math.ceil(width / columns) : 1;
-  }
-  return rows;
-}
 
 const cancelled = () =>
   new UsageError(

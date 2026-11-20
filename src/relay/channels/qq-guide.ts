@@ -1,15 +1,26 @@
 import { UsageError } from '../../core/env.js';
 import { tr } from '../../core/i18n.js';
-import { terminalText } from '../../core/ui.js';
+import { paint, terminalText } from '../../core/ui.js';
 import { GUIDE_TIMINGS, GuideCancelled, type GuideUi } from '../guide/steps.js';
 import { type QqApi, QqError } from './qq-api.js';
+import {
+  APP_ID,
+  APP_SECRET,
+  connectChild,
+  type ScanEvent,
+  type ScanFailure,
+  startScan,
+} from './qq-connect.js';
 import { probeGatewayDetail } from './qq-gateway.js';
+import { encodeQr, QrTooLong, qrWidth, renderQr } from './qr.js';
 
 /**
  * QQ's part of `yomi relay --setup` (commands/relay-setup.ts): what to do on q.qq.com, step by
  * step and with QQ's own links (create the bot, copy its AppID and AppSecret, add it as a friend,
  * reset its AppSecret), the AppID and AppSecret typed and checked with QQ, and the one check of
- * the gateway that the bot receives private chats, within QQ's daily connections. The console's
+ * the gateway that the bot receives private chats, within QQ's daily connections. The AppID and
+ * AppSecret of a new bot come first from a scan with QQ on the phone (Tencent's QR connector, in a
+ * child process of its own: qq-connect.ts), typed when the scan is given up or fails. The console's
  * names are QQ's Chinese ones in every language (`QQ_CONSOLE_ZH`), with a translation after them
  * outside Chinese: the console has no other language to point at.
  */
@@ -34,6 +45,8 @@ export const QQ_CONSOLE_ZH = {
   addUser: '「+ 添加用户」',
   online: '「在线」',
   mars: '「该机器人去火星了」',
+  /** How the scan page names whoever asks (yomi here), unless Tencent agreed another name. */
+  thirdParty: '「第三方机器人」',
 } as const;
 
 const Z = QQ_CONSOLE_ZH;
@@ -56,8 +69,10 @@ export type QqApp = { appId: string; secret: string };
 /** How many times one run may ask QQ for a token with what was typed. */
 export const TOKEN_CHECKS_MAX = 5;
 
-/** Step 2: creating the bot on q.qq.com (or checking one that exists). */
-export function createLines(): string[] {
+/**
+ * Step 2: creating the bot on q.qq.com (or checking one that exists). `scan`: step 3 scans first.
+ */
+export function createLines(scan = false): string[] {
   return [
     tr(
       '建议新建一个只给 relay 用的机器人。',
@@ -83,12 +98,19 @@ export function createLines(): string[] {
       `3. Completa el avatar, el apodo y la presentación (todo se puede cambiar después) y haz clic en ${Z.createButton} (Crear bot). No uses el nombre ni la foto de otra persona (normas de uso: ${QQ_LINKS.rules}). Una persona verificada puede crear hasta 5 bots; si la plataforma pide una verificación, sigue sus pasos.`,
       `3. Preencha o avatar, o apelido e a apresentação (tudo pode ser mudado depois) e clique em ${Z.createButton} (Criar bot). Não use o nome nem a foto de outra pessoa (regras de uso: ${QQ_LINKS.rules}). Uma pessoa verificada pode criar até 5 bots; se a plataforma pedir uma verificação, siga as instruções dela.`,
     ),
-    tr(
-      `4. 创建后会进入${Z.aiService}页。不要在这页连接别的 AI 服务：同一个机器人接到两处，消息会被那边收走。下一步要从这页复制参数，先别离开。`,
-      `4. You land on ${Z.aiService} (Set up AI service). Don't connect another AI service there: a bot connected in two places loses messages to the other one. Stay on this page; the next step copies from it.`,
-      `4. Llegas a ${Z.aiService} (Configurar servicio de IA). No conectes otro servicio de IA ahí: si un bot está conectado en dos lugares, el otro se queda con los mensajes. Quédate en esta página; el siguiente paso copia datos de ella.`,
-      `4. Você chega em ${Z.aiService} (Configurar serviço de IA). Não conecte outro serviço de IA ali: um bot conectado em dois lugares perde mensagens para o outro. Fique nesta página; o próximo passo copia dados dela.`,
-    ),
+    scan
+      ? tr(
+          `4. 创建后会进入${Z.aiService}页。不要在这页连接别的 AI 服务：同一个机器人接到两处，消息会被那边收走。下一步用手机 QQ 扫码取得参数（扫不了的话，再从这页复制），先别离开。`,
+          `4. You land on ${Z.aiService} (Set up AI service). Don't connect another AI service there: a bot connected in two places loses messages to the other one. Stay on this page: the next step gets its AppID and AppSecret with a scan with QQ on your phone (or, if that doesn't work, copies them from here).`,
+          `4. Llegas a ${Z.aiService} (Configurar servicio de IA). No conectes otro servicio de IA ahí: si un bot está conectado en dos lugares, el otro se queda con los mensajes. Quédate en esta página: el siguiente paso obtiene su AppID y su AppSecret escaneando un código con QQ en tu teléfono (o, si eso no funciona, los copia de aquí).`,
+          `4. Você chega em ${Z.aiService} (Configurar serviço de IA). Não conecte outro serviço de IA ali: um bot conectado em dois lugares perde mensagens para o outro. Fique nesta página: o próximo passo obtém o AppID e o AppSecret dele escaneando um código com o QQ no celular (ou, se isso não funcionar, copia os dois daqui).`,
+        )
+      : tr(
+          `4. 创建后会进入${Z.aiService}页。不要在这页连接别的 AI 服务：同一个机器人接到两处，消息会被那边收走。下一步要从这页复制参数，先别离开。`,
+          `4. You land on ${Z.aiService} (Set up AI service). Don't connect another AI service there: a bot connected in two places loses messages to the other one. Stay on this page; the next step copies from it.`,
+          `4. Llegas a ${Z.aiService} (Configurar servicio de IA). No conectes otro servicio de IA ahí: si un bot está conectado en dos lugares, el otro se queda con los mensajes. Quédate en esta página; el siguiente paso copia datos de ella.`,
+          `4. Você chega em ${Z.aiService} (Configurar serviço de IA). Não conecte outro serviço de IA ali: um bot conectado em dois lugares perde mensagens para o outro. Fique nesta página; o próximo passo copia dados dela.`,
+        ),
     tr(
       `已经有机器人：打开它的${Z.devSettings}，确认三件事：`,
       `Already have a bot: open its ${Z.devSettings} (Development settings) and check three things:`,
@@ -154,11 +176,192 @@ export function credentialsLines(appId: string): string[] {
   ];
 }
 
+/** Step 3's scan: what it is, before the code. */
+export function scanLines(): string[] {
+  return [
+    tr(
+      '用手机 QQ 扫下面的二维码，按手机上的提示选择这个机器人并确认：yomi 就拿到了它的 AppID 和 AppSecret，不用复制粘贴，AppSecret 也不会显示出来。',
+      "Scan the QR code below with QQ on your phone, then choose this bot and confirm as your phone asks: yomi then has its AppID and AppSecret, with nothing to copy and paste, and the AppSecret isn't shown.",
+      'Escanea el código QR de abajo con QQ en tu teléfono y luego elige este bot y confirma como te indique el teléfono: así yomi obtiene su AppID y su AppSecret, sin copiar ni pegar nada, y el AppSecret no se muestra.',
+      'Escaneie o código QR abaixo com o QQ no celular e depois escolha este bot e confirme como o celular pedir: assim o yomi recebe o AppID e o AppSecret dele, sem copiar e colar nada, e o AppSecret não aparece.',
+    ),
+    tr(
+      `扫码页上会显示${Z.thirdParty}：那就是这里的 yomi。二维码来自腾讯的扫码组件（不开源）。它在单独的进程里运行：yomi 不把你的 Yomi 设置和登录信息交给它，它的输出也不接到终端。不过它仍以你的系统用户身份运行，并不是沙箱。`,
+      `The scan page says ${Z.thirdParty} ("third-party bot"): that is yomi, here. The code comes from Tencent's QR connector (closed source). It runs in a process of its own: yomi doesn't hand it your Yomi settings or sign-in, and its output doesn't reach the terminal. It still runs as your user, though, so it isn't a sandbox.`,
+      `La página del escaneo dice ${Z.thirdParty} ("bot de terceros"): ese es yomi, aquí. El código viene del conector QR de Tencent (código cerrado). Se ejecuta en un proceso aparte: yomi no le pasa tu configuración ni tu sesión de Yomi, y su salida no llega a la terminal. Aun así, se ejecuta con tu usuario, así que no es un entorno aislado (sandbox).`,
+      `A página do escaneamento diz ${Z.thirdParty} ("bot de terceiros"): esse é o yomi, aqui. O código vem do conector QR da Tencent (código fechado). Ele roda em um processo separado: o yomi não passa para ele as suas configurações nem a sua sessão do Yomi, e a saída dele não chega ao terminal. Mesmo assim, ele roda com o seu usuário, então não é um ambiente isolado (sandbox).`,
+    ),
+  ];
+}
+
+/** Draws the scan's code (its link when it cannot be drawn here), then what to do with it. */
+function showCode(ui: GuideUi, url: string, count: number) {
+  let drawn = false;
+  try {
+    const modules = encodeQr(url);
+    const columns = (ui.io.stdout as { columns?: number }).columns;
+    if (!columns || columns >= qrWidth(modules.length)) {
+      for (const line of renderQr(modules, ui.io.colour)) ui.say(line);
+      drawn = true;
+    }
+  } catch (error) {
+    if (!(error instanceof QrTooLong)) throw error;
+  }
+  ui.lines(
+    count > 1
+      ? tr(
+          `二维码过期了，换了一个新的（第 ${count} 个）。用手机 QQ 扫码：`,
+          `The QR code expired; here is a new one (number ${count}). Scan it with QQ on your phone:`,
+          `El código QR expiró; aquí hay uno nuevo (número ${count}). Escanéalo con QQ en tu teléfono:`,
+          `O código QR expirou; aqui está um novo (número ${count}). Escaneie com o QQ no celular:`,
+        )
+      : tr(
+          '用手机 QQ 扫上面的二维码：',
+          'Scan the QR code above with QQ on your phone:',
+          'Escanea el código QR de arriba con QQ en tu teléfono:',
+          'Escaneie o código QR acima com o QQ no celular:',
+        ),
+  );
+  if (drawn) return;
+  ui.lines(
+    paint(
+      ui.io,
+      'yellow',
+      tr(
+        '终端太窄，画不下二维码：把窗口拉宽一些（下一个二维码会画出来），或者在手机 QQ 里打开下面的链接，或者按 m 改为手动输入。',
+        'The terminal is too narrow to draw the QR code: make the window wider (the next code will be drawn), open the link below in QQ on your phone, or press m to type them in instead.',
+        'La terminal es demasiado estrecha para dibujar el código QR: ensancha la ventana (el próximo código se dibujará), abre el enlace de abajo en QQ en tu teléfono o presiona m para escribirlos a mano.',
+        'O terminal é estreito demais para desenhar o código QR: deixe a janela mais larga (o próximo código será desenhado), abra o link abaixo no QQ do celular ou pressione m para digitar manualmente.',
+      ),
+    ),
+    url,
+  );
+}
+
+/** Why the scan was given up, before the AppID and AppSecret are typed. */
+function scanFailedText(why: ScanFailure): string {
+  const then = tr(
+    '改为手动输入。',
+    'Type them in instead.',
+    'Escríbelos a mano.',
+    'Digite os dois manualmente.',
+  );
+  switch (why) {
+    case 'load':
+      return tr(
+        `没能启动腾讯的扫码组件。${then}`,
+        `Tencent's QR connector couldn't be started. ${then}`,
+        `No se pudo iniciar el conector QR de Tencent. ${then}`,
+        `Não foi possível iniciar o conector QR da Tencent. ${then}`,
+      );
+    case 'service':
+    case 'start':
+      return tr(
+        `没能拿到二维码（网络，或者腾讯的扫码服务暂时不可用）。${then}`,
+        `Couldn't get a QR code (the network, or Tencent's scan service is unavailable for now). ${then}`,
+        `No se pudo obtener un código QR (la red, o el servicio de escaneo de Tencent no está disponible por ahora). ${then}`,
+        `Não foi possível obter um código QR (a rede, ou o serviço de escaneamento da Tencent está indisponível no momento). ${then}`,
+      );
+    case 'timeout':
+      return tr(
+        `扫码超时了。${then}`,
+        `The scan timed out. ${then}`,
+        `Se agotó el tiempo del escaneo. ${then}`,
+        `O tempo do escaneamento acabou. ${then}`,
+      );
+    case 'crash':
+      return tr(
+        `腾讯的扫码组件意外退出了。${then}`,
+        `Tencent's QR connector stopped unexpectedly. ${then}`,
+        `El conector QR de Tencent se detuvo inesperadamente. ${then}`,
+        `O conector QR da Tencent parou inesperadamente. ${then}`,
+      );
+    case 'invalid':
+      return tr(
+        `腾讯的扫码组件发来了不该有的内容，已经停掉它。${then}`,
+        `Tencent's QR connector sent something it shouldn't, so it was stopped. ${then}`,
+        `El conector QR de Tencent envió algo que no debía, así que se detuvo. ${then}`,
+        `O conector QR da Tencent enviou algo que não devia, então foi parado. ${then}`,
+      );
+  }
+}
+
 /**
- * Step 3's other way to the AppID and AppSecret, Tencent's QR connector (scan with QQ on the
- * phone, choose the bot): not in this version, so always 'manual' (they are typed).
+ * Step 3's scan (a new bot): QQ on the phone scans a code from Tencent's QR connector, run in a
+ * child process (qq-connect.ts), and the bot chosen comes back as its AppID and AppSecret. The code
+ * is drawn here and erased from the terminal when the scan ends; `m` gives it up for typing them,
+ * `q` quits, Ctrl+C cancels, and every way it ends kills the child. 'manual' when they are to be
+ * typed: no scan here (`connectChild`), `m`, or a scan that failed (said why).
  */
-export async function scannedApp(): Promise<QqApp | 'manual'> {
+export async function scannedApp(ui: GuideUi): Promise<QqApp | 'manual'> {
+  const child = connectChild();
+  if (!child) return 'manual';
+  ui.lines(...scanLines());
+  const prompt = tr(
+    'm：改为手动输入 · q：退出 ',
+    'm: type them in instead · q: quit ',
+    'm: escribirlos a mano · q: salir ',
+    'm: digitar manualmente · q: sair ',
+  );
+  const scan = startScan(child, {
+    startMs: GUIDE_TIMINGS.scanStartMs,
+    overallMs: GUIDE_TIMINGS.scanMs,
+  });
+  const region = ui.region();
+  let end: ScanEvent | 'manual';
+  try {
+    let url = '';
+    let count = 0;
+    let event = scan.next();
+    for (;;) {
+      region.clear();
+      if (url) showCode(ui, url, count);
+      else
+        ui.lines(
+          tr(
+            '正在准备二维码……',
+            'Getting a QR code…',
+            'Obteniendo un código QR…',
+            'Obtendo um código QR…',
+          ),
+        );
+      const interrupt = new AbortController();
+      const key = ui.keyUntil(prompt, ['m', 'q'], interrupt.signal);
+      const first = await Promise.race([
+        event.then((value) => ({ value })),
+        key.then((pressed) => ({ pressed })),
+      ]);
+      if ('pressed' in first) {
+        if (first.pressed === 'q') throw new GuideCancelled('quit');
+        end = 'manual';
+        break;
+      }
+      interrupt.abort();
+      await key;
+      if (first.value.kind !== 'qr') {
+        end = first.value;
+        break;
+      }
+      url = first.value.url;
+      count += 1;
+      event = scan.next();
+    }
+  } finally {
+    scan.stop();
+    region.close();
+  }
+  if (end !== 'manual' && end.kind === 'credentials') {
+    ui.ok(
+      tr(
+        `扫码完成：AppID ${end.app.appId}`,
+        `Scanned: AppID ${end.app.appId}`,
+        `Escaneado: AppID ${end.app.appId}`,
+        `Escaneado: AppID ${end.app.appId}`,
+      ),
+    );
+    return end.app;
+  }
+  if (end !== 'manual' && end.kind === 'failed') ui.fail(scanFailedText(end.why));
   return 'manual';
 }
 
@@ -185,7 +388,7 @@ export async function askApp(ui: GuideUi, appId: string, previous = ''): Promise
   while (!id) {
     const typed = await ui.masked(prompt);
     if (!typed && previous) id = previous;
-    else if (/^[0-9]{5,20}$/.test(typed)) id = typed;
+    else if (APP_ID.test(typed)) id = typed;
     else
       prompt = tr(
         '这不像 QQ 机器人的 AppID（5 到 20 位数字）。再输一次：',
@@ -202,7 +405,7 @@ export async function askApp(ui: GuideUi, appId: string, previous = ''): Promise
   );
   for (;;) {
     const secret = await ui.hidden(prompt);
-    if (/^[\x21-\x7e]{8,128}$/.test(secret)) return { appId: id, secret };
+    if (APP_SECRET.test(secret)) return { appId: id, secret };
     prompt = tr(
       '这不像 AppSecret（8 到 128 个字母、数字或符号，不能有空格）。再输一次：',
       "That doesn't look like an AppSecret (8 to 128 letters, digits or symbols, no spaces). Try again:",

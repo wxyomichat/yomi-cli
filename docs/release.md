@@ -35,6 +35,10 @@ For the maintainer. The CLI is published to the public npm registry as `@yomicha
    rm -rf "$tmp"
    ```
 
+## Runtime dependencies
+
+Users install without the lockfile, so every runtime dependency in `package.json` is pinned to an exact version. That includes `qrcode-terminal`: yomi never imports it, but `@tencent-connect/qqbot-connector` (closed source, run only in the scan's child process) asks for `^0.12`, and the exact pin at the top keeps npm on the version that was checked. Before adding or bumping one, check that `npm view <name>@<version> scripts` has no `preinstall`, `install` or `postinstall`.
+
 ## A bad release
 
 A published version number can never be reused, so fix forward with a new patch version. Until it is out:

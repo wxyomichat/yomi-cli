@@ -8,7 +8,7 @@ import {
   readMasked,
   SecretInputCancelled,
 } from '../../core/prompt.js';
-import { type Io, paint, say } from '../../core/ui.js';
+import { type Io, paint, terminalRows } from '../../core/ui.js';
 
 /**
  * The step engine of `yomi relay --setup` (commands/relay-setup.ts): numbered steps ("Step 3 of
@@ -18,7 +18,8 @@ import { type Io, paint, say } from '../../core/ui.js';
  * without echo (the AppSecret). Ctrl+C cancels the guide wherever it is: as a byte in raw mode, as
  * SIGINT otherwise (the guide's own listener, taken away while a login, a change with the
  * background service stopped or a relay run handle SIGINT themselves: `outside`); `q` quits.
- * What was pasted at a prompt that does not take a secret is never shown, and said.
+ * What was pasted at a prompt that does not take a secret is never shown, and said. What the guide
+ * writes in a `region` can be erased from a terminal (a QR code, once scanned or given up).
  */
 
 /** The guide's timings (tests shrink them). */
@@ -31,6 +32,10 @@ export const GUIDE_TIMINGS = {
   pasteChars: 3,
   /** After a paste at a key prompt, what comes before the input was this long quiet is its rest. */
   pasteQuietMs: 250,
+  /** Step 3's scan: no QR code from Tencent's connector this long after it started is a failure. */
+  scanStartMs: 20_000,
+  /** Step 3's scan: not scanned this long after it started, the AppID and AppSecret are typed. */
+  scanMs: 5 * 60_000,
 };
 
 /** The guide ends before its last step: Ctrl+C ('interrupt', exit 130) or `q` ('quit', exit 0). */
@@ -119,11 +124,24 @@ function pastedKeyText(): string {
   );
 }
 
+/** What the guide wrote since a region began: whole terminal rows, and the line it is on. */
+type Written = { rows: number; line: string };
+
+/** Lines the guide wrote that it can take back from the terminal (`GuideUi.region`). */
+export type GuideRegion = {
+  /** Erases what was written in the region so far (at a terminal); the region goes on. */
+  clear(): void;
+  /** Erases it, and ends the region. */
+  close(): void;
+};
+
 /** The guide's terminal: what it says, and its prompts. */
 export class GuideUi {
   private readonly controller = new AbortController();
   private listening = false;
   private readonly onSignal = () => this.controller.abort();
+  /** What was written since the open region began (null: no region). */
+  private written: Written | null = null;
   /** Lines said as notes (and the policy's warning): a run's log says them once. */
   readonly notes = new Set<string>();
 
@@ -163,8 +181,43 @@ export class GuideUi {
     if (this.signal.aborted) throw new GuideCancelled('interrupt');
   }
 
+  /** Writes to stdout, counted while a region is open. */
+  write(text: string) {
+    this.io.stdout.write(text);
+    const written = this.written;
+    if (!written) return;
+    const parts = (written.line + text).split('\n');
+    written.line = parts.pop() ?? '';
+    const columns = (this.io.stdout as { columns?: number }).columns;
+    for (const part of parts) written.rows += terminalRows(part, columns);
+  }
+
   say(line = '') {
-    say(this.io, line);
+    this.write(`${line}\n`);
+  }
+
+  /**
+   * From here on, what the guide writes is counted, so it can be erased from a terminal (rows that
+   * scrolled out of it are out of reach). Elsewhere (a pipe, a test) nothing is erased.
+   */
+  region(): GuideRegion {
+    this.written = { rows: 0, line: '' };
+    const clear = () => {
+      const written = this.written;
+      if (!written) return;
+      this.written = { rows: 0, line: '' };
+      if (!(this.io.stdout as { isTTY?: boolean }).isTTY) return;
+      const columns = (this.io.stdout as { columns?: number }).columns;
+      const up = written.rows + (written.line ? terminalRows(written.line, columns) - 1 : 0);
+      if (up || written.line) this.io.stdout.write(`\r${up ? `\u001b[${up}A` : ''}\u001b[J`);
+    };
+    return {
+      clear,
+      close: () => {
+        clear();
+        this.written = null;
+      },
+    };
   }
 
   /** Lines of the step, indented. */
@@ -210,22 +263,43 @@ export class GuideUi {
    * pressed (an answer), else only the line ends.
    */
   async key(prompt: string, keys: readonly string[], echo = false): Promise<string> {
-    const show = () => this.io.stdout.write(`  ${prompt}`);
+    return (await this.readKey(prompt, keys, echo)) as string;
+  }
+
+  /**
+   * One key of `keys` after `prompt`, not echoed, unless `until` aborts first (something else
+   * happened meanwhile): null then. The line ends either way.
+   */
+  keyUntil(prompt: string, keys: readonly string[], until: AbortSignal): Promise<string | null> {
+    return this.readKey(prompt, keys, false, until);
+  }
+
+  private async readKey(
+    prompt: string,
+    keys: readonly string[],
+    echo: boolean,
+    until?: AbortSignal,
+  ): Promise<string | null> {
+    const show = () => this.write(`  ${prompt}`);
     try {
       const key = await readKey(this.io, keys, {
-        signal: this.signal,
+        signal: until ? AbortSignal.any([this.signal, until]) : this.signal,
         pasteChars: GUIDE_TIMINGS.pasteChars,
         pasteQuietMs: GUIDE_TIMINGS.pasteQuietMs,
         before: show,
         onPaste: (text) => {
-          this.io.stdout.write('\n');
+          this.write('\n');
           this.pasted(looksLikeSecret(text));
           show();
         },
       });
-      this.io.stdout.write(echo && key !== '\r' ? `${key}\n` : '\n');
+      this.write(echo && key !== '\r' ? `${key}\n` : '\n');
       return key;
     } catch (error) {
+      if (until?.aborted && !this.signal.aborted && error instanceof SecretInputCancelled) {
+        this.write('\n');
+        return null;
+      }
       throw cancelled(error);
     }
   }
